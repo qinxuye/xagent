@@ -46,6 +46,80 @@ class CreateAgentToolResult(BaseModel):
     message: str = Field(description="Detailed message about the created agent")
 
 
+class UpdateAgentToolArgs(BaseModel):
+    """Arguments for updating an existing agent."""
+
+    agent_id: int = Field(description="ID of the agent to update")
+    name: Optional[str] = Field(
+        default=None, description="New name for the agent (optional)"
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="New description of when to use this agent (optional)",
+    )
+    instructions: Optional[str] = Field(
+        default=None,
+        description="New system instructions/prompt for the agent (optional)",
+    )
+    tool_categories: Optional[list[str]] = Field(
+        default=None,
+        description="New list of tool categories to allow (optional). If None, existing value is kept",
+    )
+    skills: Optional[list[str]] = Field(
+        default=None,
+        description="New list of skill names to allow (optional). If None, existing value is kept",
+    )
+
+
+class UpdateAgentToolResult(BaseModel):
+    """Result from updating an agent."""
+
+    agent_id: int = Field(description="The ID of the updated agent")
+    agent_name: str = Field(description="The name of the updated agent")
+    tool_name: str = Field(
+        description="The tool name that can be used to call this agent"
+    )
+    markdown_link: str = Field(
+        description="Markdown link to the agent (e.g., '[Agent Name](agent://123)')"
+    )
+    status: str = Field(description="Update status")
+    message: str = Field(description="Detailed message about the updated agent")
+
+
+class ListAgentsToolArgs(BaseModel):
+    """Arguments for listing agents."""
+
+    status_filter: Optional[str] = Field(
+        default=None,
+        description="Filter by agent status: 'draft', 'published', or 'archived'. If None, shows all agents",
+    )
+
+
+class AgentInfo(BaseModel):
+    """Information about a single agent."""
+
+    agent_id: int = Field(description="Agent ID")
+    name: str = Field(description="Agent name")
+    description: str = Field(description="Agent description")
+    status: str = Field(description="Agent status: draft, published, or archived")
+    tool_name: str = Field(description="Tool name to call this agent")
+    markdown_link: str = Field(description="Markdown link to the agent")
+    execution_mode: str = Field(description="Execution mode: react or graph")
+    tool_categories: Optional[list[str]] = Field(
+        default=None, description="Allowed tool categories"
+    )
+    skills: Optional[list[str]] = Field(default=None, description="Allowed skills")
+
+
+class ListAgentsToolResult(BaseModel):
+    """Result from listing agents."""
+
+    agents: list[AgentInfo] = Field(description="List of agents")
+    total_count: int = Field(description="Total number of agents")
+    status: str = Field(description="List status")
+    message: str = Field(description="Detailed message")
+
+
 class AgentToolArgs(BaseModel):
     """Arguments for agent tool."""
 
@@ -297,6 +371,433 @@ class CreateAgentTool(AbstractBaseTool):
                 agent_name="",
                 tool_name="",
                 markdown_link="",
+                status="error",
+                message=error_msg,
+            ).model_dump()
+
+
+class UpdateAgentTool(AbstractBaseTool):
+    """
+    Tool for updating an existing draft agent during task execution.
+
+    This allows agents to dynamically update agents with specific capabilities
+    by modifying their name, description, instructions, and allowed tools/skills.
+    """
+
+    # Agent tools belong to the AGENT category
+    category: ToolCategory = ToolCategory.AGENT
+
+    def __init__(
+        self,
+        db: Any,
+        user_id: int,
+        task_id: Optional[str] = None,
+        workspace_base_dir: Optional[str] = None,
+    ):
+        """
+        Initialize the update agent tool.
+
+        Args:
+            db: Database session for updating the agent
+            user_id: User ID for ownership and access control
+            task_id: Task ID for context
+            workspace_base_dir: Base directory for workspace files
+        """
+        self._db = db
+        self._user_id = user_id
+        self._task_id = task_id
+        if workspace_base_dir is None:
+            workspace_base_dir = str(get_uploads_dir())
+        self._workspace_base_dir = workspace_base_dir
+        self._visibility = ToolVisibility.PUBLIC
+
+    @property
+    def name(self) -> str:
+        """Tool name."""
+        return "update_agent"
+
+    @property
+    def description(self) -> str:
+        """Tool description."""
+        # Get available tool categories
+        from .base import ToolCategory
+
+        available_categories = [cat.value for cat in ToolCategory]
+
+        # Get available skills (from builtin skills directory)
+        import os
+
+        skills_dir = os.path.join(
+            os.path.dirname(__file__), "../../../../skills/builtin"
+        )
+        available_skills = []
+        if os.path.exists(skills_dir):
+            for skill_dir in os.listdir(skills_dir):
+                skill_path = os.path.join(skills_dir, skill_dir)
+                if os.path.isdir(skill_path):
+                    available_skills.append(skill_dir)
+
+        skills_list = ", ".join(available_skills) if available_skills else "none"
+        categories_list = ", ".join(available_categories)
+
+        return (
+            "Update an existing agent with specific capabilities during task execution. "
+            "Only DRAFT agents can be updated - PUBLISHED agents must be edited through the web interface.\n\n"
+            "Parameters:\n"
+            "- agent_id: The ID of the agent to update (required)\n"
+            "- name (optional): New name for the agent\n"
+            "- description (optional): New description of when to use this agent\n"
+            f"- tool_categories (optional): Available categories: {categories_list}\n"
+            f"  Example: ['file', 'knowledge', 'basic']\n"
+            f"- skills (optional): Available skills: {skills_list}\n"
+            f"  Example: ['presentation-generator', 'poster-design']\n"
+            "- instructions (optional): New system prompt/instructions defining the agent's behavior\n\n"
+            "Returns:\n"
+            "- agent_id: Database ID of the updated agent\n"
+            "- agent_name: Name of the agent\n"
+            "- tool_name: Tool name that can be used to call this agent\n"
+            "- markdown_link: Markdown link in format [Agent Name](agent://agent_id)\n"
+            "- status: 'success' or 'error'\n"
+            "- message: Detailed information about the updated agent\n\n"
+            "IMPORTANT: Only agents in DRAFT status can be updated. "
+            "If you need to modify a PUBLISHED agent, create a new one or edit it through the web interface."
+        )
+
+    @property
+    def tags(self) -> list[str]:
+        """Tool tags."""
+        return ["agent", "update"]
+
+    def args_type(self) -> Type[BaseModel]:
+        """Argument type."""
+        return UpdateAgentToolArgs
+
+    def return_type(self) -> Type[BaseModel]:
+        """Return type."""
+        return UpdateAgentToolResult
+
+    def run_json_sync(self, args: Mapping[str, Any]) -> Any:
+        """Sync execution not supported."""
+        raise NotImplementedError("UpdateAgentTool only supports async execution.")
+
+    async def run_json_async(self, args: Mapping[str, Any]) -> Any:
+        """Update an existing agent with the given configuration."""
+        from .....web.models.agent import Agent, AgentStatus
+
+        try:
+            agent_id = args.get("agent_id")
+
+            if not agent_id:
+                return UpdateAgentToolResult(
+                    agent_id=0,
+                    agent_name="",
+                    tool_name="",
+                    markdown_link="",
+                    status="error",
+                    message="Error: Agent ID is required",
+                ).model_dump()
+
+            # Find the agent
+            agent = (
+                self._db.query(Agent)
+                .filter(Agent.id == agent_id, Agent.user_id == self._user_id)
+                .first()
+            )
+
+            if not agent:
+                return UpdateAgentToolResult(
+                    agent_id=0,
+                    agent_name="",
+                    tool_name="",
+                    markdown_link="",
+                    status="error",
+                    message=f"Error: Agent with ID {agent_id} not found",
+                ).model_dump()
+
+            # Check if agent is in DRAFT status
+            if agent.status != AgentStatus.DRAFT:
+                return UpdateAgentToolResult(
+                    agent_id=agent_id,
+                    agent_name=agent.name,
+                    tool_name=gen_agent_tool_name(agent.name),
+                    markdown_link=f"[{agent.name}](agent://{agent.id})",
+                    status="error",
+                    message=f"Error: Only DRAFT agents can be updated. This agent is {agent.status.value.upper()}. "
+                    f"To modify a published agent, please edit it through the web interface or create a new one.",
+                ).model_dump()
+
+            # Track changes
+            changes = []
+
+            # Update name if provided
+            new_name = args.get("name", "").strip() if args.get("name") else None
+            if new_name:
+                # Check for duplicate name (exclude current agent)
+                existing = (
+                    self._db.query(Agent)
+                    .filter(
+                        Agent.user_id == self._user_id,
+                        Agent.name == new_name,
+                        Agent.id != agent_id,
+                    )
+                    .first()
+                )
+                if existing:
+                    return UpdateAgentToolResult(
+                        agent_id=0,
+                        agent_name="",
+                        tool_name="",
+                        markdown_link="",
+                        status="error",
+                        message=f"Error: Agent with name '{new_name}' already exists",
+                    ).model_dump()
+                agent.name = new_name
+                changes.append(f"name → '{new_name}'")
+
+            # Update description if provided
+            new_description = (
+                args.get("description", "").strip() if args.get("description") else None
+            )
+            if new_description:
+                agent.description = new_description
+                changes.append("description updated")
+
+            # Update instructions if provided
+            new_instructions = (
+                args.get("instructions", "").strip()
+                if args.get("instructions")
+                else None
+            )
+            if new_instructions:
+                agent.instructions = new_instructions
+                changes.append("instructions updated")
+
+            # Update tool_categories if provided
+            new_tool_categories = args.get("tool_categories")
+            if new_tool_categories is not None:
+                agent.tool_categories = new_tool_categories
+                changes.append(f"tool_categories → {new_tool_categories}")
+
+            # Update skills if provided
+            new_skills = args.get("skills")
+            if new_skills is not None:
+                agent.skills = new_skills
+                changes.append(f"skills → {new_skills}")
+
+            # Check if there were any changes
+            if not changes:
+                return UpdateAgentToolResult(
+                    agent_id=agent_id,
+                    agent_name=agent.name,
+                    tool_name=gen_agent_tool_name(agent.name),
+                    markdown_link=f"[{agent.name}](agent://{agent.id})",
+                    status="success",
+                    message=f"ℹ️ No updates were made to agent '{agent.name}' (ID: {agent_id}). "
+                    f"All fields were the same or no values were provided.",
+                ).model_dump()
+
+            # Commit changes to database
+            self._db.commit()
+            self._db.refresh(agent)
+
+            # Generate the tool name and markdown link
+            tool_name = gen_agent_tool_name(agent.name)
+            markdown_link = f"[{agent.name}](agent://{agent.id})"
+
+            logger.info(
+                f"Updated DRAFT agent '{agent.name}' (ID: {agent.id}) for user {self._user_id}: {', '.join(changes)}"
+            )
+
+            return UpdateAgentToolResult(
+                agent_id=agent.id,
+                agent_name=agent.name,
+                tool_name=tool_name,
+                markdown_link=markdown_link,
+                status="success",
+                message=(
+                    f"✅ Agent updated successfully\n\n"
+                    f"**Agent Details:**\n"
+                    f"- Agent ID: {agent.id}\n"
+                    f"- Agent Name: {agent.name}\n"
+                    f"- Tool Name: {tool_name}\n"
+                    f"- Status: DRAFT\n\n"
+                    f"**Changes Applied:**\n"
+                    + "\n".join(f"- {change}" for change in changes)
+                    + f"\n\n**How to use this agent:**\n"
+                    f"Include this link in your response: {markdown_link}\n"
+                    f"Or use the tool: {tool_name}\n\n"
+                    f"*The agent will reflect the updated changes on next execution.*"
+                ),
+            ).model_dump()
+
+        except Exception as e:
+            error_msg = f"Error updating agent: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return UpdateAgentToolResult(
+                agent_id=0,
+                agent_name="",
+                tool_name="",
+                markdown_link="",
+                status="error",
+                message=error_msg,
+            ).model_dump()
+
+
+class ListAgentsTool(AbstractBaseTool):
+    """
+    Tool for listing all agents belonging to the current user.
+
+    This allows users to see all their agents, their status, and get agent IDs
+    for use with other agent management tools.
+    """
+
+    # Agent tools belong to the AGENT category
+    category: ToolCategory = ToolCategory.AGENT
+
+    def __init__(
+        self,
+        db: Any,
+        user_id: int,
+        task_id: Optional[str] = None,
+        workspace_base_dir: Optional[str] = None,
+    ):
+        """
+        Initialize the list agents tool.
+
+        Args:
+            db: Database session for querying agents
+            user_id: User ID for filtering user's agents
+            task_id: Task ID for context
+            workspace_base_dir: Base directory for workspace files
+        """
+        self._db = db
+        self._user_id = user_id
+        self._task_id = task_id
+        if workspace_base_dir is None:
+            workspace_base_dir = str(get_uploads_dir())
+        self._workspace_base_dir = workspace_base_dir
+        self._visibility = ToolVisibility.PUBLIC
+
+    @property
+    def name(self) -> str:
+        """Tool name."""
+        return "list_agents"
+
+    @property
+    def description(self) -> str:
+        """Tool description."""
+        return (
+            "List all agents belonging to the current user with their details.\n\n"
+            "Parameters:\n"
+            "- status_filter (optional): Filter by agent status: 'draft', 'published', or 'archived'. "
+            "If None, shows all agents\n\n"
+            "Returns:\n"
+            "- agents: List of agent information including:\n"
+            "  - agent_id: Database ID (use this for update_agent)\n"
+            "  - name: Agent name\n"
+            "  - description: When to use this agent\n"
+            "  - status: draft, published, or archived\n"
+            "  - tool_name: Tool name to call this agent\n"
+            "  - markdown_link: Markdown link [Agent Name](agent://id)\n"
+            "  - execution_mode: react or graph\n"
+            "  - tool_categories: Allowed tool categories\n"
+            "  - skills: Allowed skills\n"
+            "- total_count: Total number of agents\n"
+            "- status: 'success' or 'error'\n"
+            "- message: Detailed information\n\n"
+            "Use this tool to discover available agents and get agent IDs for updating agents."
+        )
+
+    @property
+    def tags(self) -> list[str]:
+        """Tool tags."""
+        return ["agent", "list"]
+
+    def args_type(self) -> Type[BaseModel]:
+        """Argument type."""
+        return ListAgentsToolArgs
+
+    def return_type(self) -> Type[BaseModel]:
+        """Return type."""
+        return ListAgentsToolResult
+
+    def run_json_sync(self, args: Mapping[str, Any]) -> Any:
+        """Sync execution not supported."""
+        raise NotImplementedError("ListAgentsTool only supports async execution.")
+
+    async def run_json_async(self, args: Mapping[str, Any]) -> Any:
+        """List all agents for the current user."""
+        from .....web.models.agent import Agent
+
+        try:
+            status_filter = args.get("status_filter", "").strip().lower()
+            if status_filter and status_filter not in [
+                "draft",
+                "published",
+                "archived",
+            ]:
+                return ListAgentsToolResult(
+                    agents=[],
+                    total_count=0,
+                    status="error",
+                    message=f"Error: Invalid status_filter '{status_filter}'. Must be 'draft', 'published', or 'archived'",
+                ).model_dump()
+
+            # Build query
+            query = self._db.query(Agent).filter(Agent.user_id == self._user_id)
+
+            # Apply status filter if provided
+            if status_filter:
+                query = query.filter(Agent.status == status_filter)
+
+            # Order by status (draft first) then by name
+            agents = query.order_by(Agent.status, Agent.name).all()
+
+            # Build agent info list
+            agent_infos = []
+            for agent in agents:
+                tool_name = gen_agent_tool_name(agent.name)
+                markdown_link = f"[{agent.name}](agent://{agent.id})"
+
+                agent_info = AgentInfo(
+                    agent_id=agent.id,
+                    name=agent.name,
+                    description=agent.description or "No description",
+                    status=agent.status.value,
+                    tool_name=tool_name,
+                    markdown_link=markdown_link,
+                    execution_mode=agent.execution_mode or "react",
+                    tool_categories=agent.tool_categories,
+                    skills=agent.skills if agent.skills else None,
+                )
+                agent_infos.append(agent_info.model_dump())
+
+            total_count = len(agent_infos)
+            filter_msg = (
+                f" (filtered by status: {status_filter})" if status_filter else ""
+            )
+
+            logger.info(
+                f"Listed {total_count} agents for user {self._user_id}{filter_msg}"
+            )
+
+            return ListAgentsToolResult(
+                agents=agent_infos,
+                total_count=total_count,
+                status="success",
+                message=(
+                    f"✅ Found {total_count} agent(s){filter_msg}\n\n"
+                    f"*Only DRAFT agents can be updated using update_agent tool. "
+                    f"All agents can be called using their tool_name.*"
+                ),
+            ).model_dump()
+
+        except Exception as e:
+            error_msg = f"Error listing agents: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return ListAgentsToolResult(
+                agents=[],
+                total_count=0,
                 status="error",
                 message=error_msg,
             ).model_dump()
@@ -726,4 +1227,54 @@ async def create_create_agent_tool(config: "WebToolConfig") -> list[AbstractBase
         return [tool]
     except Exception as e:
         logger.warning(f"Failed to create CreateAgentTool: {e}")
+        return []
+
+
+@register_tool
+async def create_update_agent_tool(config: "WebToolConfig") -> list[AbstractBaseTool]:
+    """Create the UpdateAgentTool for dynamically updating agents."""
+    if not config.get_enable_agent_tools():
+        return []
+
+    try:
+        db = config.get_db()
+        user_id = config.get_user_id()
+        if not user_id:
+            return []
+
+        tool = UpdateAgentTool(
+            db=db,
+            user_id=user_id,
+            task_id=config.get_task_id(),
+            workspace_base_dir=None,  # Will use get_uploads_dir() default
+        )
+        logger.debug(f"Created UpdateAgentTool for user {user_id}")
+        return [tool]
+    except Exception as e:
+        logger.warning(f"Failed to create UpdateAgentTool: {e}")
+        return []
+
+
+@register_tool
+async def create_list_agents_tool(config: "WebToolConfig") -> list[AbstractBaseTool]:
+    """Create the ListAgentsTool for listing user's agents."""
+    if not config.get_enable_agent_tools():
+        return []
+
+    try:
+        db = config.get_db()
+        user_id = config.get_user_id()
+        if not user_id:
+            return []
+
+        tool = ListAgentsTool(
+            db=db,
+            user_id=user_id,
+            task_id=config.get_task_id(),
+            workspace_base_dir=None,  # Will use get_uploads_dir() default
+        )
+        logger.debug(f"Created ListAgentsTool for user {user_id}")
+        return [tool]
+    except Exception as e:
+        logger.warning(f"Failed to create ListAgentsTool: {e}")
         return []

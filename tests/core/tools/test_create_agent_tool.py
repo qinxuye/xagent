@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from xagent.core.tools.adapters.vibe.agent_tool import (
     CreateAgentTool,
+    ListAgentsTool,
+    UpdateAgentTool,
     gen_agent_tool_name,
     get_published_agents_tools,
 )
@@ -261,6 +263,407 @@ class TestCreateAgentTool:
 
             assert result["status"] == "error"
             assert "required" in result["message"].lower()
+
+        finally:
+            db.close()
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+
+class TestUpdateAgentTool:
+    """Test suite for UpdateAgentTool."""
+
+    @pytest.mark.asyncio
+    async def test_update_agent_success(self) -> None:
+        """Test successful agent update."""
+        db, db_path = _create_session()
+        try:
+            user = User(username="testuser_update", password_hash="x", is_admin=False)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+            # Create existing agent
+            existing_agent = Agent(
+                user_id=user.id,
+                name="original_name",
+                description="Original description",
+                instructions="Original instructions",
+                status=AgentStatus.DRAFT,
+            )
+            db.add(existing_agent)
+            db.commit()
+            db.refresh(existing_agent)
+
+            tool = UpdateAgentTool(db=db, user_id=user.id, task_id="test_task")
+
+            result = await tool.run_json_async(
+                {
+                    "agent_id": existing_agent.id,
+                    "name": "updated_name",
+                    "description": "Updated description",
+                    "instructions": "Updated instructions",
+                }
+            )
+
+            # Verify result
+            assert result["status"] == "success"
+            assert result["agent_name"] == "updated_name"
+            assert result["agent_id"] == existing_agent.id
+
+            # Verify agent was updated in database
+            db.refresh(existing_agent)
+            assert existing_agent.name == "updated_name"
+            assert existing_agent.description == "Updated description"
+            assert existing_agent.instructions == "Updated instructions"
+
+        finally:
+            db.close()
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_update_agent_partial_update(self) -> None:
+        """Test partial agent update (only some fields)."""
+        db, db_path = _create_session()
+        try:
+            user = User(username="testuser_partial", password_hash="x", is_admin=False)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+            existing_agent = Agent(
+                user_id=user.id,
+                name="partial_agent",
+                description="Original description",
+                instructions="Original instructions",
+                status=AgentStatus.DRAFT,
+            )
+            db.add(existing_agent)
+            db.commit()
+            db.refresh(existing_agent)
+
+            tool = UpdateAgentTool(db=db, user_id=user.id)
+
+            # Update only description, keep name and instructions
+            result = await tool.run_json_async(
+                {
+                    "agent_id": existing_agent.id,
+                    "description": "New description only",
+                }
+            )
+
+            assert result["status"] == "success"
+
+            # Verify only description changed
+            db.refresh(existing_agent)
+            assert existing_agent.name == "partial_agent"  # Unchanged
+            assert existing_agent.description == "New description only"  # Changed
+            assert existing_agent.instructions == "Original instructions"  # Unchanged
+
+        finally:
+            db.close()
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_update_agent_not_found(self) -> None:
+        """Test updating non-existent agent."""
+        db, db_path = _create_session()
+        try:
+            user = User(username="testuser_notfound", password_hash="x", is_admin=False)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+            tool = UpdateAgentTool(db=db, user_id=user.id)
+
+            result = await tool.run_json_async(
+                {
+                    "agent_id": 99999,  # Non-existent ID
+                    "name": "new_name",
+                }
+            )
+
+            assert result["status"] == "error"
+            assert "not found" in result["message"].lower()
+
+        finally:
+            db.close()
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_update_published_agent_rejected(self) -> None:
+        """Test that published agents cannot be updated."""
+        db, db_path = _create_session()
+        try:
+            user = User(
+                username="testuser_published", password_hash="x", is_admin=False
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+            published_agent = Agent(
+                user_id=user.id,
+                name="published_agent",
+                description="Published agent",
+                instructions="Instructions",
+                status=AgentStatus.PUBLISHED,
+            )
+            db.add(published_agent)
+            db.commit()
+            db.refresh(published_agent)
+
+            tool = UpdateAgentTool(db=db, user_id=user.id)
+
+            result = await tool.run_json_async(
+                {
+                    "agent_id": published_agent.id,
+                    "name": "trying_to_rename",
+                }
+            )
+
+            assert result["status"] == "error"
+            assert "only draft" in result["message"].lower()
+
+        finally:
+            db.close()
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_update_agent_duplicate_name(self) -> None:
+        """Test that duplicate names are rejected when updating."""
+        db, db_path = _create_session()
+        try:
+            user = User(username="testuser_dup", password_hash="x", is_admin=False)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+            # Create two agents
+            agent1 = Agent(
+                user_id=user.id,
+                name="agent_one",
+                status=AgentStatus.DRAFT,
+            )
+            agent2 = Agent(
+                user_id=user.id,
+                name="agent_two",
+                status=AgentStatus.DRAFT,
+            )
+            db.add_all([agent1, agent2])
+            db.commit()
+            db.refresh(agent1)
+            db.refresh(agent2)
+
+            tool = UpdateAgentTool(db=db, user_id=user.id)
+
+            # Try to rename agent2 to agent_one (duplicate)
+            result = await tool.run_json_async(
+                {
+                    "agent_id": agent2.id,
+                    "name": "agent_one",
+                }
+            )
+
+            assert result["status"] == "error"
+            assert "already exists" in result["message"].lower()
+
+        finally:
+            db.close()
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+
+class TestListAgentsTool:
+    """Test suite for ListAgentsTool."""
+
+    @pytest.mark.asyncio
+    async def test_list_all_agents(self) -> None:
+        """Test listing all agents."""
+        db, db_path = _create_session()
+        try:
+            user = User(username="testuser_list", password_hash="x", is_admin=False)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+            # Create agents with different statuses
+            draft_agent = Agent(
+                user_id=user.id,
+                name="draft_agent",
+                description="Draft agent description",
+                instructions="Draft instructions",
+                status=AgentStatus.DRAFT,
+            )
+            published_agent = Agent(
+                user_id=user.id,
+                name="published_agent",
+                description="Published agent description",
+                instructions="Published instructions",
+                status=AgentStatus.PUBLISHED,
+            )
+            archived_agent = Agent(
+                user_id=user.id,
+                name="archived_agent",
+                description="Archived agent description",
+                status=AgentStatus.ARCHIVED,
+            )
+            db.add_all([draft_agent, published_agent, archived_agent])
+            db.commit()
+
+            tool = ListAgentsTool(db=db, user_id=user.id)
+
+            result = await tool.run_json_async({})
+
+            assert result["status"] == "success"
+            assert result["total_count"] == 3
+            assert len(result["agents"]) == 3
+
+            # Check agent info
+            agent_names = {agent["name"] for agent in result["agents"]}
+            assert "draft_agent" in agent_names
+            assert "published_agent" in agent_names
+            assert "archived_agent" in agent_names
+
+        finally:
+            db.close()
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_list_agents_with_status_filter(self) -> None:
+        """Test listing agents with status filter."""
+        db, db_path = _create_session()
+        try:
+            user = User(username="testuser_filter", password_hash="x", is_admin=False)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+            draft_agent = Agent(
+                user_id=user.id,
+                name="draft_agent",
+                status=AgentStatus.DRAFT,
+            )
+            published_agent = Agent(
+                user_id=user.id,
+                name="published_agent",
+                status=AgentStatus.PUBLISHED,
+            )
+            db.add_all([draft_agent, published_agent])
+            db.commit()
+
+            tool = ListAgentsTool(db=db, user_id=user.id)
+
+            # List only draft agents
+            result = await tool.run_json_async({"status_filter": "draft"})
+
+            assert result["status"] == "success"
+            assert result["total_count"] == 1
+            assert result["agents"][0]["name"] == "draft_agent"
+            assert result["agents"][0]["status"] == "draft"
+
+        finally:
+            db.close()
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_list_agents_user_isolation(self) -> None:
+        """Test that users can only see their own agents."""
+        db, db_path = _create_session()
+        try:
+            user1 = User(username="listuser1", password_hash="x", is_admin=False)
+            user2 = User(username="listuser2", password_hash="x", is_admin=False)
+            db.add_all([user1, user2])
+            db.commit()
+            db.refresh(user1)
+            db.refresh(user2)
+
+            # Create agents for user1
+            user1_agent = Agent(
+                user_id=user1.id,
+                name="user1_agent",
+                status=AgentStatus.DRAFT,
+            )
+            # Create agents for user2
+            user2_agent = Agent(
+                user_id=user2.id,
+                name="user2_agent",
+                status=AgentStatus.DRAFT,
+            )
+            db.add_all([user1_agent, user2_agent])
+            db.commit()
+
+            # User1 should only see their own agents
+            tool = ListAgentsTool(db=db, user_id=user1.id)
+            result = await tool.run_json_async({})
+
+            assert result["status"] == "success"
+            assert result["total_count"] == 1
+            assert result["agents"][0]["name"] == "user1_agent"
+
+        finally:
+            db.close()
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_list_agents_invalid_status_filter(self) -> None:
+        """Test that invalid status filter returns error."""
+        db, db_path = _create_session()
+        try:
+            user = User(username="testuser_invalid", password_hash="x", is_admin=False)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+            tool = ListAgentsTool(db=db, user_id=user.id)
+
+            result = await tool.run_json_async({"status_filter": "invalid_status"})
+
+            assert result["status"] == "error"
+            assert "invalid" in result["message"].lower()
 
         finally:
             db.close()
