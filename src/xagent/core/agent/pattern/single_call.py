@@ -88,6 +88,23 @@ class SingleCallPattern(AgentPattern):
         """Load persisted execution-state context for a new run."""
         self._execution_context_messages = normalize_transcript_messages(messages)
 
+    def _get_custom_system_prompt(self) -> str:
+        """Return custom instructions from the shared execution context."""
+        if (
+            self._context
+            and hasattr(self._context, "state")
+            and "system_prompt" in self._context.state
+            and self._context.state["system_prompt"]
+        ):
+            custom_prompt = self._context.state["system_prompt"]
+            if not isinstance(custom_prompt, str):
+                raise TypeError(
+                    "AgentContext state['system_prompt'] must be a string, "
+                    f"got {type(custom_prompt).__name__}"
+                )
+            return f"\n\n{custom_prompt}\n\n"
+        return ""
+
     async def run(
         self,
         task: str,
@@ -244,14 +261,18 @@ class SingleCallPattern(AgentPattern):
         # Build messages with conversation history and execution context
         messages: List[Dict[str, str]] = []
 
-        # Add execution context messages first (may contain system prompt with KB info)
+        custom_prompt = self._get_custom_system_prompt()
+
         if self._execution_context_messages:
+            if custom_prompt:
+                messages.append({"role": "system", "content": custom_prompt})
             messages.extend(self._execution_context_messages)
         else:
             # Fallback system prompt if no execution context
-            messages.append(
-                {"role": "system", "content": "You are a helpful assistant."}
-            )
+            system_prompt = "You are a helpful assistant."
+            if custom_prompt:
+                system_prompt = f"{custom_prompt}{system_prompt}"
+            messages.append({"role": "system", "content": system_prompt})
 
         # Add conversation history if available
         if self._conversation_history:
@@ -548,6 +569,10 @@ IMPORTANT:
 - Do NOT call any tools. Just provide a direct answer based on the tool result.
 - Use the information from the tool execution to answer the user's question.
 """
+
+        custom_prompt = self._get_custom_system_prompt()
+        if custom_prompt:
+            system_prompt = f"{custom_prompt}{system_prompt}"
 
         messages.append({"role": "system", "content": system_prompt})
 

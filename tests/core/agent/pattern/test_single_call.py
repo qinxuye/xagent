@@ -72,6 +72,7 @@ class MockSingleCallLLM(BaseLLM):
             or "The tool was executed successfully and the result is: test result"
         )
         self.call_count = 0
+        self.calls = []
         self._abilities = ["chat", "tool_calling"]
         self._model_name = "mock_single_call_llm"
 
@@ -90,6 +91,7 @@ class MockSingleCallLLM(BaseLLM):
 
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> Any:
         self.call_count += 1
+        self.calls.append({"messages": messages, "kwargs": kwargs})
 
         # First call: return tool call
         # Second call: return final answer
@@ -350,6 +352,121 @@ async def test_single_call_execution_context(mock_memory, mock_context):
 
     assert result["success"] is True
     assert mock_llm.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_single_call_uses_context_system_prompt(mock_memory, mock_context):
+    """Test SingleCall includes AgentContext system_prompt in the first LLM call."""
+    mock_context.state["system_prompt"] = "Always reply in French."
+    mock_llm = MockSingleCallLLM(response={"type": "text", "content": "Bonjour"})
+
+    pattern = SingleCallPattern(llm=mock_llm)
+
+    result = await pattern.run(
+        task="Say hello",
+        memory=mock_memory,
+        tools=[],
+        context=mock_context,
+    )
+
+    assert result["success"] is True
+    assert pattern._get_custom_system_prompt() == "\n\nAlways reply in French.\n\n"
+    system_message = mock_llm.calls[0]["messages"][0]
+    assert system_message["role"] == "system"
+    assert system_message["content"].startswith("Always reply in French.")
+    assert (
+        "Always reply in French.\n\nYou are a helpful assistant."
+        in system_message["content"]
+    )
+    assert "You are a helpful assistant." in system_message["content"]
+
+
+@pytest.mark.asyncio
+async def test_single_call_uses_context_system_prompt_with_execution_context_messages(
+    mock_memory, mock_context
+):
+    """Test SingleCall keeps context system_prompt with recovered context messages."""
+    mock_context.state["system_prompt"] = "Always reply in French."
+    mock_llm = MockSingleCallLLM(response={"type": "text", "content": "Bonjour"})
+
+    pattern = SingleCallPattern(llm=mock_llm)
+    pattern.set_execution_context_messages(
+        [{"role": "system", "content": "Recovered execution context."}]
+    )
+
+    result = await pattern.run(
+        task="Say hello",
+        memory=mock_memory,
+        tools=[],
+        context=mock_context,
+    )
+
+    assert result["success"] is True
+    assert mock_llm.calls[0]["messages"][0] == {
+        "role": "system",
+        "content": "Always reply in French.",
+    }
+    assert mock_llm.calls[0]["messages"][1] == {
+        "role": "system",
+        "content": "Recovered execution context.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_single_call_rejects_non_string_context_system_prompt(
+    mock_memory, mock_context
+):
+    """Test SingleCall fails clearly for malformed context system_prompt values."""
+    mock_context.state["system_prompt"] = ["Always reply in French."]
+    mock_llm = MockSingleCallLLM(response={"type": "text", "content": "Bonjour"})
+
+    pattern = SingleCallPattern(llm=mock_llm)
+
+    result = await pattern.run(
+        task="Say hello",
+        memory=mock_memory,
+        tools=[],
+        context=mock_context,
+    )
+
+    assert result["success"] is False
+    assert "system_prompt" in result["error"]
+    assert "must be a string" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_single_call_final_answer_keeps_context_system_prompt(
+    mock_tools, mock_memory, mock_context
+):
+    """Test SingleCall keeps AgentContext system_prompt after tool execution."""
+    mock_context.state["system_prompt"] = "Always reply in French."
+    mock_llm = MockSingleCallLLM(final_answer="Le resultat est disponible.")
+
+    pattern = SingleCallPattern(llm=mock_llm)
+
+    result = await pattern.run(
+        task="Use test_tool",
+        memory=mock_memory,
+        tools=mock_tools,
+        context=mock_context,
+    )
+
+    assert result["success"] is True
+    assert mock_llm.call_count == 2
+    first_system_message = mock_llm.calls[0]["messages"][0]
+    final_system_message = mock_llm.calls[1]["messages"][0]
+    assert first_system_message["content"].startswith("Always reply in French.")
+    assert (
+        "Always reply in French.\n\nYou are a helpful assistant."
+        in (first_system_message["content"])
+    )
+    assert "You are a helpful assistant." in first_system_message["content"]
+    assert final_system_message["content"].startswith("Always reply in French.")
+    assert (
+        "Always reply in French.\n\nYou are an AI assistant."
+        in (final_system_message["content"])
+    )
+    assert "Do NOT call any tools" in final_system_message["content"]
 
 
 @pytest.mark.asyncio
