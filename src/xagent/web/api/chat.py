@@ -706,6 +706,20 @@ class AgentServiceManager:
                                         ):
                                             allowed_tools.append(tool_name)
                                             break
+                            elif category == "other" and tool_name:
+                                for tc in tool_categories:
+                                    if tc.startswith("mcp:"):
+                                        server_name = (
+                                            tc.split(":", 1)[1]
+                                            .replace(" ", "_")
+                                            .replace("-", "_")
+                                        )
+                                        if (
+                                            tool_name.lower()
+                                            == f"api_{server_name.lower()}_call"
+                                        ):
+                                            allowed_tools.append(tool_name)
+                                            break
 
                     logger.info(
                         f"Tool categories {tool_categories} mapped to {len(allowed_tools)} tools for task {task_id}"

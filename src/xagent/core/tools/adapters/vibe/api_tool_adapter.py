@@ -18,11 +18,13 @@ logger = logging.getLogger(__name__)
 class CustomApiToolArgs(BaseModel):
     """Arguments for Custom API Tool."""
 
-    url: str = Field(
-        description="The full URL to call, e.g., 'https://api.example.com/v1/users'. You can use variables like $SECRET_KEY in the URL."
+    url: Optional[str] = Field(
+        default=None,
+        description="The full URL to call. Omit this when the Custom API has a configured endpoint. You can use variables like $SECRET_KEY in the URL.",
     )
-    method: str = Field(
-        default="GET", description="HTTP method (GET, POST, PUT, DELETE, etc.)"
+    method: Optional[str] = Field(
+        default=None,
+        description="HTTP method (GET, POST, PUT, DELETE, etc.). Omit this to use the Custom API configured method.",
     )
     headers: Optional[Dict[str, str]] = Field(
         default=None,
@@ -77,6 +79,9 @@ class CustomApiTool(AbstractBaseTool):
         name: str,
         description: str,
         env: Dict[str, str],
+        url: Optional[str] = None,
+        method: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
         visibility: ToolVisibility = ToolVisibility.PUBLIC,
     ):
         # Format name for LLM (replace spaces/dashes with underscores)
@@ -87,6 +92,14 @@ class CustomApiTool(AbstractBaseTool):
         else:
             self._name = f"api_{sanitized_name}_call"
 
+        default_info = ""
+        if url:
+            default_info += f"\nConfigured endpoint: {url}"
+        if method:
+            default_info += f"\nConfigured method: {method}"
+        if headers:
+            default_info += "\nConfigured headers are applied automatically."
+
         # Add env vars info to description so LLM knows how to use them
         env_info = ""
         if env:
@@ -94,7 +107,10 @@ class CustomApiTool(AbstractBaseTool):
             for k in env.keys():
                 env_info += f"- {k}\n"
 
-        self._description = f"Custom API: {name}\n{description}{env_info}"
+        self._description = f"Custom API: {name}\n{description}{default_info}{env_info}"
+        self._default_url = url
+        self._default_method = method or "GET"
+        self._default_headers = headers or {}
         self._env = {}
         self._env_patterns = []
         for k, v in (env or {}).items():
@@ -146,12 +162,20 @@ class CustomApiTool(AbstractBaseTool):
             parsed_args = CustomApiToolArgs(**args)
 
             # Replace secrets
-            url = self._replace_secrets(parsed_args.url)
-            headers = (
-                self._replace_secrets(parsed_args.headers)
-                if parsed_args.headers
-                else {}
-            )
+            url = self._replace_secrets(parsed_args.url or self._default_url)
+            if not url:
+                return CustomApiToolResult(
+                    success=False,
+                    status_code=0,
+                    headers={},
+                    body=None,
+                    error="URL is required because this Custom API has no configured endpoint.",
+                ).model_dump()
+
+            merged_headers = dict(self._default_headers)
+            if parsed_args.headers:
+                merged_headers.update(parsed_args.headers)
+            headers = self._replace_secrets(merged_headers) if merged_headers else {}
             params = (
                 self._replace_secrets(parsed_args.params) if parsed_args.params else {}
             )
@@ -160,7 +184,7 @@ class CustomApiTool(AbstractBaseTool):
             # Execute API call
             result = await call_api(
                 url=url,
-                method=parsed_args.method,
+                method=parsed_args.method or self._default_method,
                 headers=headers,
                 params=params,
                 body=body,
@@ -214,8 +238,18 @@ def create_custom_api_tools(configs: List[Dict[str, Any]]) -> List[CustomApiTool
             name = config.get("name", "custom_api")
             desc = config.get("description", "")
             env = config.get("env", {})
+            url = config.get("url")
+            method = config.get("method")
+            headers = config.get("headers")
 
-            tool = CustomApiTool(name=name, description=desc, env=env)
+            tool = CustomApiTool(
+                name=name,
+                description=desc,
+                env=env,
+                url=url,
+                method=method,
+                headers=headers,
+            )
             tools.append(tool)
         except Exception as e:
             logger.error(f"Failed to create Custom API tool for config {config}: {e}")

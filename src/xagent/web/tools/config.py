@@ -694,6 +694,9 @@ class WebToolConfig(BaseToolConfig):
                         {
                             "name": api.name,
                             "description": api.description or "",
+                            "url": api.url,
+                            "method": api.method or "GET",
+                            "headers": api.headers or {},
                             "env": api.env or {},
                         }
                     )
