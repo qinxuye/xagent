@@ -137,6 +137,56 @@ async def test_run_json_async_uses_configured_endpoint_defaults():
 
 
 @pytest.mark.asyncio
+async def test_run_json_async_merges_configured_and_call_headers():
+    with (
+        patch(
+            "xagent.core.tools.adapters.vibe.api_tool_adapter.decrypt_value",
+            side_effect=lambda x: x,
+        ),
+        patch(
+            "xagent.core.tools.adapters.vibe.api_tool_adapter.call_api"
+        ) as mock_call_api,
+    ):
+        mock_call_api.return_value = {
+            "success": True,
+            "status_code": 200,
+            "headers": {},
+            "body": {"data": "test"},
+            "error": None,
+        }
+
+        tool = CustomApiTool(
+            name="HelloAPI",
+            description="test",
+            env={"TOKEN": "secret"},
+            url="https://api.example.com/hello",
+            headers={
+                "Authorization": "Bearer $TOKEN",
+                "X-Default": "1",
+                "X-Override": "default",
+            },
+        )
+
+        res = await tool.run_json_async(
+            {"headers": {"X-Custom": "2", "X-Override": "caller"}}
+        )
+        assert res["success"] is True
+
+        mock_call_api.assert_called_once_with(
+            url="https://api.example.com/hello",
+            method="GET",
+            headers={
+                "Authorization": "Bearer secret",
+                "X-Default": "1",
+                "X-Custom": "2",
+                "X-Override": "caller",
+            },
+            params={},
+            body=None,
+        )
+
+
+@pytest.mark.asyncio
 async def test_run_json_async_returns_error_without_any_url():
     tool = CustomApiTool(name="test", description="test", env={})
 

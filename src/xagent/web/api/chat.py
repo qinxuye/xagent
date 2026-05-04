@@ -714,6 +714,9 @@ class AgentServiceManager:
                                             .replace(" ", "_")
                                             .replace("-", "_")
                                         )
+                                        logger.info(
+                                            f"Checking Custom API tool: '{tool_name}' vs 'api_{server_name}_call'"
+                                        )
                                         if (
                                             tool_name.lower()
                                             == f"api_{server_name.lower()}_call"
