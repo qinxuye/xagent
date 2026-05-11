@@ -66,7 +66,7 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        "real_rag: tests that require real embedding API (DASHSCOPE_API_KEY or ZHIPU_API_KEY)",
+        "real_rag: tests that require DashScope embedding API config",
     )
     config.addinivalue_line(
         "markers",
@@ -78,9 +78,9 @@ def pytest_collection_modifyitems(config, items):
     """Skip Docker tests unless --run-special is specified.
 
     Also automatically skip tests that require unavailable external dependencies.
-    Tests marked with `pytest.mark.real_rag` require embedding API keys
-    (DASHSCOPE_API_KEY or ZHIPU_API_KEY). If these keys are not configured
-    in the environment, the tests are automatically skipped rather than failing.
+    Tests marked with `pytest.mark.real_rag` require DashScope embedding
+    configuration. If this is not configured in the environment, the tests are
+    automatically skipped rather than failing.
 
     Tests marked with `pytest.mark.requires_network` require network access.
     These tests are skipped unless --run-special is specified or
@@ -95,33 +95,37 @@ def pytest_collection_modifyitems(config, items):
             if "docker" in item.keywords:
                 item.add_marker(skip_docker)
 
-    # Skip real_rag tests when embedding API keys are unavailable
-    # Check for actual API keys, not placeholder values from example.env
-    dashscope_key = os.getenv("DASHSCOPE_API_KEY", "")
-    zhipu_key = os.getenv("ZHIPU_API_KEY", "")
+    # Skip real_rag tests when DashScope embedding config is unavailable.
+    # Check for actual values, not placeholder values from example.env.
+    dashscope_key = os.getenv("DASHSCOPE_EMBEDDING_API_KEY") or os.getenv(
+        "DASHSCOPE_API_KEY", ""
+    )
+    dashscope_model = os.getenv("DASHSCOPE_EMBEDDING_MODEL", "")
 
     # Common placeholder patterns that indicate the key is not set
     placeholder_patterns = [
         "your-dashscope-api-key",
+        "your-dashscope-embedding-model",
         "your-api-key",
-        "your-zhipu-api-key",
         "test-key",
     ]
 
-    def is_valid_key(key: str) -> bool:
-        """Check if the key is not a placeholder value."""
-        if not key:
+    def is_valid_value(value: str) -> bool:
+        """Check if the config value is not a placeholder value."""
+        if not value:
             return False
-        key_lower = key.lower().strip()
+        key_lower = value.lower().strip()
         for pattern in placeholder_patterns:
             if pattern in key_lower:
                 return False
         return True
 
-    has_embedding_api = is_valid_key(dashscope_key) or is_valid_key(zhipu_key)
-    if not has_embedding_api:
+    has_dashscope_embedding_config = is_valid_value(dashscope_key) and is_valid_value(
+        dashscope_model
+    )
+    if not has_dashscope_embedding_config:
         skip_real_rag = pytest.mark.skip(
-            reason="Requires DASHSCOPE_API_KEY or ZHIPU_API_KEY environment variable"
+            reason="Requires DASHSCOPE_API_KEY or DASHSCOPE_EMBEDDING_API_KEY and DASHSCOPE_EMBEDDING_MODEL environment variables"
         )
         for item in items:
             if "real_rag" in item.keywords:
