@@ -125,7 +125,7 @@ def pytest_collection_modifyitems(config, items):
     )
     if not has_dashscope_embedding_config:
         skip_real_rag = pytest.mark.skip(
-            reason="Requires DASHSCOPE_API_KEY or DASHSCOPE_EMBEDDING_API_KEY and DASHSCOPE_EMBEDDING_MODEL environment variables"
+            reason="Requires (DASHSCOPE_API_KEY or DASHSCOPE_EMBEDDING_API_KEY) + DASHSCOPE_EMBEDDING_MODEL environment variables"
         )
         for item in items:
             if "real_rag" in item.keywords:

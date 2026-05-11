@@ -132,7 +132,7 @@ jobs:
         run: |
           set -e
 
-          if [ -n "$DASHSCOPE_API_KEY" ]; then
+          if [ -n "$DASHSCOPE_API_KEY" ] || [ -n "$DASHSCOPE_EMBEDDING_API_KEY" ]; then
             echo "DashScope embedding config configured"
           else
             echo "DashScope embedding key is not configured; real_rag tests may be skipped by pytest."
