@@ -225,6 +225,44 @@ class TestCreateAgentTool:
                 pass
 
     @pytest.mark.asyncio
+    async def test_create_agent_rejects_missing_knowledge_base(self) -> None:
+        """Test that create_agent rejects knowledge bases that do not exist."""
+        db, db_path = _create_session()
+        try:
+            user = User(username="testuser_missing_kb", password_hash="x")
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+            tool = CreateAgentTool(db=db, user_id=user.id)
+
+            with patch(
+                "xagent.core.tools.adapters.vibe.agent_tool.find_missing_knowledge_bases",
+                new=AsyncMock(return_value=["missing_kb"]),
+            ):
+                result = await tool.run_json_async(
+                    {
+                        "name": "kb_agent",
+                        "description": "Agent with KB",
+                        "instructions": "Use the KB.",
+                        "knowledge_bases": ["missing_kb"],
+                    }
+                )
+
+            assert result["status"] == "error"
+            assert "missing_kb" in result["message"]
+            assert db.query(Agent).filter(Agent.name == "kb_agent").first() is None
+
+        finally:
+            db.close()
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
     async def test_create_agent_duplicate_name_uses_next_available_variant(
         self,
     ) -> None:
@@ -479,6 +517,55 @@ class TestUpdateAgentTool:
 
             assert result["status"] == "error"
             assert "not found" in result["message"].lower()
+
+        finally:
+            db.close()
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_update_agent_rejects_missing_knowledge_base(self) -> None:
+        """Test that update_agent rejects knowledge bases that do not exist."""
+        db, db_path = _create_session()
+        try:
+            user = User(username="testuser_update_missing_kb", password_hash="x")
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+            existing_agent = Agent(
+                user_id=user.id,
+                name="kb_update_agent",
+                description="Original description",
+                instructions="Original instructions",
+                status=AgentStatus.DRAFT,
+                knowledge_bases=[],
+            )
+            db.add(existing_agent)
+            db.commit()
+            db.refresh(existing_agent)
+
+            tool = UpdateAgentTool(db=db, user_id=user.id)
+
+            with patch(
+                "xagent.core.tools.adapters.vibe.agent_tool.find_missing_knowledge_bases",
+                new=AsyncMock(return_value=["missing_kb"]),
+            ):
+                result = await tool.run_json_async(
+                    {
+                        "agent_id": existing_agent.id,
+                        "knowledge_bases": ["missing_kb"],
+                    }
+                )
+
+            assert result["status"] == "error"
+            assert "missing_kb" in result["message"]
+            db.refresh(existing_agent)
+            assert existing_agent.knowledge_bases == []
 
         finally:
             db.close()

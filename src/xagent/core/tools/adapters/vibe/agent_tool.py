@@ -15,10 +15,28 @@ from .....web.services.model_service import (
 )
 from ....tracing import create_agent_tracer
 from ....utils.type_check import ensure_list
+from ...core.document_search import find_missing_knowledge_bases
 from .base import AbstractBaseTool, ToolCategory, ToolVisibility
 
 logger = logging.getLogger(__name__)
 MAX_AGENT_NAME_LENGTH = 200
+
+
+async def _missing_knowledge_bases_for_user(
+    knowledge_bases: Optional[list[str]], db: Any, user_id: int
+) -> list[str]:
+    requested = ensure_list(knowledge_bases)
+    if not requested:
+        return []
+
+    from .....web.models.user import User
+
+    user = db.query(User).filter(User.id == user_id).first()
+    return await find_missing_knowledge_bases(
+        requested,
+        user_id=user_id,
+        is_admin=bool(user.is_admin) if user else False,
+    )
 
 
 class CreateAgentToolArgs(BaseModel):
@@ -541,6 +559,23 @@ class CreateAgentTool(AbstractBaseTool):
             if execution_mode not in ["flash", "balanced", "think", "auto"]:
                 execution_mode = "balanced"
 
+            knowledge_bases = ensure_list(args.get("knowledge_bases"))
+            missing_kbs = await _missing_knowledge_bases_for_user(
+                knowledge_bases, self._db, self._user_id
+            )
+            if missing_kbs:
+                return CreateAgentToolResult(
+                    agent_id=0,
+                    agent_name="",
+                    tool_name="",
+                    markdown_link="",
+                    status="error",
+                    message=(
+                        "Error: Knowledge base(s) not found or not visible to this user: "
+                        + ", ".join(missing_kbs)
+                    ),
+                ).model_dump()
+
             # Create the agent in DRAFT status
             agent = Agent(
                 user_id=self._user_id,
@@ -549,7 +584,7 @@ class CreateAgentTool(AbstractBaseTool):
                 instructions=instructions,
                 execution_mode=execution_mode,
                 models=models_config if models_config else None,
-                knowledge_bases=ensure_list(args.get("knowledge_bases")),
+                knowledge_bases=knowledge_bases,
                 skills=ensure_list(args.get("skills")),
                 tool_categories=ensure_list(args.get("tool_categories")),
                 suggested_prompts=[],
@@ -817,6 +852,21 @@ class UpdateAgentTool(AbstractBaseTool):
             # Update knowledge_bases if provided
             new_knowledge_bases = ensure_list(args.get("knowledge_bases"))
             if new_knowledge_bases is not None:
+                missing_kbs = await _missing_knowledge_bases_for_user(
+                    new_knowledge_bases, self._db, self._user_id
+                )
+                if missing_kbs:
+                    return UpdateAgentToolResult(
+                        agent_id=0,
+                        agent_name="",
+                        tool_name="",
+                        markdown_link="",
+                        status="error",
+                        message=(
+                            "Error: Knowledge base(s) not found or not visible to this user: "
+                            + ", ".join(missing_kbs)
+                        ),
+                    ).model_dump()
                 agent.knowledge_bases = new_knowledge_bases
                 changes.append(f"knowledge_bases → {new_knowledge_bases}")
 

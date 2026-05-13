@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react"
+import React, { useEffect, useMemo, useState } from "react"
 import { Interaction } from "@/contexts/app-context-chat"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -23,15 +23,13 @@ interface ClarificationFormProps {
 
 export function ClarificationForm({ interactions, messageId, active = true, onSend }: ClarificationFormProps) {
   // If onSend is provided, use it (e.g., from builder chat), otherwise use useApp
-  let state, sendMessage: any, dispatch: any;
+  let sendMessage: any, dispatch: any;
   try {
     const appCtx = useApp();
-    state = appCtx.state;
     sendMessage = appCtx.sendMessage;
     dispatch = appCtx.dispatch;
-  } catch (e) {
+  } catch {
     // We might not be in the app context (e.g., agent builder chat)
-    state = { currentTask: { status: "completed" } };
   }
 
   const { t } = useI18n()
@@ -40,7 +38,13 @@ export function ClarificationForm({ interactions, messageId, active = true, onSe
   const [isSubmitted, setIsSubmitted] = useState(!active)
   const [isOpen, setIsOpen] = useState(active)
 
-  const isTaskRunning = state?.currentTask?.status === "running"
+  useEffect(() => {
+    if (active) {
+      setIsSubmitted(false)
+      setIsOpen(true)
+    }
+  }, [active])
+
   const normalizedInteractions = useMemo(() => {
     const seenFields = new Set<string>()
     return interactions.map((interaction: any, index) => {
@@ -403,7 +407,7 @@ export function ClarificationForm({ interactions, messageId, active = true, onSe
         </div>
 
         <div className="pt-2 flex gap-2">
-          <Button className="flex-1" size="sm" onClick={handleSubmit} disabled={!active || isSubmitting || isTaskRunning || isSubmitted}>
+          <Button className="flex-1" size="sm" onClick={handleSubmit} disabled={!active || isSubmitting || isSubmitted}>
             {isSubmitting ? t("chatPage.clarification.submitting") : t("chatPage.clarification.submit")}
           </Button>
         </div>

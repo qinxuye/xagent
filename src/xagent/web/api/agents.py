@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from ...config import get_agent_pattern_for_execution_mode, get_uploads_dir
 from ...core.agent.service import AgentService
 from ...core.memory.in_memory import InMemoryMemoryStore
+from ...core.tools.core.document_search import find_missing_knowledge_bases
 from ...core.tracing import create_agent_tracer
 from ...core.utils.type_check import ensure_list
 from ..auth_dependencies import get_current_user
@@ -178,6 +179,25 @@ def _validate_knowledge_base_tools(
         raise HTTPException(
             status_code=400,
             detail="Knowledge bases are selected but the Knowledge tool category is not enabled. Please enable the Knowledge tools before saving.",
+        )
+
+
+async def _validate_knowledge_bases_exist(
+    knowledge_bases: List[str], current_user: User
+) -> None:
+    """Raise HTTPException if any selected knowledge base is not visible to the user."""
+    missing = await find_missing_knowledge_bases(
+        knowledge_bases,
+        user_id=int(current_user.id),
+        is_admin=bool(current_user.is_admin),
+    )
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Knowledge base(s) not found or not visible to this user: "
+                + ", ".join(missing)
+            ),
         )
 
 
@@ -348,6 +368,7 @@ async def create_agent(
         _validate_knowledge_base_tools(
             agent_data.knowledge_bases, agent_data.tool_categories
         )
+        await _validate_knowledge_bases_exist(agent_data.knowledge_bases, current_user)
 
         # Create agent
         agent = Agent(
@@ -481,6 +502,7 @@ async def update_agent(
             else (agent.tool_categories or [])
         )
         _validate_knowledge_base_tools(effective_kb, effective_tools)  # type: ignore[arg-type]
+        await _validate_knowledge_bases_exist(effective_kb, current_user)  # type: ignore[arg-type]
 
         # Update fields
         if agent_data.name is not None:

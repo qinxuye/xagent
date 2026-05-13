@@ -263,13 +263,27 @@ function TaskDetailContent() {
   }, [state.currentTask?.status, state.currentTask?.waitingInteractions, state.traceEvents]);
 
   const activeWaitingMessageId = useMemo(() => {
-    if (state.currentTask?.status !== 'waiting_for_user' || !waitingPrompt) {
+    if (state.currentTask?.status !== 'waiting_for_user') {
       return null;
+    }
+
+    if (waitingPrompt) {
+      const normalizedPrompt = waitingPrompt.trim();
+      for (let i = combinedItems.length - 1; i >= 0; i--) {
+        const item = combinedItems[i];
+        if (
+          item.role === 'assistant' &&
+          typeof item.content === 'string' &&
+          item.content.trim() === normalizedPrompt
+        ) {
+          return item.id;
+        }
+      }
     }
 
     for (let i = combinedItems.length - 1; i >= 0; i--) {
       const item = combinedItems[i];
-      if (item.role === 'assistant' && item.content === waitingPrompt) {
+      if (item.role === 'assistant' && item.interactions && item.interactions.length > 0) {
         return item.id;
       }
     }
