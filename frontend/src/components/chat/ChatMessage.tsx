@@ -69,6 +69,7 @@ export interface ChatMessageProps {
   taskStatus?: string;
   timestamp?: number | string;
   interactions?: any[];
+  interactionsActive?: boolean;
   onSendInteraction?: (message: string, files?: File[], metadata?: any) => Promise<void> | void;
 }
 
@@ -85,12 +86,14 @@ function GeneratingIndicator({ latestTitle, taskStatus, errorMessage }: { latest
 
   const displayTitle = taskStatus === 'paused'
     ? t("common.taskPaused")
+    : taskStatus === 'waiting_for_user'
+      ? t("common.waitingForUser")
     : (latestTitle ? `${latestTitle} ` : t("common.planning"));
 
   return (
     <div className="py-3 text-sm leading-relaxed text-muted-foreground flex items-center">
       <span>{displayTitle}</span>
-      {!["failed", "paused"].includes(taskStatus || "") && (
+      {!["failed", "paused", "waiting_for_user"].includes(taskStatus || "") && (
         <span className="ml-1 inline-flex items-end gap-1">
           <span className="dot" />
           <span className="dot" />
@@ -271,6 +274,7 @@ export function ChatMessage({
   taskStatus,
   timestamp,
   interactions,
+  interactionsActive = true,
   onSendInteraction,
 }: ChatMessageProps) {
   const { t } = useI18n();
@@ -317,7 +321,14 @@ export function ChatMessage({
     if (!e) return "";
     const type = e.event_type || "";
     const action = (typeof e.data?.action === "string" ? (e.data!.action as string) : "") || type;
-    return t(`agent.logs.event.actions.${e.event_type}`) || action || t("common.executing");
+    if (type) {
+      const key = `agent.logs.event.actions.${type}`;
+      const label = t(key);
+      if (label !== key) {
+        return label;
+      }
+    }
+    return action || t("traceEventRenderer.taskExecution");
   };
 
   const latestTitle = getEventTitle(
@@ -392,7 +403,7 @@ export function ChatMessage({
             )}
             {!isUser && interactions && interactions.length > 0 && (
               <div className="mt-4 border-t pt-4">
-                <ClarificationForm interactions={interactions} onSend={onSendInteraction} />
+                <ClarificationForm interactions={interactions} active={interactionsActive} onSend={onSendInteraction} />
               </div>
             )}
           </div>

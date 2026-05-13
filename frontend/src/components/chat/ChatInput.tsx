@@ -32,7 +32,7 @@ interface ChatInputProps {
   onModeChange?: (mode: "task" | "process") => void;
   inputValue?: string;
   onInputChange?: (value: string) => void;
-  taskStatus?: "pending" | "running" | "completed" | "failed" | "paused";
+  taskStatus?: "pending" | "running" | "completed" | "failed" | "paused" | "waiting_for_user";
   onPause?: () => void;
   onResume?: () => void;
   taskConfig?: {

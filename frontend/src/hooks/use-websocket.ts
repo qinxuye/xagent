@@ -301,6 +301,13 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
               timestamp: data.timestamp,
               task_id: data.task_id,
             }
+          } else if (data.type === "task_waiting_for_user") {
+            message = {
+              type: "task_waiting_for_user",
+              data: data,
+              timestamp: data.timestamp,
+              task_id: data.task_id,
+            }
           } else if (data.type === "task_resumed") {
             message = {
               type: "task_resumed",

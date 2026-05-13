@@ -123,14 +123,29 @@ const normalizeInteractions = (value: unknown): Interaction[] => {
     return []
   }
 
+  const seenFields = new Set<string>()
+
   return value
-    .map((item: any) => {
+    .map((item: any, index) => {
       if (!item || typeof item !== "object") {
         return null
       }
 
-      const type = item.type
-      const field = item.field
+      const rawType = item.type
+      const type =
+        rawType === "input" || rawType === "text" || rawType === "textarea" || rawType === "string"
+          ? "text_input"
+          : rawType === "file" || rawType === "upload"
+            ? "file_upload"
+            : rawType === "number" || rawType === "integer"
+              ? "number_input"
+              : rawType === "boolean"
+                ? "confirm"
+                : rawType
+      const rawField = item.field || item.id || item.name || item.properties?.field || item.properties?.id || `response_${index}`
+      const baseField = typeof rawField === "string" && rawField.trim() ? rawField.trim() : `response_${index}`
+      const field = seenFields.has(baseField) ? `${baseField}_${index}` : baseField
+      seenFields.add(field)
       if (
         !["select_one", "select_multiple", "text_input", "file_upload", "confirm", "number_input", "action_cards"].includes(type) ||
         typeof field !== "string" ||
@@ -145,18 +160,27 @@ const normalizeInteractions = (value: unknown): Interaction[] => {
         label: typeof item.label === "string" && item.label.trim() ? item.label : field,
       }
 
-      if (Array.isArray(item.options)) {
-        normalized.options = item.options
+      const rawOptions = Array.isArray(item.options)
+        ? item.options
+        : Array.isArray(item.actions)
+          ? item.actions
+          : undefined
+
+      if (Array.isArray(rawOptions)) {
+        normalized.options = rawOptions
           .filter((opt: any) => opt && typeof opt.value === "string")
           .map((opt: any) => ({
             value: opt.value,
             label: typeof opt.label === "string" ? opt.label : opt.value,
             description: typeof opt.description === "string" ? opt.description : undefined,
+            action_type: typeof opt.action_type === "string" ? opt.action_type : undefined,
           }))
       }
 
       if (typeof item.placeholder === "string") normalized.placeholder = item.placeholder
+      if (typeof item.properties?.placeholder === "string") normalized.placeholder = item.properties.placeholder
       if (typeof item.multiline === "boolean") normalized.multiline = item.multiline
+      if (typeof item.properties?.multiline === "boolean") normalized.multiline = item.properties.multiline
       if (typeof item.min === "number") normalized.min = item.min
       if (typeof item.max === "number") normalized.max = item.max
       if (typeof item.default !== "undefined") normalized.default = item.default
@@ -238,7 +262,7 @@ interface Message {
 interface Task {
   id: string
   title: string
-  status: "pending" | "running" | "completed" | "failed" | "paused"
+  status: "pending" | "running" | "completed" | "failed" | "paused" | "waiting_for_user"
   description: string
   createdAt: string | number
   updatedAt: string | number
@@ -254,6 +278,8 @@ interface Task {
   executionMode?: "flash" | "balanced" | "think"
   isDag?: boolean
   agentId?: number
+  waitingQuestion?: string
+  waitingInteractions?: Interaction[]
 }
 
 interface StepExecution {
@@ -279,6 +305,50 @@ interface TraceEvent {
   step_id?: string
   timestamp: string
   data: unknown
+}
+
+const normalizeStepStatus = (status: unknown): StepExecution["status"] => {
+  return status === "running" || status === "completed" || status === "failed" || status === "skipped"
+    ? status
+    : "pending"
+}
+
+const getString = (value: unknown, fallback = ""): string => typeof value === "string" ? value : fallback
+const getStringArray = (value: unknown): string[] => Array.isArray(value) ? value.map(item => String(item)) : []
+
+const stepsFromPlanData = (planData: unknown, existingSteps: StepExecution[]): StepExecution[] | null => {
+  const planRecord = planData && typeof planData === "object" ? planData as Record<string, unknown> : null
+  const planSteps = Array.isArray(planRecord?.steps) ? planRecord.steps : null
+  if (!planSteps) {
+    return null
+  }
+
+  const existingStepsMap = new Map<string, StepExecution>()
+  existingSteps.forEach(step => existingStepsMap.set(step.id, step))
+
+  return planSteps.map((rawStep: unknown) => {
+    const step = rawStep && typeof rawStep === "object" ? rawStep as Record<string, unknown> : {}
+    const id = String(step.id)
+    const existingStep = existingStepsMap.get(id)
+    const task = getString(step.task)
+    const name = getString(step.name, task || id)
+    return {
+      id,
+      name,
+      description: getString(step.description, task),
+      status: existingStep?.status || normalizeStepStatus(step.status),
+      tool_names: step.tool_name ? [String(step.tool_name)] : getStringArray(step.tool_names),
+      dependencies: getStringArray(step.dependencies),
+      started_at: existingStep?.started_at || getString(step.started_at),
+      completed_at: existingStep?.completed_at || getString(step.completed_at),
+      result_data: step.result_data ?? step.result,
+      step_data: step.step_data,
+      file_outputs: getStringArray(step.file_outputs),
+      conditional_branches: step.conditional_branches && typeof step.conditional_branches === "object" ? step.conditional_branches as Record<string, string> : {},
+      required_branch: typeof step.required_branch === "string" ? step.required_branch : null,
+      is_conditional: step.is_conditional === true,
+    }
+  })
 }
 
 interface DAGExecution {
@@ -335,7 +405,7 @@ type AppAction =
   | { type: "SET_TASK_ID"; payload: number | null }
   | { type: "ADD_MESSAGE"; payload: Message }
   | { type: "SET_CURRENT_TASK"; payload: Task }
-  | { type: "UPDATE_TASK_STATUS"; payload: { status: Task["status"] } }
+  | { type: "UPDATE_TASK_STATUS"; payload: { status: Task["status"]; waitingQuestion?: string; waitingInteractions?: Interaction[] } }
   | { type: "TRIGGER_TASK_UPDATE" }
   | { type: "SET_DAG_EXECUTION"; payload: DAGExecution | null }
   | { type: "ADD_STEP"; payload: StepExecution }
@@ -451,16 +521,25 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, currentTask: action.payload }
 
     case "UPDATE_TASK_STATUS":
-      return state.currentTask
-        ? {
-          ...state,
-          currentTask: {
-            ...state.currentTask,
-            status: action.payload.status,
-            updatedAt: new Date().toISOString(),
-          },
-        }
-        : state
+      if (!state.currentTask) {
+        return state
+      }
+
+      const isWaitingForUser = action.payload.status === "waiting_for_user"
+      return {
+        ...state,
+        currentTask: {
+          ...state.currentTask,
+          status: action.payload.status,
+          updatedAt: new Date().toISOString(),
+          waitingQuestion: isWaitingForUser
+            ? action.payload.waitingQuestion ?? state.currentTask.waitingQuestion
+            : undefined,
+          waitingInteractions: isWaitingForUser
+            ? action.payload.waitingInteractions ?? state.currentTask.waitingInteractions
+            : undefined,
+        },
+      }
 
     case "SET_DAG_EXECUTION":
       return { ...state, dagExecution: action.payload }
@@ -1004,6 +1083,8 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                 executionMode: taskData.execution_mode,
                 isDag: taskData.is_dag,
                 agentId: taskData.agent_id,
+                waitingQuestion: taskData.waiting_question,
+                waitingInteractions: normalizeInteractions(taskData.waiting_interactions),
               }
             })
 
@@ -1018,6 +1099,10 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
             // This prevents the empty state flash when task_info arrives before user_message.
           } else if (eventType === "dag_execution") {
             dispatch({ type: "SET_HISTORY_LOADING", payload: false })
+            const steps = stepsFromPlanData(eventData, currentState.steps)
+            if (steps) {
+              dispatch({ type: "SET_STEPS", payload: steps })
+            }
             dispatch({ type: "SET_DAG_EXECUTION", payload: eventData })
           } else if (eventType === "dag_step_info") {
             dispatch({ type: "SET_HISTORY_LOADING", payload: false })
@@ -1142,6 +1227,46 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
             console.log('✅ User message dispatched successfully')
           }
 
+          // Agent-to-user messages, including ask_user_question prompts.
+          else if (eventType === "agent_message") {
+            const messageContent = eventData.message || eventData.content || ""
+            if (!messageContent) {
+              return
+            }
+            const interactions = normalizeInteractions(eventData.metadata?.interactions)
+            const expectsResponse = eventData.expect_response === true || eventData.message_type === "question"
+            if (expectsResponse) {
+              dispatch({
+                type: "UPDATE_TASK_STATUS",
+                payload: {
+                  status: "waiting_for_user",
+                  waitingQuestion: messageContent,
+                  waitingInteractions: interactions.length > 0 ? interactions : undefined,
+                }
+              })
+            }
+            if (!expectsResponse) {
+              return
+            }
+            if (isDuplicateMessage(messageContent, 'agent-message')) {
+              return
+            }
+            const msgId = generateMessageId("msg-agent")
+            dispatch({
+              type: "ADD_MESSAGE",
+              payload: {
+                id: msgId,
+                role: "assistant",
+                content: messageContent,
+                rawContent: messageContent,
+                timestamp: message.timestamp,
+                status: "running",
+                isResult: true,
+                interactions: interactions.length > 0 ? interactions : undefined,
+              }
+            })
+          }
+
           // DAG Plan Events
           else if (eventType === "dag_plan_start") {
             dispatch({ type: "SET_HISTORY_LOADING", payload: false })
@@ -1245,33 +1370,8 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
             )
 
             // Process step data in the plan, including dependencies
-            if (planData.steps && Array.isArray(planData.steps)) {
-              // Get existing steps to preserve timing information
-              const existingSteps = currentState.steps
-              const existingStepsMap = new Map<string, StepExecution>()
-              existingSteps.forEach(step => existingStepsMap.set(step.id, step))
-
-              const steps: StepExecution[] = planData.steps.map((step: any) => {
-                const existingStep = existingStepsMap.get(step.id)
-                return {
-                  id: step.id,
-                  name: step.name || step.id,
-                  description: step.description || "",
-                  // Prioritize existing step status, otherwise use status from plan
-                  status: existingStep?.status || step.status || "pending",
-                  tool_names: step.tool_name ? [step.tool_name] : step.tool_names || [],
-                  dependencies: step.dependencies || [],
-                  // Prioritize timing information from existing steps
-                  started_at: existingStep?.started_at || step.started_at,
-                  completed_at: existingStep?.completed_at || step.completed_at,
-                  result_data: step.result_data,
-                  step_data: step.step_data,
-                  file_outputs: step.file_outputs || [],
-                  conditional_branches: step.conditional_branches || {},
-                  required_branch: step.required_branch || null,
-                  is_conditional: step.is_conditional || false,
-                }
-              })
+            const steps = stepsFromPlanData(planData, currentState.steps)
+            if (steps) {
               dispatch({ type: "SET_STEPS", payload: steps })
             }
 
@@ -1447,7 +1547,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
               description: eventData.description || "",
               status: "running",
               tool_names: eventData.tool_name ? [eventData.tool_name] : eventData.tool_names || [],
-              dependencies: existingStep?.dependencies || [],
+              dependencies: eventData.dependencies || existingStep?.dependencies || [],
               started_at: eventData.started_at || message.timestamp,
               completed_at: eventData.completed_at,
               result_data: eventData.result_data,
@@ -1477,19 +1577,22 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
           } else if (eventType === "dag_step_end") {
             const stepName = eventData.step_name || eventData.name || eventData.title || `${t('agent.logs.event.messages.execStepPrefix')}${eventData.step_id || t('common.errors.unknown')}`
             console.log('✅ dag_step_end:', stepName, JSON.stringify(message))
+            const resultData = eventData.result_data ?? eventData.result
 
             // dag_step_end has step_id, should update right-side step data, do not display message on the left
+            const stepId = message.step_id || eventData.step_id || stepName
+            const existingStep = state.steps.find(s => s.id === stepId)
             const step: StepExecution = {
-              id: message.step_id || eventData.step_id || stepName,
+              id: stepId,
               name: stepName,
               description: eventData.description || "",
               status: eventData.status || "completed",
               tool_names: eventData.tool_name ? [eventData.tool_name] : eventData.tool_names || [],
-              dependencies: [],
+              dependencies: eventData.dependencies || existingStep?.dependencies || [],
               // Don't override started_at from end event to preserve the original start time
               started_at: undefined, // Let the reducer handle preserving existing started_at
               completed_at: eventData.completed_at || message.timestamp,
-              result_data: eventData.result_data,
+              result_data: resultData,
               step_data: eventData.step_data,
               file_outputs: eventData.file_outputs || [],
               conditional_branches: eventData.conditional_branches || {},
@@ -1510,7 +1613,8 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                 description: eventData.description,
                 tool_names: eventData.tool_name ? [eventData.tool_name] : eventData.tool_names || [],
                 completed_at: eventData.completed_at || message.timestamp,
-                result_data: eventData.result_data,
+                result: resultData,
+                result_data: resultData,
                 step_data: eventData.step_data,
                 file_outputs: eventData.file_outputs || [],
               }
@@ -2031,7 +2135,12 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
 
             // Parse result string into object
             let resultData = {}
-            const resultContent = result?.content || result
+            const resultContent = (
+              result
+              && typeof result === 'object'
+              && !Array.isArray(result)
+              && ((result as any).file_outputs || (result as any).output || (result as any).content)
+            ) ? result : (result?.content || result)
             if (typeof resultContent === 'string') {
               try {
                 resultData = JSON.parse(resultContent)
@@ -2044,10 +2153,19 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
             } else {
               resultData = { output: resultContent }
             }
+            if (
+              resultData
+              && typeof resultData === 'object'
+              && (resultData as any).content
+              && !(resultData as any).output
+            ) {
+              resultData = { ...resultData, output: (resultData as any).content }
+            }
 
             // 1. Output meta info (excluding output, file_outputs, and history)
             const metaInfo = { ...resultData }
             delete (metaInfo as any).output
+            delete (metaInfo as any).content
             delete (metaInfo as any).file_outputs
             delete (metaInfo as any).history
             const hasMetaInfo = Object.keys(metaInfo).length > 0 && metaInfo !== null && metaInfo !== undefined
@@ -2424,6 +2542,29 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
               }
             }
             dispatch({ type: "ADD_TRACE_EVENT", payload: traceEvent })
+
+            const result = eventData.result
+            const messageContent =
+              result && typeof result === "object" && result.status === "waiting_for_user"
+                ? result.message || ""
+                : ""
+            if (messageContent && !isDuplicateMessage(messageContent, 'agent-message')) {
+              const interactions = normalizeInteractions(result.interactions)
+              const msgId = generateMessageId("msg-agent")
+              dispatch({
+                type: "ADD_MESSAGE",
+                payload: {
+                  id: msgId,
+                  role: "assistant",
+                  content: messageContent,
+                  rawContent: messageContent,
+                  timestamp: message.timestamp,
+                  status: "running",
+                  isResult: true,
+                  interactions: interactions.length > 0 ? interactions : undefined,
+                }
+              })
+            }
           } else if (eventType === "react_task_failed" || eventType === "task_failed_react") {
             const traceEvent: TraceEvent = {
               event_id: generateMessageId("react-task-failed"),
@@ -3366,6 +3507,10 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
         break
 
       case "dag_execution":
+        const dagSteps = stepsFromPlanData(message.data, state.steps)
+        if (dagSteps) {
+          dispatch({ type: "SET_STEPS", payload: dagSteps })
+        }
         dispatch({ type: "SET_DAG_EXECUTION", payload: message.data as DAGExecution })
         break
 
@@ -3373,6 +3518,40 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
       case "task_paused":
         console.trace('Original message:', JSON.stringify(message), 'Handler: handleMessage (task_paused)')
         dispatch({ type: "UPDATE_TASK_STATUS", payload: { status: "paused" } })
+        break
+
+      case "task_waiting_for_user":
+        console.trace('Original message:', JSON.stringify(message), 'Handler: handleMessage (task_waiting_for_user)')
+        const waitingData = message.data as any
+        const waitingMessage = waitingData?.question || waitingData?.message || ""
+        const interactions = normalizeInteractions(waitingData?.interactions)
+        dispatch({
+          type: "UPDATE_TASK_STATUS",
+          payload: {
+            status: "waiting_for_user",
+            waitingQuestion: waitingMessage && waitingMessage !== "Task waiting for user response" ? waitingMessage : undefined,
+            waitingInteractions: interactions.length > 0 ? interactions : undefined,
+          }
+        })
+        if (
+          waitingMessage &&
+          waitingMessage !== "Task waiting for user response" &&
+          !isDuplicateMessage(waitingMessage, 'agent-message')
+        ) {
+          dispatch({
+            type: "ADD_MESSAGE",
+            payload: {
+              id: generateMessageId("msg-agent"),
+              role: "assistant",
+              content: waitingMessage,
+              rawContent: waitingMessage,
+              timestamp: message.timestamp,
+              status: "running",
+              isResult: true,
+              interactions: interactions.length > 0 ? interactions : undefined,
+            }
+          })
+        }
         break
 
       case "task_resumed":
@@ -3461,13 +3640,15 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
         // Note: Files will be uploaded via WebSocket after task creation
         // The backend TaskCreateRequest expects JSON with 'files' as a list of filenames (strings)
         // Since we haven't uploaded files yet, we don't include them in the task creation request
-        const executionMode = config?.executionMode?.mode || (config?.agentId ? "balanced" : "think")
+        const executionMode = config?.executionMode?.mode || (config?.agentId ? "balanced" : undefined)
 
         const requestBody: any = {
           title: message,
           description: message,
-          execution_mode: executionMode,
           memory_similarity_threshold: config?.memorySimilarityThreshold ?? 1.5,
+        }
+        if (executionMode) {
+          requestBody.execution_mode = executionMode
         }
 
         // Upload files first if present
@@ -3478,7 +3659,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
           if (filesToUpload.length > 0) {
             const formData = new FormData()
             filesToUpload.forEach(f => formData.append('files', f))
-            formData.append('task_type', executionMode)
+            formData.append('task_type', executionMode ?? 'general')
 
             try {
               const uploadResponse = await apiRequest(`${apiUrl}/api/files/upload`, {
@@ -3576,6 +3757,8 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
             executionMode: taskData.execution_mode,
             isDag: taskData.is_dag,
             agentId: taskData.agent_id,
+            waitingQuestion: taskData.waiting_question,
+            waitingInteractions: normalizeInteractions(taskData.waiting_interactions),
           }
           dispatch({ type: "SET_CURRENT_TASK", payload: newTask })
           dispatch({ type: "TRIGGER_TASK_UPDATE" })

@@ -223,7 +223,10 @@ export function ThinkingTimeline({ steps, isComplete, onAutoCollapse }: Thinking
         )}
 
         {step.tool_names && step.tool_names.length > 0 && (
-          <div className="flex flex-wrap gap-1">
+          <div className="flex flex-wrap items-center gap-1">
+            <span className="text-xs text-muted-foreground">
+              {t('agent.layout.center.labels.suggestedTools')}
+            </span>
             {step.tool_names.map((tool, index) => (
               <Badge key={index} variant="secondary" className="text-xs">
                 {tool}

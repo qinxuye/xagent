@@ -14,6 +14,7 @@ import {
   FileText,
   Check,
   Shield,
+  MessageSquare,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useApp } from '@/contexts/app-context-chat';
@@ -51,12 +52,14 @@ interface TraceEvent {
     model_name?: string;
     tool_name?: string;
     tool_args?: ToolArgs;
+    tool_params?: ToolArgs;
     selected?: boolean;
     skill_name?: string;
     response?: {
       reasoning?: string;
       tool_name?: string;
       tool_args?: ToolArgs;
+      tool_params?: ToolArgs;
       answer?: string;
     };
     result?: ToolResult | string;
@@ -92,6 +95,20 @@ interface StepAction {
   };
 }
 
+function formatActionContent(value: unknown): string {
+  if (value === undefined || value === null) {
+    return '';
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
 interface ProcessedStep {
   stepId: string;
   stepName: string;
@@ -108,6 +125,33 @@ interface ProcessedStep {
 interface TraceEventRendererProps {
   events: TraceEvent[];
 }
+
+const getWaitingQuestionFromEvents = (events: TraceEvent[]): string | null => {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.event_type === 'agent_message') {
+      const expectsResponse = event.data?.expect_response === true || event.data?.message_type === 'question';
+      if (!expectsResponse) {
+        continue;
+      }
+      const message = event.data?.message || event.data?.content;
+      if (typeof message === 'string' && message.trim()) {
+        return message;
+      }
+    }
+    if (event.event_type === 'react_task_end') {
+      const result = event.data?.result as any;
+      if (
+        result?.status === 'waiting_for_user' &&
+        typeof result.message === 'string' &&
+        result.message.trim()
+      ) {
+        return result.message;
+      }
+    }
+  }
+  return null;
+};
 
 // Process trace events into steps
 function useProcessedSteps(events: TraceEvent[]): ProcessedStep[] {
@@ -217,8 +261,12 @@ function useProcessedSteps(events: TraceEvent[]): ProcessedStep[] {
       }
 
       if (event.event_type === 'tool_execution_start') {
-        // Support both data.response.tool_args.code and data.tool_args.code
-        const toolArgs = event.data?.response?.tool_args || event.data?.tool_args;
+        // Support v1 tool_args and v2 tool_params shapes.
+        const toolArgs =
+          event.data?.response?.tool_args ||
+          event.data?.response?.tool_params ||
+          event.data?.tool_args ||
+          event.data?.tool_params;
         if (toolArgs?.code) {
           step.code = toolArgs.code as string;
         }
@@ -303,6 +351,22 @@ function useProcessedSteps(events: TraceEvent[]): ProcessedStep[] {
 
       if (event.event_type === 'dag_step_end' || event.event_type === 'step_completed' || event.event_type === 'react_task_end' || event.event_type === 'task_completion') {
         step.status = 'completed';
+        const shouldShowStepResult = event.event_type === 'dag_step_end' || event.event_type === 'step_completed';
+        const result = shouldShowStepResult
+          ? event.data?.result ?? event.data?.result_data ?? event.data?.response?.answer
+          : undefined;
+        const content = formatActionContent(result);
+        if (shouldShowStepResult && content.trim()) {
+          step.output = content;
+          step.actions.push({
+            id: `${eventId}-result`,
+            type: 'info',
+            title: t('traceEventRenderer.stepResult'),
+            status: 'completed',
+            timestamp,
+            data: { output: content }
+          });
+        }
         // Ensure all actions are completed
         step.actions.forEach(a => {
           if (a.status === 'running') a.status = 'completed';
@@ -310,7 +374,12 @@ function useProcessedSteps(events: TraceEvent[]): ProcessedStep[] {
       }
 
       if (['dag_step_failed', 'tool_execution_failed', 'llm_call_failed', 'react_task_failed', 'agent_error', 'trace_error'].includes(event.event_type as string)) {
-        step.status = 'failed';
+        const isTerminalFailure = ['dag_step_failed', 'react_task_failed', 'agent_error'].includes(event.event_type as string);
+        if (isTerminalFailure) {
+          step.status = 'failed';
+        } else if (step.status === 'pending') {
+          step.status = 'running';
+        }
 
         // Extract error message with more fallback options
         const errorData = event.data || {};
@@ -578,7 +647,7 @@ const DefaultToolRenderer = ({ action, isRunning, t, onFileClick, onAgentClick }
 const ToolDetailsRenderer = ({ action, onOpenTerminal, isRunning, t, onFileClick, onAgentClick }: any) => {
   const toolName = action.data.tool;
   let rendererContent = null;
-  if (toolName === 'python_executor') {
+  if (toolName === 'python_executor' || toolName === 'execute_python_code') {
     rendererContent = <PythonToolRenderer action={action} onOpenTerminal={onOpenTerminal} isRunning={isRunning} t={t} onFileClick={onFileClick} onAgentClick={onAgentClick} />;
   } else if (toolName === 'bash') {
     rendererContent = <BashToolRenderer action={action} onOpenTerminal={onOpenTerminal} isRunning={isRunning} t={t} onFileClick={onFileClick} onAgentClick={onAgentClick} />;
@@ -689,6 +758,10 @@ function StepActionItem({ action, onViewDetail, onOpenTerminal, onFileClick, onA
         } catch (e) { return null; }
       }
     }
+    if (action.type === 'info' && action.data.output) {
+      const clean = formatActionContent(action.data.output).replace(/[\n\r\s]+/g, ' ').trim();
+      return clean.length > 50 ? clean.slice(0, 50) + '...' : clean;
+    }
     return null;
   }, [action.type, action.data, t]);
 
@@ -772,7 +845,7 @@ function StepActionItem({ action, onViewDetail, onOpenTerminal, onFileClick, onA
             <span className="flex-shrink-0 flex items-center">
               {action.type === 'tool' && <Wrench className="w-3.5 h-3.5" />}
               {action.type === 'error' && <Info className="w-3.5 h-3.5 text-red-500" />}
-              {action.type === 'info' && <Info className="w-3.5 h-3.5" />}
+              {action.type === 'info' && <MessageSquare className="w-3.5 h-3.5" />}
             </span>
 
             <span className="font-medium break-words [overflow-wrap:anywhere]">{action.title}</span>
@@ -842,6 +915,14 @@ function StepActionItem({ action, onViewDetail, onOpenTerminal, onFileClick, onA
                   <div className="text-red-400 whitespace-pre-wrap">
                     {String(action.data.error)}
                   </div>
+                )}
+
+                {action.type === 'info' && (
+                  <MarkdownRenderer
+                    content={formatActionContent(action.data.output)}
+                    onFileClick={onFileClick}
+                    className="text-sm leading-relaxed prose-neutral dark:prose-invert max-w-none"
+                  />
                 )}
               </div>
             </ScrollArea>
@@ -1009,7 +1090,20 @@ export function TraceEventRenderer({ events }: TraceEventRendererProps) {
   }, [openFilePreview, dispatch, t]);
 
   if (steps.length === 0 && !skillSelection) {
-    return null;
+    const waitingQuestion = getWaitingQuestionFromEvents(events);
+    if (!waitingQuestion) {
+      return null;
+    }
+    return (
+      <div className="space-y-3">
+        <div className="flex items-start gap-2">
+          <CheckCircle2 className="w-5 h-5 text-green-500 mt-0.5" />
+          <div className="text-sm leading-relaxed text-foreground">
+            <MarkdownRenderer content={waitingQuestion} />
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (

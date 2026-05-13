@@ -58,7 +58,7 @@ import { useI18n } from "@/contexts/i18n-context"
 interface Task {
   task_id: string
   title: string
-  status: "completed" | "running" | "failed" | "pending" | "paused"
+  status: "completed" | "running" | "failed" | "pending" | "paused" | "waiting_for_user"
   created_at: string | number
   description?: string
   agent_id?: number
@@ -999,7 +999,7 @@ export function Sidebar({ className, allowCollapse = true }: SidebarProps) {
                             {task.status === 'running' && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
                             {task.status === 'completed' && <CheckCircle2 className="h-4 w-4 text-green-500" />}
                             {task.status === 'failed' && <XCircle className="h-4 w-4 text-red-500" />}
-                            {task.status === 'paused' && <PauseCircle className="h-4 w-4 text-yellow-500" />}
+                            {(task.status === 'paused' || task.status === 'waiting_for_user') && <PauseCircle className="h-4 w-4 text-yellow-500" />}
                             {task.status === 'pending' && <Loader2 className="h-4 w-4 animate-spin text-gray-400" />}
                           </div>
                         </div>
