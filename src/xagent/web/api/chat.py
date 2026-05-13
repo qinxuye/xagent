@@ -1096,9 +1096,11 @@ class AgentServiceManager:
                                 continue
 
                             # Use the source file directly (user's upload directory) instead of copying
-                            # This avoids duplicate files across the system
+                            # This avoids duplicate files across the system.
+                            # Resolve to an absolute path so Workspace.register_file
+                            # doesn't try to interpret it as workspace-relative.
                             workspace.register_file(
-                                str(source_path), file_id=selected_file_id
+                                str(source_path.resolve()), file_id=selected_file_id
                             )
 
                 pattern_info = (

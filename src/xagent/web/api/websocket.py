@@ -1538,8 +1538,11 @@ async def handle_file_upload_for_task(
                 db.flush()
 
                 if agent_service.workspace:
+                    # Pass absolute path so resolve_path() in register_file
+                    # doesn't mistake a CWD-relative storage_path for a
+                    # workspace-relative one (looking under output/...).
                     agent_service.workspace.register_file(
-                        str(target_path),
+                        str(target_path.resolve()),
                         file_id=str(file_record.file_id),
                         db_session=db,
                     )
@@ -4089,8 +4092,11 @@ async def handle_build_preview_execution(
                         uploaded_files.append(str(target_path))
 
                         if agent_service.workspace:
+                            # Pass absolute path — resolve_path() else mistakes
+                            # CWD-relative for workspace-relative.
                             agent_service.workspace.register_file(
-                                str(target_path), file_id=str(file_record.file_id)
+                                str(target_path.resolve()),
+                                file_id=str(file_record.file_id),
                             )
 
                         file_info_list.append(

@@ -326,6 +326,13 @@ class TaskWorkspace:
             if abs_path == workspace_abs or abs_path.is_relative_to(workspace_abs):
                 return abs_path
 
+            # Check if within base_dir (the uploads root). User-uploaded files
+            # live at base_dir/user_<id>/, sibling to the task workspace
+            # base_dir/<task_id>/. Accept them so register_file works.
+            base_abs = self.base_dir.resolve()
+            if abs_path.is_relative_to(base_abs):
+                return abs_path
+
             # Check if within any allowed external directory
             for allowed_dir in self.allowed_external_dirs:
                 if abs_path.is_relative_to(allowed_dir):
@@ -409,6 +416,13 @@ class TaskWorkspace:
             # Check if within workspace
             workspace_abs = self.workspace_dir.resolve()
             if abs_path == workspace_abs or abs_path.is_relative_to(workspace_abs):
+                return abs_path
+
+            # Check if within base_dir (the uploads root). User-uploaded files
+            # live at base_dir/user_<id>/, sibling to the task workspace
+            # base_dir/<task_id>/. Accept them so register_file works.
+            base_abs = self.base_dir.resolve()
+            if abs_path.is_relative_to(base_abs):
                 return abs_path
 
             # Check if within any allowed external directory
