@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react"
 import { useAuth } from "@/contexts/auth-context"
 import { apiRequest, getUploadErrorMessage, isJsonRecord, parseApiResponse, UPLOAD_ERROR_MESSAGES } from "@/lib/api-wrapper"
 import { toast } from "sonner"
-import { getWsUrl, getApiUrl } from "@/lib/utils"
+import { getWsUrl, getApiUrl, getUploadApiUrl } from "@/lib/utils"
 
 // Duplicate message detection: record recently sent messages
 const recentMessages: Array<{ message: string; timestamp: number; taskId: number }> = []
@@ -453,7 +453,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
             formData.append('task_id', taskIdRef.current.toString())
           }
 
-          apiRequest(`${getApiUrl()}/api/files/upload`, {
+          apiRequest(`${getUploadApiUrl()}/api/files/upload`, {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${token || localStorage.getItem('token') || ''}`

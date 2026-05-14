@@ -1527,10 +1527,55 @@ async def handle_file_upload_for_task(
                 original_file_name = Path(file_name).name
                 normalized_file_name = normalize_filename(original_file_name)
 
-                # Do not copy file to workspace input directory to avoid duplication
-                # Use the user directory file directly
+                # Keep the real file in the user-level uploads dir, but expose
+                # a symlink inside the task workspace's input/ directory so
+                # the agent's `list_files` tool can see it without needing
+                # additional tool calls. Without this link, `list_files`
+                # returns an empty workspace and the agent often gives up
+                # before falling back to `list_all_user_files`.
                 target_path = source_path
                 uploaded_files.append(str(target_path))
+
+                workspace_link_path: Path | None = None
+                if agent_service.workspace:
+                    try:
+                        input_dir = Path(agent_service.workspace.input_dir)
+                        input_dir.mkdir(parents=True, exist_ok=True)
+                        candidate = input_dir / normalized_file_name
+                        # If something with the same name already exists in
+                        # input/, give the link a unique numeric suffix.
+                        suffix_idx = 1
+                        stem, ext = candidate.stem, candidate.suffix
+                        while candidate.exists() or candidate.is_symlink():
+                            try:
+                                if candidate.resolve() == source_path.resolve():
+                                    break  # already pointing at the right file
+                            except OSError:
+                                pass
+                            candidate = input_dir / f"{stem}_{suffix_idx}{ext}"
+                            suffix_idx += 1
+                        if not (candidate.exists() or candidate.is_symlink()):
+                            try:
+                                candidate.symlink_to(source_path.resolve())
+                                workspace_link_path = candidate
+                            except OSError as link_err:
+                                # Fall back to copy when symlinks aren't
+                                # supported (e.g. some Windows configs).
+                                logger.warning(
+                                    f"symlink failed ({link_err}); copying "
+                                    f"{source_path.name} into workspace"
+                                )
+                                import shutil as _shutil
+
+                                _shutil.copy2(source_path, candidate)
+                                workspace_link_path = candidate
+                        else:
+                            workspace_link_path = candidate
+                    except Exception as link_err:  # noqa: BLE001
+                        logger.warning(
+                            f"Could not expose {source_path.name} in task "
+                            f"workspace input/: {link_err}"
+                        )
 
                 if file_record.task_id is None:
                     file_record.task_id = task_id
@@ -1556,11 +1601,18 @@ async def handle_file_upload_for_task(
                         "size": file_size,
                         "type": file_type,
                         "path": str(target_path),
+                        "workspace_path": (
+                            str(workspace_link_path)
+                            if workspace_link_path
+                            else None
+                        ),
                     }
                 )
 
                 logger.info(
-                    f"File added to workspace without copying: {target_path} (original: {original_file_name} -> normalized: {normalized_file_name})"
+                    f"File registered: storage={target_path} "
+                    f"input_link={workspace_link_path} "
+                    f"(original={original_file_name} normalized={normalized_file_name})"
                 )
 
             except Exception as e:
@@ -1617,6 +1669,57 @@ async def handle_chat_message(
         context = message_data.get("context", {})
         files = message_data.get("files", [])
         user = message_data.get("user")
+
+        # Race-condition fallback: when the message arrives without `files`
+        # in its payload, the frontend may still have uploaded files via the
+        # HTTP /api/files/upload endpoint a moment earlier. Look those up in
+        # the DB and treat them as if they had been declared inline. This
+        # fixes the task-36 scenario where the agent's first turn answered
+        # "I don't see any documents" despite a successful HTTP upload.
+        if not files and user is not None:
+            try:
+                from datetime import datetime, timedelta, timezone
+
+                from sqlalchemy.orm import Session as _Session
+
+                from ..models.database import get_db as _get_db
+                from ..models.uploaded_file import UploadedFile as _UF
+
+                _db_iter = _get_db()
+                _db: _Session = next(_db_iter)
+                try:
+                    cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+                    pending = (
+                        _db.query(_UF)
+                        .filter(
+                            _UF.user_id == int(user.id),
+                            (_UF.task_id == int(task_id))
+                            | (_UF.task_id.is_(None)),
+                            _UF.created_at >= cutoff,
+                        )
+                        .order_by(_UF.created_at.desc())
+                        .all()
+                    )
+                    if pending:
+                        files = [
+                            {
+                                "file_id": str(record.file_id),
+                                "name": str(record.filename),
+                                "size": int(record.file_size or 0),
+                                "type": record.mime_type,
+                            }
+                            for record in pending
+                        ]
+                        logger.info(
+                            f"📁 Race fallback: recovered {len(files)} "
+                            f"uploaded file(s) from DB for task {task_id}"
+                        )
+                finally:
+                    _db.close()
+            except Exception as _e:  # noqa: BLE001
+                logger.warning(
+                    f"Race fallback file lookup failed for task {task_id}: {_e}"
+                )
 
         logger.info(f"Received chat message for task {task_id}")
         logger.info(f"👤 User: {user.id if user else 'unknown'}")

@@ -3,7 +3,7 @@ import { createFileChipHTML } from "./FileChip";
 import { useRouter } from "next/navigation";
 import { Paperclip, X, File as FileIcon, Sparkles, Pause, Play, Loader2, ArrowUp, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn, getApiUrl } from "@/lib/utils";
+import { cn, getApiUrl, getUploadApiUrl } from "@/lib/utils";
 import { useI18n } from "@/contexts/i18n-context";
 import { useApp } from "@/contexts/app-context-chat";
 import { ConfigDialog } from "@/components/config-dialog";
@@ -273,7 +273,7 @@ export function ChatInput({
         // Default to task mode if not specified
         formData.append('task_type', mode || 'task');
 
-        const response = await apiRequest(`${getApiUrl()}/api/files/upload`, {
+        const response = await apiRequest(`${getUploadApiUrl()}/api/files/upload`, {
           method: 'POST',
           body: formData,
           signal: controller.signal

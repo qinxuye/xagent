@@ -35,7 +35,7 @@ export interface Interaction {
 }
 import { useWebSocket } from "@/hooks/use-websocket"
 import { useAuth } from "@/contexts/auth-context"
-import { getApiUrl } from "@/lib/utils"
+import { getApiUrl, getUploadApiUrl } from "@/lib/utils"
 import { apiRequest, getUploadErrorMessage, isJsonRecord, parseApiResponse, UPLOAD_ERROR_MESSAGES } from "@/lib/api-wrapper"
 import { useI18n } from "@/contexts/i18n-context"
 import { normalizeTimestampMs } from "@/lib/time-utils"
@@ -3662,7 +3662,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
             formData.append('task_type', executionMode ?? 'general')
 
             try {
-              const uploadResponse = await apiRequest(`${apiUrl}/api/files/upload`, {
+              const uploadResponse = await apiRequest(`${getUploadApiUrl()}/api/files/upload`, {
                 method: 'POST',
                 body: formData
               })

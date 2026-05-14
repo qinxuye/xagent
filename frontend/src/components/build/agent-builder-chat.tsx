@@ -4,7 +4,7 @@ import { ChatMessage } from "@/components/chat/ChatMessage"
 import { ChatInput } from "@/components/chat/ChatInput"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { useAuth } from "@/contexts/auth-context"
-import { getApiUrl } from "@/lib/utils"
+import { getApiUrl, getUploadApiUrl } from "@/lib/utils"
 import { apiRequest } from "@/lib/api-wrapper"
 import { useI18n } from "@/contexts/i18n-context"
 import { toast } from "sonner"
@@ -148,7 +148,7 @@ export function AgentBuilderChat({ agentConfig, onUpdateConfig, availableOptions
         files.forEach(f => formData.append('files', f));
         formData.append('task_type', 'task');
 
-        const uploadResponse = await apiRequest(`${getApiUrl()}/api/files/upload`, {
+        const uploadResponse = await apiRequest(`${getUploadApiUrl()}/api/files/upload`, {
           method: 'POST',
           body: formData,
         });
