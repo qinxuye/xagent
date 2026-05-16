@@ -5,6 +5,7 @@ Executes any tool in isolated process by receiving the tool instance
 and calling its run_json_async method. xoscar handles serialization automatically.
 """
 
+import traceback
 from typing import Any
 
 from .base_executor_actor import BaseExecutorActor
@@ -50,8 +51,6 @@ class ToolExecutorActor(BaseExecutorActor):
                 }
 
             except Exception as e:
-                import traceback
-
                 error_message = f"{type(e).__name__}: {str(e)}"
                 error_traceback = traceback.format_exc()
                 return {

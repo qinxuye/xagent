@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import sys
+import uuid
 from typing import Any, Optional
 
 import xoscar as xo
@@ -116,9 +117,15 @@ class ProcessService(BaseService):
 
     def _sub_pool_env(self) -> dict[str, str]:
         """Build environment for child pools so xoscar can import caller modules."""
-        env = dict(os.environ)
-        path_entries = [os.path.abspath(path or os.getcwd()) for path in sys.path]
-        existing_pythonpath = env.get("PYTHONPATH")
+        cwd = os.getcwd()
+        path_entries = []
+        for path in sys.path:
+            abs_path = os.path.abspath(path or cwd)
+            if abs_path == cwd or abs_path.startswith(cwd + os.sep):
+                path_entries.append(abs_path)
+
+        env = {}
+        existing_pythonpath = os.environ.get("PYTHONPATH")
         if existing_pythonpath:
             path_entries.extend(existing_pythonpath.split(os.pathsep))
         env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(path_entries))
@@ -151,6 +158,7 @@ class ProcessService(BaseService):
     ) -> ExecutionResult:
         sub_pool_address = None
         actor_ref = None
+        timed_out = False
 
         try:
             sub_pool_address = await self._pool.append_sub_pool(
@@ -173,6 +181,7 @@ class ProcessService(BaseService):
             return ExecutionResult.from_dict(result_dict)
 
         except asyncio.TimeoutError:
+            timed_out = True
             return ExecutionResult(
                 success=False,
                 output="",
@@ -187,7 +196,7 @@ class ProcessService(BaseService):
                 return_code=-1,
             )
         finally:
-            if actor_ref is not None:
+            if actor_ref is not None and not timed_out:
                 try:
                     await xo.destroy_actor(actor_ref)
                     logger.debug(f"Destroyed actor {task_id}")
@@ -199,7 +208,7 @@ class ProcessService(BaseService):
 
             if sub_pool_address and self._pool is not None:
                 try:
-                    await self._pool.remove_sub_pool(sub_pool_address)
+                    await self._pool.remove_sub_pool(sub_pool_address, force=timed_out)
                     logger.debug(f"Removed sub-pool {sub_pool_address}")
                 except Exception as e:
                     logger.error(f"Failed to remove sub-pool {sub_pool_address}: {e}")
@@ -215,8 +224,6 @@ class ProcessService(BaseService):
         Creates a sub-pool, creates an actor, executes the code,
         then destroys both the actor and sub-pool.
         """
-        import uuid
-
         task_id = f"python_{uuid.uuid4().hex[:8]}"
         from ..actors.python_executor_actor import PythonExecutorActor
 
@@ -239,8 +246,6 @@ class ProcessService(BaseService):
         Creates a sub-pool, creates an actor, executes the tool,
         then destroys both the actor and sub-pool.
         """
-        import uuid
-
         task_id = f"tool_{uuid.uuid4().hex[:8]}"
         from ..actors.tool_executor_actor import ToolExecutorActor
 
@@ -259,8 +264,6 @@ class ProcessService(BaseService):
         timeout: int = 300,
     ) -> ExecutionResult:
         """Execute a shell command in a dynamic actor."""
-        import uuid
-
         from ..actors.command_executor_actor import CommandExecutorActor
 
         task_id = f"command_{uuid.uuid4().hex[:8]}"
@@ -279,8 +282,6 @@ class ProcessService(BaseService):
         timeout: int = 300,
     ) -> ExecutionResult:
         """Execute JavaScript code in a dynamic actor."""
-        import uuid
-
         from ..actors.javascript_executor_actor import JavaScriptExecutorActor
 
         task_id = f"javascript_{uuid.uuid4().hex[:8]}"

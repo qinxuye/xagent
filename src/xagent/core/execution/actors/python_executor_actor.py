@@ -6,6 +6,7 @@ Executes Python code in isolated process using xoscar actor framework.
 
 import contextlib
 import io
+import os
 import traceback
 from typing import Optional
 
@@ -40,7 +41,6 @@ class PythonExecutorActor(BaseExecutorActor):
                 - metadata: dict
                 - execution_time: float
         """
-        import os
 
         def _execute() -> dict:
             """Internal execution function."""
