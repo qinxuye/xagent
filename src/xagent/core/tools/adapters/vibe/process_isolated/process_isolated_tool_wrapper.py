@@ -7,6 +7,7 @@ xoscar automatically handles serialization - no need for manual pickle/json enco
 
 import asyncio
 import logging
+import threading
 from typing import Any, Mapping
 
 from pydantic import BaseModel
@@ -73,8 +74,27 @@ class ProcessIsolatedToolWrapper(AbstractBaseTool):
         return self._target.state_type()
 
     def run_json_sync(self, args: Mapping[str, Any]) -> Any:
-        """Synchronous execution (calls async version via asyncio.run)"""
-        return asyncio.run(self.run_json_async(args))
+        """Synchronous execution."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.run_json_async(args))
+
+        result: dict[str, Any] = {}
+
+        def _run_in_thread() -> None:
+            try:
+                result["value"] = asyncio.run(self.run_json_async(args))
+            except BaseException as exc:
+                result["error"] = exc
+
+        thread = threading.Thread(target=_run_in_thread, daemon=True)
+        thread.start()
+        thread.join()
+
+        if "error" in result:
+            raise result["error"]
+        return result.get("value")
 
     async def run_json_async(self, args: Mapping[str, Any]) -> Any:
         """Execute tool asynchronously in isolated process.

@@ -1,6 +1,7 @@
 """Shell command executor actor."""
 
 import asyncio
+import shlex
 from typing import Optional
 
 from .base_executor_actor import BaseExecutorActor
@@ -16,8 +17,16 @@ class CommandExecutorActor(BaseExecutorActor):
         timeout: int = 300,
     ) -> dict:
         async def _execute() -> dict:
-            process = await asyncio.create_subprocess_shell(
-                command,
+            argv = shlex.split(command)
+            if not argv:
+                return {
+                    "output": "",
+                    "error": "Command cannot be empty",
+                    "return_code": 1,
+                }
+
+            process = await asyncio.create_subprocess_exec(
+                *argv,
                 cwd=workspace,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

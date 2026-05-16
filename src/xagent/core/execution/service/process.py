@@ -36,6 +36,8 @@ class ProcessService(BaseService):
         super().__init__()
         self._address = address
         self._n_workers = n_workers
+        self._max_concurrency = n_workers if n_workers > 0 else (os.cpu_count() or 1)
+        self._semaphore = asyncio.Semaphore(self._max_concurrency)
         self._lock = asyncio.Lock()
         self._active_actors: dict[str, Any] = {}
         self._pool: Any = None
@@ -102,6 +104,7 @@ class ProcessService(BaseService):
                 "type": "dynamic",
                 "address": self._address,
                 "n_workers": self._n_workers,
+                "max_concurrency": self._max_concurrency,
                 "active_actors": len(self._active_actors),
             },
             metrics={},
@@ -131,6 +134,21 @@ class ProcessService(BaseService):
         """Execute an actor call in a temporary sub-pool."""
         self._ensure_running()
 
+        async with self._semaphore:
+            return await self._execute_in_sub_pool(
+                task_id,
+                actor_cls,
+                timeout,
+                **execute_kwargs,
+            )
+
+    async def _execute_in_sub_pool(
+        self,
+        task_id: str,
+        actor_cls: Any,
+        timeout: int,
+        **execute_kwargs: Any,
+    ) -> ExecutionResult:
         sub_pool_address = None
         actor_ref = None
 
