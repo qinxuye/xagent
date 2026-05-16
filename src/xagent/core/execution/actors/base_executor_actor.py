@@ -4,6 +4,7 @@ Base executor actor class.
 Provides common functionality for all executor actors using xoscar framework.
 """
 
+import inspect
 import time
 import traceback
 from typing import Any
@@ -49,7 +50,40 @@ class BaseExecutorActor(xo.Actor):  # type: ignore[misc]
             execution_time = time.time() - start_time
 
             return {
-                "success": True,
+                "success": result.get("success", result.get("return_code", 0) == 0),
+                "output": result.get("output", ""),
+                "error": result.get("error", ""),
+                "return_code": result.get("return_code", 0),
+                "metadata": result.get("metadata", {}),
+                "execution_time": execution_time,
+            }
+        except Exception as e:
+            execution_time = time.time() - start_time
+            error_message = f"{type(e).__name__}: {str(e)}"
+            error_traceback = traceback.format_exc()
+
+            return {
+                "success": False,
+                "output": "",
+                "error": error_message,
+                "return_code": -1,
+                "metadata": {"traceback": error_traceback},
+                "execution_time": execution_time,
+            }
+
+    async def _execute_async_with_tracking(
+        self, func: Any, *args: Any, **kwargs: Any
+    ) -> dict:
+        """Execute async-capable function with time tracking."""
+        start_time = time.time()
+        try:
+            result = func(*args, **kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+            execution_time = time.time() - start_time
+
+            return {
+                "success": result.get("success", result.get("return_code", 0) == 0),
                 "output": result.get("output", ""),
                 "error": result.get("error", ""),
                 "return_code": result.get("return_code", 0),

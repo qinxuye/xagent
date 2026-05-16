@@ -8,6 +8,8 @@ Sub-pools are created on-demand and destroyed when done.
 
 import asyncio
 import logging
+import os
+import sys
 from typing import Any, Optional
 
 import xoscar as xo
@@ -30,11 +32,13 @@ class ProcessService(BaseService):
     After execution, the sub-pool is killed.
     """
 
-    def __init__(self, address: str = "localhost:12345"):
+    def __init__(self, address: str = "localhost:12345", n_workers: int = 0):
         super().__init__()
         self._address = address
+        self._n_workers = n_workers
         self._lock = asyncio.Lock()
         self._active_actors: dict[str, Any] = {}
+        self._pool: Any = None
 
     @property
     def service_name(self) -> str:
@@ -75,6 +79,7 @@ class ProcessService(BaseService):
             # Stop main pool (this will also stop all sub-pools)
             if self._pool:
                 await self._pool.stop()
+                self._pool = None
                 logger.info("Main pool stopped")
 
             self._status = ServiceStatus.STOPPED
@@ -96,10 +101,90 @@ class ProcessService(BaseService):
             resource_info={
                 "type": "dynamic",
                 "address": self._address,
+                "n_workers": self._n_workers,
                 "active_actors": len(self._active_actors),
             },
             metrics={},
         )
+
+    def _ensure_running(self) -> None:
+        if self._status != ServiceStatus.RUNNING or self._pool is None:
+            raise RuntimeError("ProcessService not started")
+
+    def _sub_pool_env(self) -> dict[str, str]:
+        """Build environment for child pools so xoscar can import caller modules."""
+        env = dict(os.environ)
+        path_entries = [os.path.abspath(path or os.getcwd()) for path in sys.path]
+        existing_pythonpath = env.get("PYTHONPATH")
+        if existing_pythonpath:
+            path_entries.extend(existing_pythonpath.split(os.pathsep))
+        env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(path_entries))
+        return env
+
+    async def _execute_in_actor(
+        self,
+        task_id: str,
+        actor_cls: Any,
+        timeout: int,
+        **execute_kwargs: Any,
+    ) -> ExecutionResult:
+        """Execute an actor call in a temporary sub-pool."""
+        self._ensure_running()
+
+        sub_pool_address = None
+        actor_ref = None
+
+        try:
+            sub_pool_address = await self._pool.append_sub_pool(
+                label=task_id,
+                env=self._sub_pool_env(),
+            )
+            logger.debug(f"Appended sub-pool {sub_pool_address} for {task_id}")
+
+            actor_ref = await xo.create_actor(actor_cls, address=sub_pool_address)
+            async with self._lock:
+                self._active_actors[task_id] = actor_ref
+
+            logger.debug(f"Created actor {task_id}")
+            actor = await xo.actor_ref(actor_ref)
+
+            result_dict = await asyncio.wait_for(
+                actor.execute(**execute_kwargs, timeout=timeout),
+                timeout=timeout,
+            )
+            return ExecutionResult.from_dict(result_dict)
+
+        except asyncio.TimeoutError:
+            return ExecutionResult(
+                success=False,
+                output="",
+                error=f"Execution timed out after {timeout} seconds",
+                return_code=-1,
+            )
+        except Exception as e:
+            return ExecutionResult(
+                success=False,
+                output="",
+                error=f"Execution failed: {str(e)}",
+                return_code=-1,
+            )
+        finally:
+            if actor_ref is not None:
+                try:
+                    await xo.destroy_actor(actor_ref)
+                    logger.debug(f"Destroyed actor {task_id}")
+                except Exception as e:
+                    logger.error(f"Failed to destroy actor {task_id}: {e}")
+                finally:
+                    async with self._lock:
+                        self._active_actors.pop(task_id, None)
+
+            if sub_pool_address and self._pool is not None:
+                try:
+                    await self._pool.remove_sub_pool(sub_pool_address)
+                    logger.debug(f"Removed sub-pool {sub_pool_address}")
+                except Exception as e:
+                    logger.error(f"Failed to remove sub-pool {sub_pool_address}: {e}")
 
     async def execute_python(
         self,
@@ -115,76 +200,15 @@ class ProcessService(BaseService):
         import uuid
 
         task_id = f"python_{uuid.uuid4().hex[:8]}"
-        sub_pool_address = None
-        actor_ref = None
+        from ..actors.python_executor_actor import PythonExecutorActor
 
-        try:
-            # Append a sub-pool for this execution
-            # Let xoscar auto-assign port and address
-            sub_pool_address = await self._pool.append_sub_pool(
-                label=task_id,
-            )
-
-            logger.debug(f"Appended sub-pool {sub_pool_address} for Python execution")
-
-            # Create a temporary actor for this execution
-            from ..actors.python_executor_actor import PythonExecutorActor
-
-            actor_ref = await xo.create_actor(
-                PythonExecutorActor,
-                address=sub_pool_address,
-            )
-
-            # Track actor
-            async with self._lock:
-                self._active_actors[task_id] = actor_ref
-
-            logger.debug(f"Created actor {task_id} for Python execution")
-
-            # Get actor ref and call execute
-            actor = await xo.actor_ref(actor_ref)
-
-            try:
-                result_dict = await asyncio.wait_for(
-                    actor.execute(code=code, workspace=workspace, timeout=timeout),
-                    timeout=timeout,
-                )
-
-                return ExecutionResult.from_dict(result_dict)
-
-            finally:
-                # Clean up actor
-                try:
-                    await xo.destroy_actor(actor_ref)
-                    logger.debug(f"Destroyed actor {task_id}")
-                except Exception as e:
-                    logger.error(f"Failed to destroy actor {task_id}: {e}")
-                finally:
-                    async with self._lock:
-                        self._active_actors.pop(task_id, None)
-
-                # Clean up sub-pool
-                if sub_pool_address:
-                    try:
-                        await self._pool.kill_sub_pool(sub_pool_address)
-                        logger.debug(f"Killed sub-pool {sub_pool_address}")
-                    except Exception as e:
-                        logger.error(f"Failed to kill sub-pool {sub_pool_address}: {e}")
-
-        except asyncio.TimeoutError:
-            return ExecutionResult(
-                success=False,
-                output="",
-                error=f"Execution timed out after {timeout} seconds",
-                return_code=-1,
-            )
-        except Exception as e:
-            return ExecutionResult(
-                success=False,
-                output="",
-                error=f"Execution failed: {str(e)}",
-                return_code=-1,
-            )
+        return await self._execute_in_actor(
+            task_id,
+            PythonExecutorActor,
+            timeout,
+            code=code,
+            workspace=workspace,
+        )
 
     async def execute_tool(
         self,
@@ -200,73 +224,52 @@ class ProcessService(BaseService):
         import uuid
 
         task_id = f"tool_{uuid.uuid4().hex[:8]}"
-        sub_pool_address = None
-        actor_ref = None
+        from ..actors.tool_executor_actor import ToolExecutorActor
 
-        try:
-            # Append a sub-pool for this execution
-            # Let xoscar auto-assign port and address
-            sub_pool_address = await self._pool.append_sub_pool(
-                label=task_id,
-            )
+        return await self._execute_in_actor(
+            task_id,
+            ToolExecutorActor,
+            timeout,
+            tool=tool,
+            args=args,
+        )
 
-            logger.debug(f"Appended sub-pool {sub_pool_address} for tool execution")
+    async def execute_command(
+        self,
+        command: str,
+        workspace: Optional[str] = None,
+        timeout: int = 300,
+    ) -> ExecutionResult:
+        """Execute a shell command in a dynamic actor."""
+        import uuid
 
-            # Create a generic tool executor actor
-            from ..actors.tool_executor_actor import ToolExecutorActor
+        from ..actors.command_executor_actor import CommandExecutorActor
 
-            actor_ref = await xo.create_actor(
-                ToolExecutorActor,
-                address=sub_pool_address,
-            )
+        task_id = f"command_{uuid.uuid4().hex[:8]}"
+        return await self._execute_in_actor(
+            task_id,
+            CommandExecutorActor,
+            timeout,
+            command=command,
+            workspace=workspace,
+        )
 
-            # Track actor
-            async with self._lock:
-                self._active_actors[task_id] = actor_ref
+    async def execute_javascript(
+        self,
+        code: str,
+        workspace: Optional[str] = None,
+        timeout: int = 300,
+    ) -> ExecutionResult:
+        """Execute JavaScript code in a dynamic actor."""
+        import uuid
 
-            logger.debug(f"Created actor {task_id} for tool execution")
+        from ..actors.javascript_executor_actor import JavaScriptExecutorActor
 
-            # Get actor ref and call execute
-            actor = await xo.actor_ref(actor_ref)
-
-            try:
-                result_dict = await asyncio.wait_for(
-                    actor.execute(tool=tool, args=args, timeout=timeout),
-                    timeout=timeout,
-                )
-
-                return ExecutionResult.from_dict(result_dict)
-
-            finally:
-                # Clean up actor
-                try:
-                    await xo.destroy_actor(actor_ref)
-                    logger.debug(f"Destroyed actor {task_id}")
-                except Exception as e:
-                    logger.error(f"Failed to destroy actor {task_id}: {e}")
-                finally:
-                    async with self._lock:
-                        self._active_actors.pop(task_id, None)
-
-                # Clean up sub-pool
-                if sub_pool_address:
-                    try:
-                        await self._pool.kill_sub_pool(sub_pool_address)
-                        logger.debug(f"Killed sub-pool {sub_pool_address}")
-                    except Exception as e:
-                        logger.error(f"Failed to kill sub-pool {sub_pool_address}: {e}")
-
-        except asyncio.TimeoutError:
-            return ExecutionResult(
-                success=False,
-                output="",
-                error=f"Execution timed out after {timeout} seconds",
-                return_code=-1,
-            )
-        except Exception as e:
-            return ExecutionResult(
-                success=False,
-                output="",
-                error=f"Execution failed: {str(e)}",
-                return_code=-1,
-            )
+        task_id = f"javascript_{uuid.uuid4().hex[:8]}"
+        return await self._execute_in_actor(
+            task_id,
+            JavaScriptExecutorActor,
+            timeout,
+            code=code,
+            workspace=workspace,
+        )

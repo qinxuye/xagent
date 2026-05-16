@@ -5,7 +5,6 @@ Executes any tool in isolated process by receiving the tool instance
 and calling its run_json_async method. xoscar handles serialization automatically.
 """
 
-import asyncio
 from typing import Any
 
 from .base_executor_actor import BaseExecutorActor
@@ -27,7 +26,7 @@ class ToolExecutorActor(BaseExecutorActor):
         """Execute tool in isolated process.
 
         Args:
-            tool: Tool instance (serialized and sent by xoscar)
+            tool: Tool instance serialized by xoscar
             args: Tool arguments (serialized and sent by xoscar)
             timeout: Execution timeout in seconds
 
@@ -35,19 +34,13 @@ class ToolExecutorActor(BaseExecutorActor):
             Execution result dictionary
         """
 
-        def _execute() -> dict:
+        async def _execute() -> dict:
             """Internal execution function."""
             try:
-                # Always try sync method first, then async if sync fails
-                try:
-                    if hasattr(tool, "run_json_sync"):
-                        result = tool.run_json_sync(args)
-                    else:
-                        # Fall back to async method
-                        result = asyncio.run(tool.run_json_async(args))
-                except AttributeError:
-                    # No sync method, use async
-                    result = asyncio.run(tool.run_json_async(args))
+                if hasattr(tool, "run_json_async"):
+                    result = await tool.run_json_async(args)
+                else:
+                    result = tool.run_json_sync(args)
 
                 return {
                     "output": result,
@@ -68,6 +61,4 @@ class ToolExecutorActor(BaseExecutorActor):
                     "metadata": {"exception_type": type(e).__name__},
                 }
 
-        return self._execute_with_tracking(_execute)
-
-        return self._execute_with_tracking(_execute)
+        return await self._execute_async_with_tracking(_execute)

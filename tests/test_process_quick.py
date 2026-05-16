@@ -38,22 +38,18 @@ async def test_process_service():
         else:
             print(f"❌ Python execution failed: {result.error}")
 
-        # Test generic tool execution
-        print("\nTesting generic tool execution...")
-        from xagent.core.tools.core.calculator import get_calculator_tool
-
-        calc_tool = get_calculator_tool()
-        result = await service.execute_tool(
-            tool=calc_tool,
-            args={"expression": "2 * 3 * 4"},
+        # Test command execution
+        print("\nTesting command execution...")
+        result = await service.execute_command(
+            command="echo 'Hello from command!'",
             timeout=10,
         )
 
         if result.success:
-            print("✅ Tool execution successful!")
+            print("✅ Command execution successful!")
             print(f"Output: {result.output}")
         else:
-            print(f"❌ Tool execution failed: {result.error}")
+            print(f"❌ Command execution failed: {result.error}")
 
     finally:
         print("\nStopping ProcessService...")
