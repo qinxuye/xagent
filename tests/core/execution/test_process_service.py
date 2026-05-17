@@ -4,6 +4,8 @@ Test ProcessService functionality.
 This test requires xoscar to be installed.
 """
 
+import asyncio
+
 import pytest
 
 from xagent.core.execution.service import ProcessService
@@ -98,6 +100,29 @@ async def test_python_execution_timeout():
 
     finally:
         await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_sub_pool_startup_timeout(monkeypatch):
+    """Test ProcessService does not hang forever when sub-pool startup stalls."""
+    from xagent.core.execution.service import ServiceStatus
+
+    class HangingPool:
+        async def append_sub_pool(self, **kwargs):
+            await asyncio.sleep(10)
+
+        async def remove_sub_pool(self, *args, **kwargs):
+            raise AssertionError("remove_sub_pool should not run without an address")
+
+    service = ProcessService(n_workers=1, address="localhost:12356")
+    service._status = ServiceStatus.RUNNING
+    service._pool = HangingPool()
+
+    result = await service.execute_python("print('never runs')", timeout=0.1)
+
+    assert result.success is False
+    assert "timed out during sub-pool startup" in result.error.lower()
+    assert service.get_info().resource_info["active_actors"] == 0
 
 
 @pytest.mark.asyncio

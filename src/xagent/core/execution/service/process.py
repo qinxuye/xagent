@@ -159,21 +159,33 @@ class ProcessService(BaseService):
         sub_pool_address = None
         actor_ref = None
         timed_out = False
+        startup_timeout = min(float(timeout), 30.0)
+        timeout_stage = "sub-pool startup"
+        timeout_seconds = startup_timeout
 
         try:
-            sub_pool_address = await self._pool.append_sub_pool(
-                label=task_id,
-                env=self._sub_pool_env(),
+            sub_pool_address = await asyncio.wait_for(
+                self._pool.append_sub_pool(
+                    label=task_id,
+                    env=self._sub_pool_env(),
+                ),
+                timeout=startup_timeout,
             )
             logger.debug(f"Appended sub-pool {sub_pool_address} for {task_id}")
 
-            actor_ref = await xo.create_actor(actor_cls, address=sub_pool_address)
+            timeout_stage = "actor creation"
+            actor_ref = await asyncio.wait_for(
+                xo.create_actor(actor_cls, address=sub_pool_address),
+                timeout=startup_timeout,
+            )
             async with self._lock:
                 self._active_actors[task_id] = actor_ref
 
             logger.debug(f"Created actor {task_id}")
             actor = await xo.actor_ref(actor_ref)
 
+            timeout_stage = "actor execution"
+            timeout_seconds = float(timeout)
             result_dict = await asyncio.wait_for(
                 actor.execute(**execute_kwargs, timeout=timeout),
                 timeout=timeout,
@@ -185,7 +197,10 @@ class ProcessService(BaseService):
             return ExecutionResult(
                 success=False,
                 output="",
-                error=f"Execution timed out after {timeout} seconds",
+                error=(
+                    f"Execution timed out during {timeout_stage} "
+                    f"after {timeout_seconds:g} seconds"
+                ),
                 return_code=-1,
             )
         except Exception as e:
