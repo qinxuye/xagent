@@ -4,6 +4,8 @@ Integration tests for process isolation with xagent tools.
 Tests that the ProcessService integrates correctly with existing tools.
 """
 
+import asyncio
+
 import pytest
 
 from xagent.core.execution.service import ProcessService
@@ -11,6 +13,14 @@ from xagent.core.execution.service.manager import (
     clear_process_service,
     set_process_service,
 )
+
+
+def _free_local_port() -> int:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("localhost", 0))
+        return int(sock.getsockname()[1])
 
 
 @pytest.mark.asyncio
@@ -137,3 +147,74 @@ async def test_python_execution_with_workspace():
 
     finally:
         await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_tool_factory_process_isolated_python_executor_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    """ToolFactory-created execute_python_code should run through process isolation."""
+    import os
+
+    import xagent.web.sandbox_manager as sandbox_manager_module
+    from xagent.core.tools.adapters.vibe.basic_tools import create_basic_tools
+    from xagent.core.tools.adapters.vibe.config import ToolConfig
+    from xagent.core.tools.adapters.vibe.factory import ToolFactory, ToolRegistry
+
+    clear_process_service()
+    sandbox_manager_module._sandbox_manager = None
+    sandbox_manager_module._sandbox_manager_initialized = True
+    monkeypatch.setenv("XAGENT_PROCESS_ISOLATION_ENABLED", "true")
+
+    async def _create_registered_tools(config):
+        return await create_basic_tools(config)
+
+    monkeypatch.setattr(
+        ToolRegistry,
+        "create_registered_tools",
+        _create_registered_tools,
+    )
+
+    service = ProcessService(n_workers=1, address=f"localhost:{_free_local_port()}")
+    await service.start()
+    set_process_service(service)
+
+    try:
+        tools = await ToolFactory.create_all_tools(
+            ToolConfig(
+                {
+                    "workspace": {
+                        "task_id": "process_isolated_python_executor",
+                        "base_dir": str(tmp_path),
+                    },
+                    "allowed_tools": ["execute_python_code"],
+                    "basic_tools_enabled": True,
+                    "file_tools_enabled": False,
+                    "browser_tools_enabled": False,
+                }
+            )
+        )
+        assert len(tools) == 1
+
+        tool = tools[0]
+        assert tool.name == "execute_python_code"
+        assert tool.is_isolated is True
+
+        parent_pid = os.getpid()
+        result = await asyncio.wait_for(
+            tool.run_json_async(
+                {
+                    "code": "import os\nprint(os.getpid())\nprint('process-ok')",
+                }
+            ),
+            timeout=30,
+        )
+
+        assert result["success"] is True
+        assert "process-ok" in result["output"]
+        child_pid = int(result["output"].splitlines()[0])
+        assert child_pid != parent_pid
+    finally:
+        await service.stop()
+        clear_process_service()
