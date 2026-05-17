@@ -43,6 +43,9 @@ SANDBOX_ENV = "SANDBOX_ENV"
 SANDBOX_VOLUMES = "SANDBOX_VOLUMES"
 BOXLITE_HOME_DIR = "BOXLITE_HOME_DIR"
 WEB_SEARCH_PROVIDER = "XAGENT_WEB_SEARCH_PROVIDER"
+PROCESS_ISOLATION_ENABLED = "XAGENT_PROCESS_ISOLATION_ENABLED"
+PROCESS_ISOLATION_ADDRESS = "XAGENT_PROCESS_ISOLATION_ADDRESS"
+PROCESS_ISOLATION_WORKERS = "XAGENT_PROCESS_ISOLATION_WORKERS"
 
 TOOL_MAX_OUTPUT_LENGTH = "XAGENT_TOOL_MAX_OUTPUT_LENGTH"
 TOOL_MAX_RECURSION_DEPTH = "XAGENT_TOOL_MAX_RECURSION_DEPTH"
@@ -576,6 +579,46 @@ def get_web_search_provider() -> str:
         provider,
     )
     return "auto"
+
+
+def get_process_isolation_enabled() -> bool:
+    """Get whether process-isolated tool execution is enabled.
+
+    Priority:
+        1. XAGENT_PROCESS_ISOLATION_ENABLED environment variable
+        2. False
+    """
+    value = (os.getenv(PROCESS_ISOLATION_ENABLED) or "false").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def get_process_isolation_address() -> str:
+    """Get the xoscar process service address."""
+    return (os.getenv(PROCESS_ISOLATION_ADDRESS) or "localhost:12345").strip()
+
+
+def get_process_isolation_workers() -> int:
+    """Get maximum concurrent process-isolated executions."""
+    env_str = os.getenv(PROCESS_ISOLATION_WORKERS)
+    if env_str:
+        try:
+            workers = int(env_str)
+        except ValueError:
+            logger.warning(
+                "Invalid %s=%r; falling back to 0",
+                PROCESS_ISOLATION_WORKERS,
+                env_str,
+            )
+            return 0
+        if workers < 0:
+            logger.warning(
+                "%s=%r is negative; falling back to 0",
+                PROCESS_ISOLATION_WORKERS,
+                env_str,
+            )
+            return 0
+        return workers
+    return 0
 
 
 def get_tool_max_recursion_depth() -> int:

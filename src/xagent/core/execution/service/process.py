@@ -196,15 +196,15 @@ class ProcessService(BaseService):
                 return_code=-1,
             )
         finally:
-            if actor_ref is not None and not timed_out:
-                try:
-                    await xo.destroy_actor(actor_ref)
-                    logger.debug(f"Destroyed actor {task_id}")
-                except Exception as e:
-                    logger.error(f"Failed to destroy actor {task_id}: {e}")
-                finally:
-                    async with self._lock:
-                        self._active_actors.pop(task_id, None)
+            if actor_ref is not None:
+                if not timed_out:
+                    try:
+                        await xo.destroy_actor(actor_ref)
+                        logger.debug(f"Destroyed actor {task_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to destroy actor {task_id}: {e}")
+                async with self._lock:
+                    self._active_actors.pop(task_id, None)
 
             if sub_pool_address and self._pool is not None:
                 try:

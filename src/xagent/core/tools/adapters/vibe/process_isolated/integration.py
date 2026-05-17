@@ -16,7 +16,15 @@ from .process_isolated_tool_wrapper import (
 logger = logging.getLogger(__name__)
 
 
-def should_use_process_isolation(tool_name: str) -> bool:
+def supports_process_isolation(tool: AbstractBaseTool) -> bool:
+    """Return whether a tool explicitly supports process-isolated execution."""
+    return bool(getattr(tool, "supports_process_isolation", False))
+
+
+def should_use_process_isolation(
+    tool_name: str,
+    tool: AbstractBaseTool | None = None,
+) -> bool:
     """Check if a tool should use process isolation.
 
     Args:
@@ -39,6 +47,9 @@ def should_use_process_isolation(tool_name: str) -> bool:
     # Check if ProcessService is available
     process_service = get_process_service()
     if not process_service:
+        return False
+
+    if tool is not None and not supports_process_isolation(tool):
         return False
 
     # Check if sandbox is enabled (sandbox has higher priority)
@@ -65,7 +76,7 @@ def maybe_wrap_tool(
         Original tool or process-isolated wrapper
     """
     # Check if we should use process isolation
-    if not should_use_process_isolation(tool.name):
+    if not should_use_process_isolation(tool.name, tool):
         return tool
 
     try:

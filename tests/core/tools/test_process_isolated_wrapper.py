@@ -3,11 +3,18 @@ Tests for ProcessIsolatedToolWrapper.
 """
 
 import pytest
+from pydantic import BaseModel
 
 from xagent.core.execution.service import ProcessService
 from xagent.core.execution.service.manager import (
     clear_process_service,
     set_process_service,
+)
+from xagent.core.tools.adapters.vibe.base import AbstractBaseTool, ToolCategory
+from xagent.core.tools.adapters.vibe.config import ToolConfig
+from xagent.core.tools.adapters.vibe.factory import ToolFactory, ToolRegistry
+from xagent.core.tools.adapters.vibe.output_filter_wrapper import (
+    OutputFilteredToolWrapper,
 )
 from xagent.core.tools.adapters.vibe.process_isolated import (
     ProcessIsolatedToolWrapper,
@@ -21,6 +28,8 @@ from xagent.core.tools.adapters.vibe.process_isolated import (
 # Simple test tool
 class SimpleCalculatorTool:
     """A simple calculator tool for testing."""
+
+    supports_process_isolation = True
 
     def __init__(self, precision: int = 2):
         self.precision = precision
@@ -83,6 +92,77 @@ class SimpleCalculatorTool:
             }
         except Exception as e:
             raise RuntimeError(f"Calculation failed: {e}")
+
+
+class LifecycleArgs(BaseModel):
+    value: str
+
+
+class LifecycleResult(BaseModel):
+    value: str
+
+
+class LifecycleState(BaseModel):
+    value: str = "initial"
+
+
+class LifecycleTool(AbstractBaseTool):
+    supports_process_isolation = True
+    category = ToolCategory.BASIC
+
+    def __init__(self) -> None:
+        self.setup_calls: list[str | None] = []
+        self.teardown_calls: list[str | None] = []
+        self.state = "initial"
+
+    @property
+    def name(self) -> str:
+        return "lifecycle_tool"
+
+    @property
+    def description(self) -> str:
+        return "Lifecycle test tool"
+
+    def args_type(self) -> type[BaseModel]:
+        return LifecycleArgs
+
+    def return_type(self) -> type[BaseModel]:
+        return LifecycleResult
+
+    def state_type(self) -> type[BaseModel]:
+        return LifecycleState
+
+    def is_async(self) -> bool:
+        return False
+
+    def return_value_as_string(self, value):
+        return f"formatted:{value}"
+
+    def run_json_sync(self, args):
+        return {"value": args["value"]}
+
+    async def run_json_async(self, args):
+        return self.run_json_sync(args)
+
+    async def save_state_json(self):
+        return {"value": self.state}
+
+    async def load_state_json(self, state):
+        self.state = state["value"]
+
+    async def setup(self, task_id=None):
+        self.setup_calls.append(task_id)
+
+    async def teardown(self, task_id=None):
+        self.teardown_calls.append(task_id)
+
+
+class UnsupportedTool(LifecycleTool):
+    supports_process_isolation = False
+
+    @property
+    def name(self) -> str:
+        return "unsupported_tool"
 
 
 @pytest.mark.asyncio
@@ -215,6 +295,25 @@ async def test_maybe_wrap_tool_fallback():
 
 
 @pytest.mark.asyncio
+async def test_maybe_wrap_tool_requires_explicit_support():
+    """Test process isolation only wraps explicitly supported tools."""
+    service = ProcessService(n_workers=2, address="localhost:12365")
+    await service.start()
+    set_process_service(service)
+
+    try:
+        tool = UnsupportedTool()
+
+        wrapped = maybe_wrap_tool(tool)
+        assert wrapped is tool
+        assert not isinstance(wrapped, ProcessIsolatedToolWrapper)
+
+    finally:
+        await service.stop()
+        clear_process_service()
+
+
+@pytest.mark.asyncio
 async def test_wrap_tools_list():
     """Test wrap_tools function with multiple tools."""
     service = ProcessService(n_workers=2, address="localhost:12364")
@@ -234,4 +333,53 @@ async def test_wrap_tools_list():
 
     finally:
         await service.stop()
+        clear_process_service()
+
+
+@pytest.mark.asyncio
+async def test_process_isolated_wrapper_delegates_tool_contract():
+    """Test lifecycle, state, formatting, and marker properties delegate."""
+    tool = LifecycleTool()
+    wrapped = create_process_isolated_tool(tool)
+
+    assert wrapped.is_async() is False
+    assert wrapped.category == ToolCategory.BASIC
+    assert wrapped.supports_process_isolation is True
+    assert (
+        wrapped.return_value_as_string({"value": "ok"}) == "formatted:{'value': 'ok'}"
+    )
+
+    await wrapped.setup(task_id="task-1")
+    assert tool.setup_calls == ["task-1"]
+
+    await wrapped.load_state_json({"value": "restored"})
+    assert await wrapped.save_state_json() == {"value": "restored"}
+
+    await wrapped.teardown(task_id="task-1")
+    assert tool.teardown_calls == ["task-1"]
+
+
+@pytest.mark.asyncio
+async def test_tool_factory_applies_process_isolation_for_supported_tools(monkeypatch):
+    """Test ToolFactory wraps supported tools through the production path."""
+    clear_process_service()
+
+    async def fake_create_registered_tools(config):
+        return [LifecycleTool(), UnsupportedTool()]
+
+    monkeypatch.setattr(
+        ToolRegistry,
+        "create_registered_tools",
+        fake_create_registered_tools,
+    )
+    set_process_service(ProcessService(n_workers=1, address="localhost:12366"))
+
+    try:
+        tools = await ToolFactory.create_all_tools(ToolConfig({}))
+
+        assert len(tools) == 2
+        assert all(isinstance(tool, OutputFilteredToolWrapper) for tool in tools)
+        assert tools[0].is_isolated is True
+        assert tools[1].is_isolated is False
+    finally:
         clear_process_service()

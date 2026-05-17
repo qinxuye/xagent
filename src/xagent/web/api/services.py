@@ -15,7 +15,7 @@ from ..models.user import User
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(prefix="/api/process-service", tags=["Process Service"])
 
 
 @router.get("/status")

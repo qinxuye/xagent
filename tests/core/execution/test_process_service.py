@@ -94,6 +94,7 @@ async def test_python_execution_timeout():
 
         assert result.success is False
         assert "timed out" in result.error.lower()
+        assert service.get_info().resource_info["active_actors"] == 0
 
     finally:
         await service.stop()
@@ -116,6 +117,41 @@ async def test_command_execution():
         assert result.success is True
         assert "Hello from command!" in result.output
         assert result.return_code == 0
+
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_command_execution_preserves_shell_semantics(tmp_path):
+    """Test process command execution preserves existing shell semantics."""
+    service = ProcessService(n_workers=2, address="localhost:12355")
+
+    await service.start()
+
+    try:
+        pipe_result = await service.execute_command(
+            command="echo hello | wc -c",
+            workspace=str(tmp_path),
+            timeout=10,
+        )
+        assert pipe_result.success is True
+        assert pipe_result.output.strip() == "6"
+
+        redirect_result = await service.execute_command(
+            command="echo hi > out.txt",
+            workspace=str(tmp_path),
+            timeout=10,
+        )
+        assert redirect_result.success is True
+        assert (tmp_path / "out.txt").read_text().strip() == "hi"
+
+        chain_result = await service.execute_command(
+            command=f"cd {tmp_path} && pwd",
+            timeout=10,
+        )
+        assert chain_result.success is True
+        assert chain_result.output.strip() == str(tmp_path)
 
     finally:
         await service.stop()
