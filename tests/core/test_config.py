@@ -91,9 +91,9 @@ class TestEnvironmentVariableConstants:
 class TestProcessIsolationConfig:
     """Test process isolation configuration."""
 
-    def test_process_isolation_disabled_by_default(self, monkeypatch):
+    def test_process_isolation_enabled_by_default(self, monkeypatch):
         monkeypatch.delenv(PROCESS_ISOLATION_ENABLED, raising=False)
-        assert get_process_isolation_enabled() is False
+        assert get_process_isolation_enabled() is True
 
     @pytest.mark.parametrize("value", ["1", "true", "yes", "on", " TRUE "])
     def test_process_isolation_enabled_values(self, monkeypatch, value):

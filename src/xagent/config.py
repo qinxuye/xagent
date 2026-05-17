@@ -586,10 +586,12 @@ def get_process_isolation_enabled() -> bool:
 
     Priority:
         1. XAGENT_PROCESS_ISOLATION_ENABLED environment variable
-        2. False
+        2. True
     """
-    value = (os.getenv(PROCESS_ISOLATION_ENABLED) or "false").strip().lower()
-    return value in {"1", "true", "yes", "on"}
+    value = os.getenv(PROCESS_ISOLATION_ENABLED)
+    if value is None:
+        return True
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def get_process_isolation_address() -> str:
