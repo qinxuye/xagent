@@ -54,7 +54,14 @@ export const getFinalAnswerStreamActionPayload = ({
     eventData && typeof eventData === "object"
       ? (eventData as Record<string, unknown>)
       : {}
-  const messageId = String(data.message_id || eventId || fallbackMessageId || "")
+  const nestedData =
+    data.data && typeof data.data === "object"
+      ? (data.data as Record<string, unknown>)
+      : {}
+  const streamData = { ...nestedData, ...data }
+  const messageId = String(
+    streamData.message_id || eventId || fallbackMessageId || "",
+  )
   if (!messageId) {
     return null
   }
@@ -68,7 +75,7 @@ export const getFinalAnswerStreamActionPayload = ({
     }
   }
   if (eventType === "final_answer_delta") {
-    const delta = typeof data.delta === "string" ? data.delta : ""
+    const delta = typeof streamData.delta === "string" ? streamData.delta : ""
     if (!delta) {
       return null
     }
@@ -81,7 +88,9 @@ export const getFinalAnswerStreamActionPayload = ({
   }
 
   const content =
-    typeof data.content === "string" ? unwrapFinalAnswerContent(data.content) : ""
+    typeof streamData.content === "string"
+      ? unwrapFinalAnswerContent(streamData.content)
+      : ""
   return {
     messageId,
     content,
