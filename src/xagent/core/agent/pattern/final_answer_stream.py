@@ -266,12 +266,23 @@ class _JsonStringFieldReader:
             return "", index, False
         char = self.source[index]
         if char == "u":
-            digits = self.source[index + 1 : index + 5]
-            if len(digits) < 4 or any(
-                digit not in "0123456789abcdefABCDEF" for digit in digits
-            ):
+            first = self._parse_unicode_escape_digits(index + 1)
+            if first is None:
                 return "", index, False
-            return chr(int(digits, 16)), index + 5, True
+            codepoint, end = first
+            if 0xD800 <= codepoint <= 0xDBFF:
+                if self.source[end : end + 2] != "\\u":
+                    return "", index, False
+                second = self._parse_unicode_escape_digits(end + 2)
+                if second is None:
+                    return "", index, False
+                low_surrogate, end = second
+                if not 0xDC00 <= low_surrogate <= 0xDFFF:
+                    return "", index, False
+                codepoint = (
+                    0x10000 + ((codepoint - 0xD800) << 10) + (low_surrogate - 0xDC00)
+                )
+            return chr(codepoint), end, True
         mapping = {
             '"': '"',
             "\\": "\\",
@@ -282,7 +293,17 @@ class _JsonStringFieldReader:
             "r": "\r",
             "t": "\t",
         }
-        return mapping.get(char, char), index + 1, True
+        if char not in mapping:
+            return "", index, False
+        return mapping[char], index + 1, True
+
+    def _parse_unicode_escape_digits(self, index: int) -> tuple[int, int] | None:
+        digits = self.source[index : index + 4]
+        if len(digits) < 4 or any(
+            digit not in "0123456789abcdefABCDEF" for digit in digits
+        ):
+            return None
+        return int(digits, 16), index + 4
 
     def _skip_value(self, index: int) -> int:
         depth = 0

@@ -6,7 +6,10 @@ from typing import Any
 import pytest
 
 from xagent.core.agent import ExecutionContext, PatternRuntime
-from xagent.core.agent.pattern.final_answer_stream import ToolCallStringFieldStreamer
+from xagent.core.agent.pattern.final_answer_stream import (
+    ToolCallStringFieldStreamer,
+    _JsonStringFieldReader,
+)
 from xagent.core.agent.runtime import LLMCallInterrupted
 from xagent.core.model.chat.types import ChunkType, StreamChunk
 
@@ -270,6 +273,22 @@ async def test_tool_call_string_field_streamer_reads_argument_deltas() -> None:
     ]
     assert outbound.events[1]["delta"] == "Hi"
     assert outbound.events[2]["delta"] == " there"
+
+
+def test_json_string_field_reader_handles_unicode_surrogate_pairs() -> None:
+    fields = _JsonStringFieldReader('{"answer":"hello \\ud83d\\ude00"}').read(
+        {"answer"}
+    )
+
+    assert fields["answer"].complete is True
+    assert fields["answer"].value == f"hello {chr(0x1F600)}"
+
+
+def test_json_string_field_reader_rejects_invalid_escape_sequences() -> None:
+    fields = _JsonStringFieldReader('{"answer":"bad \\z escape"}').read({"answer"})
+
+    assert fields["answer"].complete is False
+    assert fields["answer"].value == "bad "
 
 
 @pytest.mark.asyncio
