@@ -103,7 +103,6 @@ interface StepAction {
       artifacts?: ToolArtifact[];
       reasoning?: string;
       assistant_content?: string;
-      generated_tool_note?: boolean;
       error?: any;
       tool_calls?: any;
       sandboxed?: boolean;
@@ -123,52 +122,6 @@ function formatActionContent(value: unknown): string {
   } catch {
     return String(value);
   }
-}
-
-function compactToolNoteDetail(value: unknown): string {
-  const content = formatActionContent(value).replace(/[\n\r\s]+/g, ' ').trim();
-  return content.length > 120 ? `${content.slice(0, 120)}...` : content;
-}
-
-function toolNoteDetail(
-  toolName: string,
-  args: any,
-  t: (key: string, vars?: Record<string, string | number>) => string,
-): string {
-  if (!args || typeof args !== 'object') {
-    return '';
-  }
-  if (args.query) {
-    return `${t('traceEventRenderer.searchPrefix')} ${compactToolNoteDetail(args.query)}`;
-  }
-  if (args.prompt) {
-    return `${t('traceEventRenderer.promptPrefix')} ${compactToolNoteDetail(args.prompt)}`;
-  }
-  if (args.command) {
-    return `${t('traceEventRenderer.bashPrefix')} ${compactToolNoteDetail(args.command)}`;
-  }
-  if (args.file_path) {
-    return `${t('traceEventRenderer.filePrefix')} ${compactToolNoteDetail(args.file_path)}`;
-  }
-  if (args.path) {
-    return `${t('traceEventRenderer.pathPrefix')} ${compactToolNoteDetail(args.path)}`;
-  }
-  return compactToolNoteDetail(args);
-}
-
-function generatedToolAssistantContent(
-  toolName: string,
-  args: any,
-  t: (key: string, vars?: Record<string, string | number>) => string,
-): string {
-  const detail = toolNoteDetail(toolName, args, t);
-  if (!toolName || toolName === t('traceEventRenderer.unknownTool')) {
-    return detail;
-  }
-  if (!detail) {
-    return t('traceEventRenderer.toolCallGeneratedNoteNoDetail', { tool: toolName });
-  }
-  return t('traceEventRenderer.toolCallGeneratedNote', { tool: toolName, detail });
 }
 
 interface ProcessedStep {
@@ -342,17 +295,9 @@ function useProcessedSteps(events: TraceEvent[]): ProcessedStep[] {
         }
         // Support both data.response.tool_name and data.tool_name
         const toolName = event.data?.response?.tool_name || event.data?.tool_name || t('traceEventRenderer.unknownTool');
-        const rawAssistantContent = event.data?.response?.assistant_content || event.data?.assistant_content;
-        const explicitAssistantContent =
-          typeof rawAssistantContent === 'string' && rawAssistantContent.trim()
-            ? rawAssistantContent.trim()
-            : '';
-        const hasGeneratedToolNote = step.actions.some(action => action.data.generated_tool_note);
-        const assistantContent = explicitAssistantContent || (
-          hasGeneratedToolNote ? '' : generatedToolAssistantContent(toolName, toolArgs, t)
-        );
+        const assistantContent = event.data?.response?.assistant_content || event.data?.assistant_content;
 
-        if (assistantContent) {
+        if (typeof assistantContent === 'string' && assistantContent.trim()) {
           step.actions.push({
             id: `${eventId}-assistant-content`,
             type: 'info',
@@ -360,9 +305,8 @@ function useProcessedSteps(events: TraceEvent[]): ProcessedStep[] {
             status: 'completed',
             timestamp,
             data: {
-              output: assistantContent,
+              output: assistantContent.trim(),
               inline: true,
-              generated_tool_note: !explicitAssistantContent,
             }
           });
         }

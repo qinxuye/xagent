@@ -293,32 +293,4 @@ describe("TraceEventRenderer", () => {
     expect(screen.getByText("I need current search results first.")).toBeInTheDocument()
     expect(screen.queryByText("traceEventRenderer.toolCallNote")).not.toBeInTheDocument()
   })
-
-  it("renders a generated tool note when the model did not provide assistant content", () => {
-    render(
-      <TraceEventRenderer
-        events={[
-          {
-            event_id: "start",
-            event_type: "react_task_start",
-            step_id: "step-1",
-            timestamp: Date.now(),
-            data: { step_name: "Search", description: "Search" },
-          },
-          {
-            event_id: "tool-start",
-            event_type: "tool_execution_start",
-            step_id: "step-1",
-            timestamp: Date.now(),
-            data: {
-              tool_name: "web_search",
-              tool_params: { query: "ai news" },
-            },
-          },
-        ]}
-      />,
-    )
-
-    expect(screen.getByText("traceEventRenderer.toolCallGeneratedNote:web_search")).toBeInTheDocument()
-  })
 })
