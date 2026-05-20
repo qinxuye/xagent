@@ -72,6 +72,7 @@ interface TraceEvent {
       tool_args?: ToolArgs;
       tool_params?: ToolArgs;
       answer?: string;
+      assistant_content?: string;
     };
     result?: ToolResult | string;
     tools?: Array<{
@@ -101,6 +102,7 @@ interface StepAction {
       output?: any;
       artifacts?: ToolArtifact[];
       reasoning?: string;
+      assistant_content?: string;
       error?: any;
       tool_calls?: any;
       sandboxed?: boolean;
@@ -292,6 +294,7 @@ function useProcessedSteps(events: TraceEvent[]): ProcessedStep[] {
         }
         // Support both data.response.tool_name and data.tool_name
         const toolName = event.data?.response?.tool_name || event.data?.tool_name || t('traceEventRenderer.unknownTool');
+        const assistantContent = event.data?.response?.assistant_content || event.data?.assistant_content;
 
         if (toolName) {
           // Merge with existing tools instead of replacing
@@ -310,6 +313,7 @@ function useProcessedSteps(events: TraceEvent[]): ProcessedStep[] {
             tool: toolName,
             args: toolArgs,
             code: step.code,
+            assistant_content: typeof assistantContent === 'string' ? assistantContent : undefined,
             sandboxed: !!event.data?.sandboxed
           }
         });
@@ -698,6 +702,26 @@ const DefaultToolRenderer = ({ action, isRunning, t, onFileClick, onAgentClick }
   );
 };
 
+const ToolAssistantContent = ({ action, t, onFileClick }: any) => {
+  const content = typeof action.data.assistant_content === 'string'
+    ? action.data.assistant_content.trim()
+    : '';
+  if (!content) return null;
+
+  return (
+    <div className="mb-2 rounded-md border border-border/50 bg-background/70 p-3 font-sans">
+      <div className="mb-1 text-[11px] font-medium text-muted-foreground">
+        {t('traceEventRenderer.toolCallNote')}
+      </div>
+      <MarkdownRenderer
+        content={content}
+        onFileClick={onFileClick}
+        className="text-xs leading-relaxed prose-neutral dark:prose-invert max-w-none [&>p]:mb-1.5 [&>p:last-child]:mb-0"
+      />
+    </div>
+  );
+};
+
 const ToolDetailsRenderer = ({ action, onOpenTerminal, isRunning, t, onFileClick, onAgentClick }: any) => {
   const toolName = action.data.tool;
   let rendererContent = null;
@@ -716,6 +740,7 @@ const ToolDetailsRenderer = ({ action, onOpenTerminal, isRunning, t, onFileClick
   return (
     <div className="flex flex-col">
       <ToolErrorDisplay action={action} t={t} />
+      <ToolAssistantContent action={action} t={t} onFileClick={onFileClick} />
       {rendererContent}
     </div>
   );
@@ -1123,6 +1148,9 @@ export function TraceEventRenderer({ events }: TraceEventRendererProps) {
     // Better formatting for specific types
     if (action.type === 'tool') {
       content = `${t('traceEventRenderer.toolLabel')}${action.data.tool}\n\n${t('traceEventRenderer.argumentsLabel')}\n${JSON.stringify(action.data.args, null, 2)}`;
+      if (action.data.assistant_content) {
+        content += `\n\n${t('traceEventRenderer.toolCallNote')}\n${action.data.assistant_content}`;
+      }
       if (action.data.code) {
         content += `\n\n${t('traceEventRenderer.codeLabel')}\n${action.data.code}`;
       }

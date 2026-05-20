@@ -263,4 +263,34 @@ describe("TraceEventRenderer", () => {
 
     expect(await screen.findByTestId("excel-preview")).toHaveTextContent("WFk=")
   })
+
+  it("renders assistant content on the tool call details", () => {
+    render(
+      <TraceEventRenderer
+        events={[
+          {
+            event_id: "start",
+            event_type: "react_task_start",
+            step_id: "step-1",
+            timestamp: Date.now(),
+            data: { step_name: "Search", description: "Search" },
+          },
+          {
+            event_id: "tool-start",
+            event_type: "tool_execution_start",
+            step_id: "step-1",
+            timestamp: Date.now(),
+            data: {
+              tool_name: "web_search",
+              tool_params: { query: "ai news" },
+              assistant_content: "I need current search results first.",
+            },
+          },
+        ]}
+      />,
+    )
+
+    expect(screen.getByText("I need current search results first.")).toBeInTheDocument()
+    expect(screen.getByText("traceEventRenderer.toolCallNote")).toBeInTheDocument()
+  })
 })

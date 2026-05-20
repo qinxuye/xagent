@@ -132,6 +132,7 @@ class ReActPattern(AgentPattern):
         self.current_iteration = 0
         self.last_response: Any = None
         self.pending_tool_calls: list[dict[str, Any]] = []
+        self.pending_tool_call_content: dict[str, str] = {}
         self.tool_ledger: dict[str, ToolCallRecord] = {}
         self.force_final_answer_next = False
         self.waiting_for_user_request: dict[str, Any] | None = None
@@ -346,6 +347,7 @@ class ReActPattern(AgentPattern):
                     tool_calls=tool_calls,
                 )
             if tool_calls:
+                self._remember_tool_call_content(tool_calls, assistant_content)
                 self.status = "acting"
                 self.pending_tool_calls = list(tool_calls)
                 await runtime.checkpoint("after_llm", context=context, pattern=self)
@@ -495,6 +497,7 @@ class ReActPattern(AgentPattern):
             "task_text": self.task_text,
             "last_response": self.last_response,
             "pending_tool_calls": self.pending_tool_calls,
+            "pending_tool_call_content": self.pending_tool_call_content,
             "tool_ledger": {
                 key: record.to_dict() for key, record in self.tool_ledger.items()
             },
@@ -520,6 +523,9 @@ class ReActPattern(AgentPattern):
         self.task_text = str(stored_task_text) if stored_task_text else None
         self.last_response = state.get("last_response")
         self.pending_tool_calls = list(state.get("pending_tool_calls", []))
+        self.pending_tool_call_content = dict(
+            state.get("pending_tool_call_content", {})
+        )
         self.tool_ledger = {
             key: ToolCallRecord.from_dict(value)
             for key, value in state.get("tool_ledger", {}).items()
@@ -677,6 +683,24 @@ class ReActPattern(AgentPattern):
                 )
 
         return [call for call in normalized if call.get("name")]
+
+    def _remember_tool_call_content(
+        self, tool_calls: list[dict[str, Any]], assistant_content: Any
+    ) -> None:
+        if not isinstance(assistant_content, str):
+            return
+        content = assistant_content.strip()
+        if not content:
+            return
+
+        control_tool_names = self._control_tool_names()
+        for tool_call in tool_calls:
+            if tool_call.get("name") in control_tool_names:
+                continue
+            tool_call_id = str(tool_call.get("id") or "")
+            if tool_call_id:
+                self.pending_tool_call_content[tool_call_id] = content
+            return
 
     def _coerce_arguments(self, arguments: Any) -> dict[str, Any]:
         if isinstance(arguments, dict):
@@ -1003,6 +1027,7 @@ class ReActPattern(AgentPattern):
             )
             if control_result is not None:
                 self.pending_tool_calls = self.pending_tool_calls[1:]
+                self._forget_tool_call_content(tool_call)
                 await runtime.checkpoint(
                     str(control_result.get("status", "control_tool")),
                     context=context,
@@ -1029,6 +1054,7 @@ class ReActPattern(AgentPattern):
                 tool_call_id=tool_call.get("id"),
             )
             self.pending_tool_calls = self.pending_tool_calls[1:]
+            self._forget_tool_call_content(tool_call)
             await runtime.checkpoint(
                 "after_tool",
                 context=context,
@@ -1183,6 +1209,7 @@ class ReActPattern(AgentPattern):
         tools: list[Any],
         runtime: PatternRuntime,
     ) -> Any:
+        tool_call = self._with_tool_call_content(tool_call)
         tool_call = self._with_runtime_step(tool_call, runtime)
         self._record_tool_call(tool_call, status="running")
         await runtime.on_tool_start(tool_call=tool_call)
@@ -1239,6 +1266,21 @@ class ReActPattern(AgentPattern):
             "step_id": str(step_id),
             "dag_step_id": str(step_id),
         }
+
+    def _with_tool_call_content(self, tool_call: dict[str, Any]) -> dict[str, Any]:
+        tool_call_id = str(tool_call.get("id") or "")
+        content = self.pending_tool_call_content.get(tool_call_id)
+        if not content:
+            return tool_call
+        return {
+            **tool_call,
+            "assistant_content": content,
+        }
+
+    def _forget_tool_call_content(self, tool_call: dict[str, Any]) -> None:
+        tool_call_id = str(tool_call.get("id") or "")
+        if tool_call_id:
+            self.pending_tool_call_content.pop(tool_call_id, None)
 
     def _record_tool_call(
         self,

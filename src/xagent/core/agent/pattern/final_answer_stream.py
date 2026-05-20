@@ -105,7 +105,7 @@ class ToolCallStringFieldStreamer:
 
 
 class ReActFinalAnswerStreamer:
-    """Streams ReAct final answers from plain text or final_answer tool args."""
+    """Streams ReAct final answers from final_answer control-tool args."""
 
     def __init__(self, runtime: PatternRuntime, *, enabled: bool = True) -> None:
         self.emitter = FinalAnswerStreamEmitter(runtime, enabled=enabled)
@@ -123,9 +123,6 @@ class ReActFinalAnswerStreamer:
 
     async def handle_chunk(self, chunk: Any) -> None:
         await self._tool_answer_streamer.handle_chunk(chunk)
-        delta = _chunk_text_delta(chunk)
-        if delta:
-            await self.emitter.emit_delta(delta)
 
     async def finish(self, final_content: str) -> None:
         await self.emitter.finish(final_content)

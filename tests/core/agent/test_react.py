@@ -224,6 +224,31 @@ class StreamingPlainTextFinalAnswerLLM:
         yield StreamChunk(type=ChunkType.END)
 
 
+class StreamingPreambleToolCallLLM:
+    def __init__(self) -> None:
+        self.stream_calls: list[dict[str, Any]] = []
+
+    async def chat(self, **kwargs: Any) -> Any:
+        raise AssertionError("streaming ReAct preamble path should not call chat()")
+
+    async def stream_chat(self, **kwargs: Any) -> Any:
+        self.stream_calls.append(kwargs)
+        yield StreamChunk(type=ChunkType.TOKEN, delta="I will use a tool first.")
+        yield StreamChunk(
+            type=ChunkType.TOOL_CALL,
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "function": {
+                        "name": "calculator",
+                        "arguments": '{"expression":"2+2"}',
+                    },
+                }
+            ],
+        )
+        yield StreamChunk(type=ChunkType.END)
+
+
 class StreamingFinalAnswerToolLLM:
     def __init__(self) -> None:
         self.stream_calls: list[dict[str, Any]] = []
@@ -429,7 +454,9 @@ async def test_react_pattern_streams_only_final_answer_after_tool_call() -> None
 
 
 @pytest.mark.asyncio
-async def test_react_pattern_streams_plain_text_final_answer_with_tools() -> None:
+async def test_react_pattern_does_not_stream_plain_text_when_tools_are_enabled() -> (
+    None
+):
     llm = StreamingPlainTextFinalAnswerLLM()
     pattern = ReActPattern(max_iterations=1)
     context = ExecutionContext(system_prompt="You are helpful.", execution_id="task-1")
@@ -442,17 +469,34 @@ async def test_react_pattern_streams_plain_text_final_answer_with_tools() -> Non
     assert result["success"] is True
     assert result["response"] == "Plain final."
     assert llm.stream_calls[0]["tools"] is not None
-    assert [event["type"] for event in outbound.events] == [
-        "final_answer_start",
-        "final_answer_delta",
-        "final_answer_delta",
-        "final_answer_end",
-    ]
-    assert [event.get("delta") for event in outbound.events[1:3]] == [
-        "Plain",
-        " final.",
-    ]
-    assert outbound.events[-1]["content"] == "Plain final."
+    assert outbound.events == []
+
+
+@pytest.mark.asyncio
+async def test_react_pattern_does_not_stream_tool_call_preamble() -> None:
+    llm = StreamingPreambleToolCallLLM()
+    pattern = ReActPattern(max_iterations=1)
+    tool = FakeTool()
+    context = ExecutionContext(system_prompt="You are helpful.", execution_id="task-1")
+    context.add_user_message("Calculate 2+2")
+    outbound = OutboundCollector()
+    tracer = TraceEventRecorder()
+    runtime = PatternRuntime(
+        execution_id="task-1",
+        tracer=tracer,
+        outbound_message_handler=outbound,
+    )
+
+    result = await pattern.run(context=context, tools=[tool], llm=llm, runtime=runtime)
+
+    assert result["success"] is False
+    assert tool.calls == [{"expression": "2+2"}]
+    assert llm.stream_calls[0]["tools"][0]["function"]["name"] == "calculator"
+    assert outbound.events == []
+    tool_start_event = next(
+        event for event in tracer.events if event["event_type"] == "action_start_tool"
+    )
+    assert tool_start_event["data"]["assistant_content"] == ("I will use a tool first.")
 
 
 @pytest.mark.asyncio

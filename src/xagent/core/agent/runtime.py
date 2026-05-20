@@ -392,15 +392,20 @@ class PatternRuntime:
             )
 
     async def on_tool_start(self, *, tool_call: dict[str, Any]) -> None:
+        data = {
+            "tool_name": tool_call.get("name"),
+            "tool_params": tool_call.get("args", {}),
+            "tool_call_id": tool_call.get("id"),
+        }
+        assistant_content = tool_call.get("assistant_content")
+        if isinstance(assistant_content, str) and assistant_content.strip():
+            data["assistant_content"] = assistant_content.strip()
+
         await self._emit_trace_event(
             TraceEventType(TraceScope.ACTION, TraceAction.START, TraceCategory.TOOL),
             task_id=self._task_id_from_payload(tool_call),
             step_id=self._step_id_from_payload(tool_call),
-            data={
-                "tool_name": tool_call.get("name"),
-                "tool_params": tool_call.get("args", {}),
-                "tool_call_id": tool_call.get("id"),
-            },
+            data=data,
         )
         if self.tracer is None:
             return

@@ -2832,6 +2832,7 @@ Build when you need.`
     command: "Command",
     searchQuery: "Search Query",
     content: "Content",
+    toolCallNote: "Tool note",
     copy: "Copy",
     previewFile: "Preview File",
     filePrefix: "File:",
