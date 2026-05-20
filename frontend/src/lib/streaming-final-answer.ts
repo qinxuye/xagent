@@ -6,6 +6,10 @@ type ResultMessageLike = {
   isResult?: boolean
 }
 
+type TraceEventLike = {
+  event_id?: string
+}
+
 export type FinalAnswerStreamEventType =
   | "final_answer_start"
   | "final_answer_delta"
@@ -35,6 +39,28 @@ export const isFinalAnswerStreamEventType = (
     value === "final_answer_delta" ||
     value === "final_answer_end"
   )
+}
+
+export const mergeTraceEventsById = <T extends TraceEventLike>(
+  ...eventGroups: Array<readonly T[] | undefined>
+): T[] => {
+  const merged: T[] = []
+  const seenIds = new Set<string>()
+
+  for (const events of eventGroups) {
+    for (const event of events || []) {
+      const eventId = typeof event.event_id === "string" ? event.event_id : ""
+      if (eventId) {
+        if (seenIds.has(eventId)) {
+          continue
+        }
+        seenIds.add(eventId)
+      }
+      merged.push(event)
+    }
+  }
+
+  return merged
 }
 
 export const getFinalAnswerStreamActionPayload = ({

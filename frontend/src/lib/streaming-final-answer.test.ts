@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest"
 
-import { getFinalAnswerStreamActionPayload } from "@/lib/streaming-final-answer"
+import {
+  getFinalAnswerStreamActionPayload,
+  mergeTraceEventsById,
+} from "@/lib/streaming-final-answer"
 
 describe("streaming final answer events", () => {
   it("reads websocket final-answer fields from nested data payloads", () => {
@@ -22,5 +25,20 @@ describe("streaming final answer events", () => {
       status: "running",
       timestamp: "2026-05-20T12:00:00.000Z",
     })
+  })
+
+  it("preserves streaming message trace events when final content replaces the message", () => {
+    const toolStart = {
+      event_id: "tool-start",
+      event_type: "tool_execution_start",
+    }
+    const toolEnd = {
+      event_id: "tool-end",
+      event_type: "tool_execution_end",
+    }
+
+    expect(
+      mergeTraceEventsById([toolStart, toolEnd], [], [toolEnd]),
+    ).toEqual([toolStart, toolEnd])
   })
 })

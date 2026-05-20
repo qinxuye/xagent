@@ -44,6 +44,7 @@ import {
   getFinalAnswerStreamActionPayload,
   isFinalAnswerStreamEventType,
   isStreamingFinalAnswerMessage,
+  mergeTraceEventsById,
 } from "@/lib/streaming-final-answer"
 
 // Unique ID generator for messages
@@ -559,7 +560,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
       if (newMessage.role === "assistant" && newMessage.isResult) {
         messageToAdd = {
           ...newMessage,
-          traceEvents: [...state.traceEvents]
+          traceEvents: mergeTraceEventsById(newMessage.traceEvents, state.traceEvents)
         }
         newTraceEvents = []
       }
@@ -575,6 +576,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
                   ...messageToAdd,
                   id: message.id,
                   status: newMessage.status || "completed",
+                  traceEvents: mergeTraceEventsById(message.traceEvents, messageToAdd.traceEvents),
                 }
               : message
           )
