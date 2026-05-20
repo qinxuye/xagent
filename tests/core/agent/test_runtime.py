@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from xagent.core.agent import ExecutionContext, PatternRuntime
+from xagent.core.agent.pattern.final_answer_stream import ToolCallStringFieldStreamer
 from xagent.core.agent.runtime import LLMCallInterrupted
 from xagent.core.model.chat.types import ChunkType, StreamChunk
 
@@ -29,6 +30,52 @@ class StreamingLLM:
     async def stream_chat(self, **_: Any) -> Any:
         yield StreamChunk(type=ChunkType.TOKEN, delta="hello")
         yield StreamChunk(type=ChunkType.TOKEN, delta=" world")
+        yield StreamChunk(type=ChunkType.END)
+
+
+class EmptyStreamingLLM:
+    async def chat(self, **_: Any) -> str:
+        return "fallback answer"
+
+    async def stream_chat(self, **_: Any) -> Any:
+        yield StreamChunk(type=ChunkType.END)
+
+
+class StreamingToolDeltaLLM:
+    async def stream_chat(self, **_: Any) -> Any:
+        for arguments in ['{"expression"', ':"2 + ', '2"}']:
+            yield StreamChunk(
+                type=ChunkType.TOOL_CALL,
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call-1",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": arguments,
+                        },
+                    }
+                ],
+            )
+        yield StreamChunk(type=ChunkType.END)
+
+
+class StreamingFinalAnswerToolDeltaLLM:
+    async def stream_chat(self, **_: Any) -> Any:
+        for arguments in ['{"action":"final_answer"', ',"answer":"Hi', ' there"}']:
+            yield StreamChunk(
+                type=ChunkType.TOOL_CALL,
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call-final",
+                        "function": {
+                            "name": "route",
+                            "arguments": arguments,
+                        },
+                    }
+                ],
+            )
         yield StreamChunk(type=ChunkType.END)
 
 
@@ -156,6 +203,73 @@ async def test_runtime_stream_final_answer_falls_back_to_chat_without_events() -
 
     assert result == "complete answer"
     assert outbound.events == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_streaming_llm_call_merges_tool_call_argument_deltas() -> None:
+    runtime = PatternRuntime()
+
+    result = await runtime.run_streaming_llm_call(
+        StreamingToolDeltaLLM(),
+        messages=[],
+        tools=[],
+    )
+
+    assert result == {
+        "content": "",
+        "tool_calls": [
+            {
+                "index": 0,
+                "id": "call-1",
+                "function": {
+                    "name": "calculator",
+                    "arguments": '{"expression":"2 + 2"}',
+                },
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_streaming_llm_call_falls_back_when_stream_is_empty() -> None:
+    runtime = PatternRuntime()
+
+    result = await runtime.run_streaming_llm_call(EmptyStreamingLLM(), messages=[])
+
+    assert result == "fallback answer"
+
+
+@pytest.mark.asyncio
+async def test_tool_call_string_field_streamer_reads_argument_deltas() -> None:
+    outbound = OutboundCollector()
+    runtime = PatternRuntime(execution_id="task-123", outbound_message_handler=outbound)
+    streamer = ToolCallStringFieldStreamer(
+        runtime=runtime,
+        tool_name="route",
+        field_name="answer",
+        guard_field="action",
+        guard_value="final_answer",
+    )
+
+    result = await runtime.run_streaming_llm_call(
+        StreamingFinalAnswerToolDeltaLLM(),
+        messages=[],
+        tools=[],
+        on_chunk=streamer.handle_chunk,
+    )
+    await streamer.finish("Hi there")
+
+    assert result["tool_calls"][0]["function"]["arguments"] == (
+        '{"action":"final_answer","answer":"Hi there"}'
+    )
+    assert [event["type"] for event in outbound.events] == [
+        "final_answer_start",
+        "final_answer_delta",
+        "final_answer_delta",
+        "final_answer_end",
+    ]
+    assert outbound.events[1]["delta"] == "Hi"
+    assert outbound.events[2]["delta"] == " there"
 
 
 @pytest.mark.asyncio

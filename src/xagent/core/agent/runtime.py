@@ -133,25 +133,33 @@ class PatternRuntime:
 
         async def consume_stream() -> Any:
             content_parts: list[str] = []
-            tool_calls: list[dict[str, Any]] = []
+            tool_call_chunks: dict[int, dict[str, Any]] = {}
+            saw_payload_chunk = False
             async for chunk in stream_chat(**kwargs):
                 await self._raise_if_interrupted("interrupted during LLM stream")
                 self._raise_for_stream_error(chunk)
                 text_delta = self._chunk_text_delta(chunk)
                 if text_delta:
+                    saw_payload_chunk = True
                     content_parts.append(text_delta)
                 chunk_tool_calls = self._chunk_tool_calls(chunk)
                 if chunk_tool_calls:
-                    tool_calls = chunk_tool_calls
+                    saw_payload_chunk = True
+                    self._merge_tool_call_chunks(tool_call_chunks, chunk_tool_calls)
                 if on_chunk is not None:
                     await self._maybe_await(on_chunk(chunk))
 
             content = "".join(content_parts)
+            tool_calls = [
+                tool_call_chunks[index] for index in sorted(tool_call_chunks.keys())
+            ]
             if tool_calls:
                 return {
                     "content": content,
                     "tool_calls": tool_calls,
                 }
+            if not saw_payload_chunk:
+                return await self.run_llm_call(llm, **kwargs)
             return content
 
         task: asyncio.Future[Any] = asyncio.ensure_future(consume_stream())
@@ -193,6 +201,72 @@ class PatternRuntime:
             return []
         tool_calls = getattr(chunk, "tool_calls", None)
         return list(tool_calls or [])
+
+    def _merge_tool_call_chunks(
+        self,
+        accumulator: dict[int, dict[str, Any]],
+        tool_calls: list[Any],
+    ) -> None:
+        for position, raw_tool_call in enumerate(tool_calls):
+            tool_call = self._tool_call_to_dict(raw_tool_call)
+            index_value = tool_call.get("index", position)
+            index = index_value if isinstance(index_value, int) else position
+            current = accumulator.setdefault(index, {})
+            self._merge_tool_call_dict(current, tool_call)
+
+    def _tool_call_to_dict(self, tool_call: Any) -> dict[str, Any]:
+        if isinstance(tool_call, dict):
+            return dict(tool_call)
+        function_payload = getattr(tool_call, "function", None)
+        payload: dict[str, Any] = {
+            key: getattr(tool_call, key)
+            for key in ("id", "index", "type")
+            if getattr(tool_call, key, None) is not None
+        }
+        if function_payload is not None:
+            payload["function"] = {
+                key: getattr(function_payload, key)
+                for key in ("name", "arguments")
+                if getattr(function_payload, key, None) is not None
+            }
+        return payload
+
+    def _merge_tool_call_dict(
+        self,
+        current: dict[str, Any],
+        incoming: dict[str, Any],
+    ) -> None:
+        for key, value in incoming.items():
+            if key == "function" and isinstance(value, dict):
+                function_payload = current.setdefault("function", {})
+                if isinstance(function_payload, dict):
+                    self._merge_tool_call_function(function_payload, value)
+                continue
+            if value is not None:
+                current[key] = value
+
+    def _merge_tool_call_function(
+        self,
+        current: dict[str, Any],
+        incoming: dict[str, Any],
+    ) -> None:
+        name = incoming.get("name")
+        if name:
+            current["name"] = name
+
+        arguments = incoming.get("arguments")
+        if not isinstance(arguments, str):
+            if arguments is not None:
+                current["arguments"] = arguments
+            return
+
+        existing = current.get("arguments")
+        if not isinstance(existing, str) or not existing:
+            current["arguments"] = arguments
+        elif arguments.lstrip().startswith("{"):
+            current["arguments"] = arguments
+        else:
+            current["arguments"] = existing + arguments
 
     def _response_content(self, response: Any) -> str:
         if isinstance(response, str):

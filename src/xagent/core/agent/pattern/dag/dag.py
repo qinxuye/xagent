@@ -1275,7 +1275,8 @@ class DAGPattern(AgentPattern):
                     "the goal is satisfied, choose status=completed and put the "
                     "final user-facing answer in answer. If anything material is "
                     "missing, choose status=incomplete, leave answer empty, and "
-                    "state the missing work plus concise replan instructions."
+                    "state the missing work plus concise replan instructions. Put "
+                    "status before answer in the tool arguments."
                 ),
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},

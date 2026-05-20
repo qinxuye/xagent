@@ -67,6 +67,7 @@ class ToolCallStringFieldStreamer:
         self.emitter = emitter or FinalAnswerStreamEmitter(runtime, enabled=enabled)
         self._guard_confirmed = guard_field is None
         self._disabled = not enabled
+        self._arguments_buffer = ""
 
     @property
     def started(self) -> bool:
@@ -76,14 +77,18 @@ class ToolCallStringFieldStreamer:
         if self._disabled or not _is_tool_call_chunk(chunk):
             return
 
-        arguments = _tool_call_arguments(chunk, self.tool_name)
-        if arguments is None:
+        arguments_delta = _tool_call_arguments(chunk, self.tool_name)
+        if arguments_delta is None:
             return
+        self._arguments_buffer = _merge_json_arguments_fragment(
+            self._arguments_buffer,
+            arguments_delta,
+        )
 
         wanted = {self.field_name}
         if self.guard_field:
             wanted.add(self.guard_field)
-        fields = _JsonStringFieldReader(arguments).read(wanted)
+        fields = _JsonStringFieldReader(self._arguments_buffer).read(wanted)
 
         if self.guard_field:
             guard = fields.get(self.guard_field)
@@ -152,6 +157,22 @@ def _tool_call_arguments(chunk: Any, tool_name: str) -> str | None:
         arguments = function_payload.get("arguments")
         return arguments if isinstance(arguments, str) else None
     return None
+
+
+def _merge_json_arguments_fragment(existing: str, fragment: str) -> str:
+    """Merge provider tool-call argument fragments.
+
+    Some providers stream tool-call arguments as JSON string deltas, while local
+    fakes and a few adapters emit the accumulated arguments on every chunk. A
+    non-initial fragment starting with "{" is treated as an accumulated snapshot;
+    other fragments are appended as deltas.
+    """
+
+    if not existing:
+        return fragment
+    if fragment.lstrip().startswith("{"):
+        return fragment
+    return existing + fragment
 
 
 def _function_payload(tool_call: Any) -> dict[str, Any]:
