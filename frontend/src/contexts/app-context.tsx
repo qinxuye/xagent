@@ -23,6 +23,11 @@ import { getApiUrl, getUploadApiUrl } from "@/lib/utils"
 import { apiRequest, getUploadErrorMessage, isJsonRecord, parseApiResponse, UPLOAD_ERROR_MESSAGES } from "@/lib/api-wrapper"
 import { useI18n } from "@/contexts/i18n-context"
 import { unwrapFinalAnswerContent } from "@/lib/final-answer"
+import {
+  getFinalAnswerStreamActionPayload,
+  isFinalAnswerStreamEventType,
+  isStreamingFinalAnswerMessage,
+} from "@/lib/streaming-final-answer"
 
 // Unique ID generator for messages
 let messageIdCounter = 0
@@ -282,6 +287,7 @@ interface AppState {
 type AppAction =
   | { type: "SET_TASK_ID"; payload: number | null }
   | { type: "ADD_MESSAGE"; payload: Message }
+  | { type: "UPSERT_STREAMING_FINAL_ANSWER"; payload: { messageId: string; delta?: string; content?: string; status?: Message["status"]; timestamp: string } }
   | { type: "SET_CURRENT_TASK"; payload: Task }
   | { type: "UPDATE_TASK_STATUS"; payload: { status: Task["status"]; waitingQuestion?: string; waitingInteractions?: unknown[] } }
   | { type: "SET_DAG_EXECUTION"; payload: DAGExecution | null }
@@ -356,6 +362,43 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
     case "ADD_MESSAGE":
       const newMessage = action.payload
+      if (newMessage.role === "assistant" && newMessage.isResult) {
+        const newContent =
+          typeof newMessage.content === "string" ? newMessage.content : undefined
+        const replaceMessageAt = (targetIndex: number) => ({
+          ...state,
+          messages: state.messages.map((message, index) =>
+            index === targetIndex
+              ? {
+                  ...message,
+                  ...newMessage,
+                  id: message.id,
+                  status: newMessage.status || "completed",
+                }
+              : message
+          ),
+        })
+        if (newContent) {
+          const existingIndex = [...state.messages]
+            .reverse()
+            .findIndex(
+              message =>
+                message.role === "assistant" &&
+                message.isResult &&
+                typeof message.content === "string" &&
+                message.content === newContent
+            )
+          if (existingIndex >= 0) {
+            return replaceMessageAt(state.messages.length - 1 - existingIndex)
+          }
+        }
+        const streamingIndex = [...state.messages]
+          .reverse()
+          .findIndex(isStreamingFinalAnswerMessage)
+        if (streamingIndex >= 0) {
+          return replaceMessageAt(state.messages.length - 1 - streamingIndex)
+        }
+      }
       const updatedMessages = [...state.messages, newMessage]
       // Sort messages by timestamp
       updatedMessages.sort((a, b) => {
@@ -364,6 +407,43 @@ function appReducer(state: AppState, action: AppAction): AppState {
         return timeA - timeB
       })
       return { ...state, messages: updatedMessages }
+
+    case "UPSERT_STREAMING_FINAL_ANSWER": {
+      const { messageId, delta, content, status, timestamp } = action.payload
+      const existing = state.messages.find(message => message.id === messageId)
+      if (!existing) {
+        return {
+          ...state,
+          messages: [
+            ...state.messages,
+            {
+              id: messageId,
+              role: "assistant",
+              content: content || delta || "",
+              timestamp,
+              status: status || "running",
+              isResult: true,
+            },
+          ],
+        }
+      }
+      return {
+        ...state,
+        messages: state.messages.map(message => {
+          if (message.id !== messageId) {
+            return message
+          }
+          const currentContent =
+            typeof message.content === "string" ? message.content : ""
+          const nextContent = content !== undefined ? content : currentContent + (delta || "")
+          return {
+            ...message,
+            content: nextContent,
+            status: status || message.status || "running",
+          }
+        }),
+      }
+    }
 
     case "SET_CURRENT_TASK":
       return { ...state, currentTask: action.payload }
@@ -753,6 +833,23 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
     }
 
     // Normal message processing when not in replay mode
+    if (isFinalAnswerStreamEventType(message.type)) {
+      const payload = getFinalAnswerStreamActionPayload({
+        eventType: message.type,
+        eventData: message,
+        eventId: message.event_id,
+        timestamp: message.timestamp,
+        fallbackMessageId: generateMessageId("msg-final-answer"),
+      })
+      if (payload) {
+        dispatch({ type: "UPSERT_STREAMING_FINAL_ANSWER", payload })
+        if (message.type === "final_answer_start") {
+          dispatch({ type: "SET_PROCESSING", payload: true })
+        }
+      }
+      return
+    }
+
     switch (message.type) {
       case "trace_event":
         const traceEventData = message.data as any
@@ -895,6 +992,23 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
             })
 
             console.log('✅ User message dispatched successfully')
+          }
+
+          else if (isFinalAnswerStreamEventType(eventType)) {
+            const payload = getFinalAnswerStreamActionPayload({
+              eventType,
+              eventData,
+              eventId: message.event_id,
+              timestamp: message.timestamp,
+              fallbackMessageId: generateMessageId("msg-final-answer"),
+            })
+            if (!payload) {
+              return
+            }
+            dispatch({ type: "UPSERT_STREAMING_FINAL_ANSWER", payload })
+            if (eventType === "final_answer_start") {
+              dispatch({ type: "SET_PROCESSING", payload: true })
+            }
           }
 
           // Agent-to-user messages, including ask_user_question prompts.
@@ -2092,6 +2206,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                     : eventData.content || "",
                 timestamp: message.timestamp,
                 status: "completed",
+                isResult: true,
               }
             })
           }

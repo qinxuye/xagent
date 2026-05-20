@@ -18,6 +18,7 @@ from xagent.core.agent import (
     ReActPattern,
 )
 from xagent.core.agent.pattern.auto.auto import DECISION_TOOL_NAME, _AutoChildRuntime
+from xagent.core.model.chat.types import ChunkType, StreamChunk
 
 
 class FakeWorkspace:
@@ -53,6 +54,40 @@ class FakeLLM:
     async def chat(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
         return self.responses.pop(0)
+
+
+class StreamingDecisionLLM:
+    def __init__(self, argument_snapshots: list[str]) -> None:
+        self.argument_snapshots = argument_snapshots
+        self.calls: list[dict[str, Any]] = []
+
+    async def chat(self, **kwargs: Any) -> Any:
+        raise AssertionError("streaming decision should not call chat()")
+
+    async def stream_chat(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        for arguments in self.argument_snapshots:
+            yield StreamChunk(
+                type=ChunkType.TOOL_CALL,
+                tool_calls=[
+                    {
+                        "id": f"call_{DECISION_TOOL_NAME}",
+                        "type": "function",
+                        "function": {
+                            "name": DECISION_TOOL_NAME,
+                            "arguments": arguments,
+                        },
+                    }
+                ],
+            )
+
+
+class OutboundCollector:
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    async def __call__(self, payload: dict[str, Any]) -> None:
+        self.events.append(payload)
 
 
 class TimeoutLLM:
@@ -472,6 +507,85 @@ async def test_auto_pattern_final_answer_completes_without_child_pattern() -> No
     assert "Mandatory when action is final_answer" in answer_schema["description"]
     assert runtime.last_checkpoint is not None
     assert runtime.last_checkpoint["pattern"] == "AutoPattern"
+
+
+@pytest.mark.asyncio
+async def test_auto_pattern_streams_direct_final_answer_from_decision_tool() -> None:
+    prefix = (
+        '{"action":"final_answer","reason":"simple",'
+        '"requires_current_or_external_facts":false,'
+        '"existing_context_sufficient":true,'
+        '"evidence_basis":"current conversation",'
+        '"missing_verification":"",'
+        '"answer":"'
+    )
+    llm = StreamingDecisionLLM(
+        [
+            prefix + "Hi",
+            prefix + "Hi there",
+            prefix + "Hi there.",
+            prefix + 'Hi there."}',
+        ]
+    )
+    collector = OutboundCollector()
+    runtime = PatternRuntime(
+        execution_id="auto-stream",
+        outbound_message_handler=collector,
+    )
+    pattern = AutoPattern()
+    context = ExecutionContext(execution_id="auto-stream")
+    context.add_user_message("Say hello")
+
+    result = await pattern.run(context=context, tools=[], llm=llm, runtime=runtime)
+
+    assert result["success"] is True
+    assert result["output"] == "Hi there."
+    assert [event["type"] for event in collector.events] == [
+        "final_answer_start",
+        "final_answer_delta",
+        "final_answer_delta",
+        "final_answer_delta",
+        "final_answer_end",
+    ]
+    assert [event.get("delta") for event in collector.events[1:4]] == [
+        "Hi",
+        " there",
+        ".",
+    ]
+    assert collector.events[-1]["content"] == "Hi there."
+    assert len({event["message_id"] for event in collector.events}) == 1
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_pattern_does_not_stream_non_final_decision() -> None:
+    arguments = json.dumps(
+        {
+            "action": "react",
+            "reason": "Needs a tool.",
+            "requires_current_or_external_facts": False,
+            "existing_context_sufficient": True,
+            "evidence_basis": "current conversation",
+            "missing_verification": "",
+        }
+    )
+    llm = StreamingDecisionLLM([arguments[:80], arguments])
+    collector = OutboundCollector()
+    runtime = PatternRuntime(
+        execution_id="auto-react-stream",
+        outbound_message_handler=collector,
+    )
+    child = CapturingChildPattern()
+    pattern = AutoPattern(react_pattern=child)  # type: ignore[arg-type]
+    context = ExecutionContext(execution_id="auto-react-stream")
+    context.add_user_message("Use a tool")
+
+    result = await pattern.run(context=context, tools=[], llm=llm, runtime=runtime)
+
+    assert result["success"] is True
+    assert result["output"] == "child done"
+    assert collector.events == []
+    assert pattern.selected_pattern == "react"
 
 
 @pytest.mark.asyncio

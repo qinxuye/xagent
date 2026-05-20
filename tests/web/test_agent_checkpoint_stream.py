@@ -21,6 +21,7 @@ from xagent.web.api.websocket import (
     _is_agent_checkpoint_data,
     _is_duplicate_user_message_turn,
     _persist_agent_outbound_event,
+    create_final_answer_stream_event,
     create_stream_event,
     send_historical_data_as_stream,
 )
@@ -92,6 +93,25 @@ def test_historical_stream_identifies_agent_checkpoint_payload() -> None:
         }
     )
     assert not _is_agent_checkpoint_data({"event": "ai_message"})
+
+
+def test_final_answer_stream_event_is_not_trace_event() -> None:
+    event = create_final_answer_stream_event(
+        "final_answer_delta",
+        365,
+        {
+            "type": "final_answer_delta",
+            "message_id": "final_answer_1",
+            "delta": "hello",
+        },
+    )
+
+    assert event["type"] == "final_answer_delta"
+    assert event["task_id"] == 365
+    assert event["message_id"] == "final_answer_1"
+    assert event["delta"] == "hello"
+    assert "event_type" not in event
+    assert "data" not in event
 
 
 def test_persist_agent_outbound_event_uses_payload_ids(monkeypatch) -> None:

@@ -16,6 +16,7 @@ from xagent.core.agent import (
     ReActReasoningMode,
     ToolCallRecord,
 )
+from xagent.core.model.chat.types import ChunkType, StreamChunk
 
 react_module = importlib.import_module("xagent.core.agent.pattern.react.react")
 
@@ -179,6 +180,42 @@ class FakeLLM:
         return self.responses.pop(0)
 
 
+class StreamingFinalAnswerLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.stream_calls: list[dict[str, Any]] = []
+
+    async def chat(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        return {
+            "content": "I should calculate this first.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {
+                        "name": "calculator",
+                        "arguments": '{"expression":"2+2"}',
+                    },
+                }
+            ],
+            "done": False,
+        }
+
+    async def stream_chat(self, **kwargs: Any) -> Any:
+        self.stream_calls.append(kwargs)
+        yield StreamChunk(type=ChunkType.TOKEN, delta="The result")
+        yield StreamChunk(type=ChunkType.TOKEN, delta=" is 4.")
+        yield StreamChunk(type=ChunkType.END)
+
+
+class OutboundCollector:
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    async def __call__(self, payload: dict[str, Any]) -> None:
+        self.events.append(payload)
+
+
 class BlockingLLM:
     def __init__(self) -> None:
         self.started = asyncio.Event()
@@ -316,6 +353,33 @@ async def test_react_pattern_runs_tool_call_then_final_answer() -> None:
     assert "use this date when forming search queries" in system_prompt
     assert "not supported by the conversation" in system_prompt
     assert "available context is insufficient" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_react_pattern_streams_only_final_answer_after_tool_call() -> None:
+    llm = StreamingFinalAnswerLLM()
+    pattern = ReActPattern(max_iterations=3, finalize_after_tool_result=True)
+    tool = FakeTool()
+    context = ExecutionContext(system_prompt="You are helpful.", execution_id="task-1")
+    context.add_user_message("Calculate 2+2")
+    outbound = OutboundCollector()
+    runtime = PatternRuntime(execution_id="task-1", outbound_message_handler=outbound)
+
+    result = await pattern.run(context=context, tools=[tool], llm=llm, runtime=runtime)
+
+    assert result["success"] is True
+    assert result["response"] == "The result is 4."
+    assert tool.calls == [{"expression": "2+2"}]
+    assert len(llm.calls) == 1
+    assert len(llm.stream_calls) == 1
+    assert llm.calls[0]["tools"][0]["function"]["name"] == "calculator"
+    assert llm.stream_calls[0]["tools"] is None
+    assert [event["type"] for event in outbound.events] == [
+        "final_answer_start",
+        "final_answer_delta",
+        "final_answer_delta",
+        "final_answer_end",
+    ]
 
 
 @pytest.mark.asyncio

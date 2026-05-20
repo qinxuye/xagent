@@ -295,12 +295,15 @@ class ReActPattern(AgentPattern):
                 metadata={"iteration": iteration},
             )
             try:
-                response = await runtime.run_llm_call(
-                    llm,
-                    messages=messages,
-                    tools=tool_schemas or None,
-                    tool_choice=self.tool_choice if tool_schemas else None,
-                )
+                llm_kwargs = {
+                    "messages": messages,
+                    "tools": tool_schemas or None,
+                    "tool_choice": self.tool_choice if tool_schemas else None,
+                }
+                if tool_schemas:
+                    response = await runtime.run_llm_call(llm, **llm_kwargs)
+                else:
+                    response = await runtime.stream_final_answer(llm, **llm_kwargs)
             except LLMCallInterrupted:
                 interrupted = await self._interrupt_if_requested(
                     runtime=runtime,

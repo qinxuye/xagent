@@ -7,6 +7,7 @@ import pytest
 
 from xagent.core.agent import ExecutionContext, PatternRuntime
 from xagent.core.agent.runtime import LLMCallInterrupted
+from xagent.core.model.chat.types import ChunkType, StreamChunk
 
 
 class SlowLLM:
@@ -22,6 +23,26 @@ class SlowLLM:
 class CancelledLLM:
     async def chat(self, **_: Any) -> str:
         raise asyncio.CancelledError
+
+
+class StreamingLLM:
+    async def stream_chat(self, **_: Any) -> Any:
+        yield StreamChunk(type=ChunkType.TOKEN, delta="hello")
+        yield StreamChunk(type=ChunkType.TOKEN, delta=" world")
+        yield StreamChunk(type=ChunkType.END)
+
+
+class ChatOnlyLLM:
+    async def chat(self, **_: Any) -> str:
+        return "complete answer"
+
+
+class OutboundCollector:
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    async def __call__(self, payload: dict[str, Any]) -> None:
+        self.events.append(payload)
 
 
 class CheckpointTracer:
@@ -101,6 +122,40 @@ async def test_runtime_preserves_non_interrupt_cancelled_error() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await runtime.run_llm_call(CancelledLLM())
+
+
+@pytest.mark.asyncio
+async def test_runtime_stream_final_answer_emits_ui_events() -> None:
+    outbound = OutboundCollector()
+    runtime = PatternRuntime(execution_id="task-123", outbound_message_handler=outbound)
+
+    result = await runtime.stream_final_answer(
+        StreamingLLM(), messages=[{"role": "user", "content": "Say hi"}]
+    )
+
+    assert result == "hello world"
+    assert [event["type"] for event in outbound.events] == [
+        "final_answer_start",
+        "final_answer_delta",
+        "final_answer_delta",
+        "final_answer_end",
+    ]
+    assert outbound.events[0]["task_id"] == "task-123"
+    assert outbound.events[1]["delta"] == "hello"
+    assert outbound.events[2]["delta"] == " world"
+    assert outbound.events[3]["content"] == "hello world"
+    assert len({event["message_id"] for event in outbound.events}) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_stream_final_answer_falls_back_to_chat_without_events() -> None:
+    outbound = OutboundCollector()
+    runtime = PatternRuntime(outbound_message_handler=outbound)
+
+    result = await runtime.stream_final_answer(ChatOnlyLLM(), messages=[])
+
+    assert result == "complete answer"
+    assert outbound.events == []
 
 
 @pytest.mark.asyncio

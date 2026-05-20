@@ -379,24 +379,48 @@ def create_stream_event(
     timestamp: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Create unified stream event format"""
-    # Convert timestamp to Unix timestamp if it's a datetime
-    if timestamp is None:
-        timestamp = datetime.now(timezone.utc).timestamp()
-    elif isinstance(timestamp, datetime):
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
-        timestamp = timestamp.timestamp()
-    elif not isinstance(timestamp, (int, float)):
-        timestamp = datetime.now(timezone.utc).timestamp()
-
     return {
         "type": "trace_event",
         "event_id": str(uuid.uuid4()),
         "event_type": event_type,
         "task_id": task_id,
-        "timestamp": timestamp,
+        "timestamp": _stream_timestamp(timestamp),
         "data": data,
     }
+
+
+def create_final_answer_stream_event(
+    event_type: str,
+    task_id: Union[int, str],
+    data: Dict[str, Any],
+    timestamp: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Create non-persistent final-answer UI stream events."""
+
+    payload = dict(data)
+    payload.pop("type", None)
+    payload.pop("event_id", None)
+    payload.pop("task_id", None)
+    return {
+        "type": event_type,
+        "event_id": str(uuid.uuid4()),
+        "task_id": task_id,
+        "timestamp": _stream_timestamp(timestamp),
+        **payload,
+    }
+
+
+def _stream_timestamp(timestamp: Optional[Any] = None) -> float:
+    # Convert timestamp to Unix timestamp if it's a datetime
+    if timestamp is None:
+        return datetime.now(timezone.utc).timestamp()
+    if isinstance(timestamp, datetime):
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.timestamp()
+    if not isinstance(timestamp, (int, float)):
+        return datetime.now(timezone.utc).timestamp()
+    return float(timestamp)
 
 
 def _persist_agent_outbound_event(task_id: int, event: Dict[str, Any]) -> None:
@@ -467,6 +491,18 @@ def make_agent_outbound_handler(task_id: int) -> Any:
     """Create a web bridge for agent agent-to-user messages."""
 
     async def handle_outbound_message(payload: Dict[str, Any]) -> None:
+        payload_type = str(payload.get("type") or "")
+        if payload_type in {
+            "final_answer_start",
+            "final_answer_delta",
+            "final_answer_end",
+        }:
+            await manager.broadcast_to_task(
+                create_final_answer_stream_event(payload_type, task_id, dict(payload)),
+                task_id,
+            )
+            return
+
         event = create_stream_event(
             "agent_message",
             task_id,

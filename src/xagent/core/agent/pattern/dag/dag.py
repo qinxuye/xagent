@@ -63,6 +63,10 @@ class _DAGStepRuntime:
     async def run_llm_call(self, llm: Any, **kwargs: Any) -> Any:
         return await self.parent.run_llm_call(llm, **kwargs)
 
+    async def stream_final_answer(self, llm: Any, **kwargs: Any) -> Any:
+        # DAG step answers are intermediate step outputs, not the final chat answer.
+        return await self.parent.run_llm_call(llm, **kwargs)
+
     async def send_message(
         self,
         *,

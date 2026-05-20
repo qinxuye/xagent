@@ -40,6 +40,11 @@ import { apiRequest, getUploadErrorMessage, isJsonRecord, parseApiResponse, UPLO
 import { useI18n } from "@/contexts/i18n-context"
 import { normalizeTimestampMs } from "@/lib/time-utils"
 import { unwrapFinalAnswerContent } from "@/lib/final-answer"
+import {
+  getFinalAnswerStreamActionPayload,
+  isFinalAnswerStreamEventType,
+  isStreamingFinalAnswerMessage,
+} from "@/lib/streaming-final-answer"
 
 // Unique ID generator for messages
 let messageIdCounter = 0
@@ -452,6 +457,7 @@ interface AppState {
 type AppAction =
   | { type: "SET_TASK_ID"; payload: number | null }
   | { type: "ADD_MESSAGE"; payload: Message }
+  | { type: "UPSERT_STREAMING_FINAL_ANSWER"; payload: { messageId: string; delta?: string; content?: string; status?: Message["status"]; timestamp: string } }
   | { type: "SET_CURRENT_TASK"; payload: Task }
   | { type: "UPDATE_TASK_STATUS"; payload: { status: Task["status"]; waitingQuestion?: string; waitingInteractions?: Interaction[] } }
   | { type: "TRIGGER_TASK_UPDATE" }
@@ -558,11 +564,82 @@ function appReducer(state: AppState, action: AppAction): AppState {
         newTraceEvents = []
       }
 
+      if (newMessage.role === "assistant" && newMessage.isResult) {
+        const newContent =
+          typeof newMessage.content === "string" ? newMessage.content : undefined
+        const replaceMessageAt = (targetIndex: number) => {
+          const updatedMessages = state.messages.map((message, index) =>
+            index === targetIndex
+              ? {
+                  ...message,
+                  ...messageToAdd,
+                  id: message.id,
+                  status: newMessage.status || "completed",
+                }
+              : message
+          )
+          return { ...state, messages: updatedMessages, traceEvents: newTraceEvents }
+        }
+        if (newContent) {
+          const existingIndex = [...state.messages]
+            .reverse()
+            .findIndex(
+              message =>
+                message.role === "assistant" &&
+                message.isResult &&
+                typeof message.content === "string" &&
+                message.content === newContent
+            )
+          if (existingIndex >= 0) {
+            return replaceMessageAt(state.messages.length - 1 - existingIndex)
+          }
+        }
+        const streamingIndex = [...state.messages]
+          .reverse()
+          .findIndex(isStreamingFinalAnswerMessage)
+        if (streamingIndex >= 0) {
+          return replaceMessageAt(state.messages.length - 1 - streamingIndex)
+        }
+      }
+
       const updatedMessages = [...state.messages, messageToAdd]
       updatedMessages.sort((a, b) => {
         return normalizeTimestampMs(a.timestamp) - normalizeTimestampMs(b.timestamp)
       })
       return { ...state, messages: updatedMessages, traceEvents: newTraceEvents }
+    }
+
+    case "UPSERT_STREAMING_FINAL_ANSWER": {
+      const { messageId, delta, content, status, timestamp } = action.payload
+      const existing = state.messages.find(message => message.id === messageId)
+      if (!existing) {
+        const message: Message = {
+          id: messageId,
+          role: "assistant",
+          content: content || delta || "",
+          rawContent: content || delta || "",
+          timestamp,
+          status: status || "running",
+          isResult: true,
+          traceEvents: [...state.traceEvents],
+        }
+        return { ...state, messages: [...state.messages, message], traceEvents: [] }
+      }
+      const updatedMessages = state.messages.map(message => {
+        if (message.id !== messageId) {
+          return message
+        }
+        const currentContent =
+          typeof message.content === "string" ? message.content : ""
+        const nextContent = content !== undefined ? content : currentContent + (delta || "")
+        return {
+          ...message,
+          content: nextContent,
+          rawContent: nextContent,
+          status: status || message.status || "running",
+        }
+      })
+      return { ...state, messages: updatedMessages }
     }
 
     case "SET_CURRENT_TASK":
@@ -1058,6 +1135,23 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
     }
 
     // Normal message processing when not in replay mode
+    if (isFinalAnswerStreamEventType(message.type)) {
+      const payload = getFinalAnswerStreamActionPayload({
+        eventType: message.type,
+        eventData: message,
+        eventId: message.event_id,
+        timestamp: message.timestamp,
+        fallbackMessageId: generateMessageId("msg-final-answer"),
+      })
+      if (payload) {
+        dispatch({ type: "UPSERT_STREAMING_FINAL_ANSWER", payload })
+        if (message.type === "final_answer_start") {
+          dispatch({ type: "SET_PROCESSING", payload: true })
+        }
+      }
+      return
+    }
+
     switch (message.type) {
       case "chat":
         const chatData = message as any
@@ -1273,6 +1367,23 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
             })
 
             console.log('✅ User message dispatched successfully')
+          }
+
+          else if (isFinalAnswerStreamEventType(eventType)) {
+            const payload = getFinalAnswerStreamActionPayload({
+              eventType,
+              eventData,
+              eventId: message.event_id,
+              timestamp: message.timestamp,
+              fallbackMessageId: generateMessageId("msg-final-answer"),
+            })
+            if (!payload) {
+              return
+            }
+            dispatch({ type: "UPSERT_STREAMING_FINAL_ANSWER", payload })
+            if (eventType === "final_answer_start") {
+              dispatch({ type: "SET_PROCESSING", payload: true })
+            }
           }
 
           // Agent-to-user messages, including ask_user_question prompts.

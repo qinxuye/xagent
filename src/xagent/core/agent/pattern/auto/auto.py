@@ -22,6 +22,7 @@ from ...runtime import LLMCallInterrupted, PatternRuntime
 from ..base import AgentPattern, PatternResult
 from ..dag import DAGPattern
 from ..react import ReActPattern
+from .answer_stream import AutoFinalAnswerStreamer
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,22 @@ class _AutoChildRuntime:
 
     async def run_llm_call(self, llm: Any, **kwargs: Any) -> Any:
         return await self.parent.run_llm_call(llm, **kwargs)
+
+    async def stream_final_answer(self, llm: Any, **kwargs: Any) -> Any:
+        return await self.parent.stream_final_answer(llm, **kwargs)
+
+    async def run_streaming_llm_call(
+        self,
+        llm: Any,
+        *,
+        on_chunk: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        return await self.parent.run_streaming_llm_call(
+            llm,
+            on_chunk=on_chunk,
+            **kwargs,
+        )
 
     async def send_message(
         self,
@@ -604,6 +621,7 @@ class AutoPattern(AgentPattern):
         decision_prompt = self._decision_prompt(tools)
         decision_tools = [self._decision_tool_schema()]
         retry_feedback: str | None = None
+        stream_decision_answer = True
         for attempt in range(MAX_DECISION_PARSE_ATTEMPTS):
             messages = list(base_messages)
             messages.append({"role": "user", "content": decision_prompt})
@@ -618,13 +636,20 @@ class AutoPattern(AgentPattern):
                 tools=decision_tools,
                 metadata=metadata,
             )
+            answer_streamer = AutoFinalAnswerStreamer(
+                runtime=runtime,
+                tool_name=DECISION_TOOL_NAME,
+                final_action=AutoAction.FINAL_ANSWER.value,
+                enabled=stream_decision_answer,
+            )
             try:
-                response = await runtime.run_llm_call(
+                response = await runtime.run_streaming_llm_call(
                     llm,
                     messages=messages,
                     tools=decision_tools,
                     tool_choice="required",
                     thinking={"type": "disabled", "enable": False},
+                    on_chunk=answer_streamer.handle_chunk,
                 )
             except Exception as exc:
                 await runtime.on_llm_error(
@@ -635,10 +660,12 @@ class AutoPattern(AgentPattern):
                 context=context, response=response, metadata=metadata
             )
             try:
-                return self._parse_decision(response)
+                decision = self._parse_decision(response)
             except AutoDecisionArgumentsError as exc:
                 if attempt + 1 >= MAX_DECISION_PARSE_ATTEMPTS:
                     raise
+                if answer_streamer.started:
+                    stream_decision_answer = False
                 retry_feedback = self._decision_retry_feedback(exc)
                 logger.warning(
                     "AutoPattern decision arguments were invalid JSON; retrying "
@@ -655,6 +682,10 @@ class AutoPattern(AgentPattern):
                         "error": str(exc),
                     },
                 )
+                continue
+            if decision.action == AutoAction.FINAL_ANSWER:
+                await answer_streamer.finish(decision.answer or "")
+            return decision
         raise RuntimeError("AutoPattern decision retry loop exited unexpectedly.")
 
     def _decision_retry_feedback(self, error: AutoDecisionArgumentsError) -> str:
