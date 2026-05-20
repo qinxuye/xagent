@@ -424,6 +424,9 @@ async def test_react_pattern_runs_tool_call_then_final_answer() -> None:
     assert "use this date when forming search queries" in system_prompt
     assert "not supported by the conversation" in system_prompt
     assert "available context is insufficient" in system_prompt
+    assert "Do not write assistant text in the same response as a work tool call" in (
+        system_prompt
+    )
 
 
 @pytest.mark.asyncio
@@ -454,7 +457,7 @@ async def test_react_pattern_streams_only_final_answer_after_tool_call() -> None
 
 
 @pytest.mark.asyncio
-async def test_react_pattern_does_not_stream_plain_text_when_tools_are_enabled() -> (
+async def test_react_pattern_does_not_stream_plain_text_when_tool_protocol_is_ignored() -> (
     None
 ):
     llm = StreamingPlainTextFinalAnswerLLM()
@@ -469,6 +472,7 @@ async def test_react_pattern_does_not_stream_plain_text_when_tools_are_enabled()
     assert result["success"] is True
     assert result["response"] == "Plain final."
     assert llm.stream_calls[0]["tools"] is not None
+    assert llm.stream_calls[0]["tool_choice"] == "required"
     assert outbound.events == []
 
 

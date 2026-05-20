@@ -106,6 +106,7 @@ interface StepAction {
       error?: any;
       tool_calls?: any;
       sandboxed?: boolean;
+      inline?: boolean;
   };
 }
 
@@ -296,6 +297,20 @@ function useProcessedSteps(events: TraceEvent[]): ProcessedStep[] {
         const toolName = event.data?.response?.tool_name || event.data?.tool_name || t('traceEventRenderer.unknownTool');
         const assistantContent = event.data?.response?.assistant_content || event.data?.assistant_content;
 
+        if (typeof assistantContent === 'string' && assistantContent.trim()) {
+          step.actions.push({
+            id: `${eventId}-assistant-content`,
+            type: 'info',
+            title: t('traceEventRenderer.toolCallNote'),
+            status: 'completed',
+            timestamp,
+            data: {
+              output: assistantContent.trim(),
+              inline: true,
+            }
+          });
+        }
+
         if (toolName) {
           // Merge with existing tools instead of replacing
           if (!step.tools.some(tItem => tItem.function.name === toolName)) {
@@ -313,7 +328,6 @@ function useProcessedSteps(events: TraceEvent[]): ProcessedStep[] {
             tool: toolName,
             args: toolArgs,
             code: step.code,
-            assistant_content: typeof assistantContent === 'string' ? assistantContent : undefined,
             sandboxed: !!event.data?.sandboxed
           }
         });
@@ -702,26 +716,6 @@ const DefaultToolRenderer = ({ action, isRunning, t, onFileClick, onAgentClick }
   );
 };
 
-const ToolAssistantContent = ({ action, t, onFileClick }: any) => {
-  const content = typeof action.data.assistant_content === 'string'
-    ? action.data.assistant_content.trim()
-    : '';
-  if (!content) return null;
-
-  return (
-    <div className="mb-2 rounded-md border border-border/50 bg-background/70 p-3 font-sans">
-      <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-        {t('traceEventRenderer.toolCallNote')}
-      </div>
-      <MarkdownRenderer
-        content={content}
-        onFileClick={onFileClick}
-        className="text-xs leading-relaxed prose-neutral dark:prose-invert max-w-none [&>p]:mb-1.5 [&>p:last-child]:mb-0"
-      />
-    </div>
-  );
-};
-
 const ToolDetailsRenderer = ({ action, onOpenTerminal, isRunning, t, onFileClick, onAgentClick }: any) => {
   const toolName = action.data.tool;
   let rendererContent = null;
@@ -740,7 +734,6 @@ const ToolDetailsRenderer = ({ action, onOpenTerminal, isRunning, t, onFileClick
   return (
     <div className="flex flex-col">
       <ToolErrorDisplay action={action} t={t} />
-      <ToolAssistantContent action={action} t={t} onFileClick={onFileClick} />
       {rendererContent}
     </div>
   );
@@ -884,6 +877,18 @@ function StepActionItem({ action, onViewDetail, onOpenTerminal, onFileClick, onA
       resizeObserver.disconnect();
     };
   }, [updateToolSummaryVisibility]);
+
+  if (action.type === 'info' && action.data.inline) {
+    return (
+      <div className="px-3 py-1.5">
+        <MarkdownRenderer
+          content={formatActionContent(action.data.output)}
+          onFileClick={onFileClick}
+          className="text-sm leading-relaxed text-foreground prose-neutral dark:prose-invert max-w-none [&>p]:mb-1.5 [&>p:last-child]:mb-0"
+        />
+      </div>
+    );
+  }
 
   if (action.type === 'llm') {
     return (

@@ -119,7 +119,7 @@ class ReActPattern(AgentPattern):
         # Intentionally high for interactive and long-running agent tasks; callers
         # can pass a lower value when they need stricter cost or latency bounds.
         max_iterations: int = 200,
-        tool_choice: str | dict[str, Any] | None = "auto",
+        tool_choice: str | dict[str, Any] | None = "required",
         reasoning_mode: ReActReasoningMode | str = ReActReasoningMode.TOOL_CALLING,
         finalize_after_tool_result: bool = False,
     ) -> None:
@@ -432,7 +432,9 @@ class ReActPattern(AgentPattern):
                 "that a tool can determine. After a successful tool call, base the "
                 "final answer on the latest tool result instead of repeating the same "
                 "tool work. When the current task is complete, call the final_answer "
-                "tool exactly once instead of calling another work tool. If a tool "
+                "tool exactly once instead of calling another work tool or returning "
+                "plain assistant text. Do not write assistant text in the same "
+                "response as a work tool call; call the tool directly. If a tool "
                 "needs missing information from the user, call ask_user_question; do "
                 "not ask the question as plain assistant text. If the latest user "
                 "message explicitly asks you to call a named available tool, call "

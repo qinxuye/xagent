@@ -291,6 +291,6 @@ describe("TraceEventRenderer", () => {
     )
 
     expect(screen.getByText("I need current search results first.")).toBeInTheDocument()
-    expect(screen.getByText("traceEventRenderer.toolCallNote")).toBeInTheDocument()
+    expect(screen.queryByText("traceEventRenderer.toolCallNote")).not.toBeInTheDocument()
   })
 })
