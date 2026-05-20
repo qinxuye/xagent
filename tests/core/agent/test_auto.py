@@ -20,6 +20,8 @@ from xagent.core.agent import (
 from xagent.core.agent.pattern.auto.auto import DECISION_TOOL_NAME, _AutoChildRuntime
 from xagent.core.model.chat.types import ChunkType, StreamChunk
 
+DAG_COMPLETION_TOOL_NAME = "assess_dag_completion"
+
 
 class FakeWorkspace:
     def __init__(self, task_id: str, tmp_path: Path) -> None:
@@ -53,6 +55,8 @@ class FakeLLM:
 
     async def chat(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
+        if not self.responses and has_tool(kwargs, DAG_COMPLETION_TOOL_NAME):
+            return default_completion_assessment_response(kwargs)
         return self.responses.pop(0)
 
 
@@ -155,6 +159,49 @@ class QuerySkillManager:
             "description": "Task-specific skill",
             "content": f"Use guidance for {task}.",
         }
+
+
+def has_tool(kwargs: dict[str, Any], tool_name: str) -> bool:
+    for tool_schema in kwargs.get("tools") or []:
+        function = tool_schema.get("function")
+        if isinstance(function, dict) and function.get("name") == tool_name:
+            return True
+    return False
+
+
+def default_completion_assessment_response(kwargs: dict[str, Any]) -> dict[str, Any]:
+    answer = "done"
+    messages = kwargs.get("messages") or []
+    if messages:
+        try:
+            payload = json.loads(str(messages[-1].get("content", "{}")))
+            candidate = payload.get("candidate_output")
+            if isinstance(candidate, str):
+                answer = candidate
+            elif candidate is not None:
+                answer = json.dumps(candidate, ensure_ascii=False, default=str)
+        except (AttributeError, json.JSONDecodeError):
+            answer = "done"
+    return {
+        "tool_calls": [
+            {
+                "id": "call_assess_dag_completion",
+                "type": "function",
+                "function": {
+                    "name": DAG_COMPLETION_TOOL_NAME,
+                    "arguments": json.dumps(
+                        {
+                            "status": "completed",
+                            "reason": "Completion assessment.",
+                            "answer": answer,
+                            "missing_work": "",
+                            "replan_instruction": "",
+                        }
+                    ),
+                },
+            }
+        ]
+    }
 
 
 class CapturingChildPattern:
@@ -1351,4 +1398,5 @@ async def test_auto_pattern_dag_resume_from_tracer_does_not_redecide(
     assert resumed["status"] == "completed"
     assert resumed["output"] == "resumed dag"
     assert resumed["pattern"] == "AutoPattern"
-    assert len(resumed_llm.calls) == 1
+    assert len(resumed_llm.calls) == 2
+    assert has_tool(resumed_llm.calls[1], DAG_COMPLETION_TOOL_NAME)

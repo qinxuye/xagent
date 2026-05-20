@@ -21,8 +21,8 @@ from ...frame import ExecutionFrame, ExecutionSnapshot, ExecutionStatus
 from ...runtime import LLMCallInterrupted, PatternRuntime
 from ..base import AgentPattern, PatternResult
 from ..dag import DAGPattern
+from ..final_answer_stream import ToolCallStringFieldStreamer
 from ..react import ReActPattern
-from .answer_stream import AutoFinalAnswerStreamer
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +151,15 @@ class _AutoChildRuntime:
 
     async def stream_final_answer(self, llm: Any, **kwargs: Any) -> Any:
         return await self.parent.stream_final_answer(llm, **kwargs)
+
+    async def start_final_answer_stream(self) -> str | None:
+        return await self.parent.start_final_answer_stream()
+
+    async def emit_final_answer_delta(self, message_id: str, delta: str) -> None:
+        await self.parent.emit_final_answer_delta(message_id, delta)
+
+    async def end_final_answer_stream(self, message_id: str, content: str) -> None:
+        await self.parent.end_final_answer_stream(message_id, content)
 
     async def run_streaming_llm_call(
         self,
@@ -636,10 +645,12 @@ class AutoPattern(AgentPattern):
                 tools=decision_tools,
                 metadata=metadata,
             )
-            answer_streamer = AutoFinalAnswerStreamer(
+            answer_streamer = ToolCallStringFieldStreamer(
                 runtime=runtime,
                 tool_name=DECISION_TOOL_NAME,
-                final_action=AutoAction.FINAL_ANSWER.value,
+                field_name="answer",
+                guard_field="action",
+                guard_value=AutoAction.FINAL_ANSWER.value,
                 enabled=stream_decision_answer,
             )
             try:

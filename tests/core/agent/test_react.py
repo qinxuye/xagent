@@ -186,25 +186,71 @@ class StreamingFinalAnswerLLM:
         self.stream_calls: list[dict[str, Any]] = []
 
     async def chat(self, **kwargs: Any) -> Any:
-        self.calls.append(kwargs)
-        return {
-            "content": "I should calculate this first.",
-            "tool_calls": [
-                {
-                    "id": "call_1",
-                    "function": {
-                        "name": "calculator",
-                        "arguments": '{"expression":"2+2"}',
-                    },
-                }
-            ],
-            "done": False,
-        }
+        raise AssertionError("streaming ReAct path should not call chat()")
 
     async def stream_chat(self, **kwargs: Any) -> Any:
         self.stream_calls.append(kwargs)
+        if kwargs.get("tools"):
+            yield StreamChunk(
+                type=ChunkType.TOOL_CALL,
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": '{"expression":"2+2"}',
+                        },
+                    }
+                ],
+            )
+            yield StreamChunk(type=ChunkType.END)
+            return
         yield StreamChunk(type=ChunkType.TOKEN, delta="The result")
         yield StreamChunk(type=ChunkType.TOKEN, delta=" is 4.")
+        yield StreamChunk(type=ChunkType.END)
+
+
+class StreamingPlainTextFinalAnswerLLM:
+    def __init__(self) -> None:
+        self.stream_calls: list[dict[str, Any]] = []
+
+    async def chat(self, **kwargs: Any) -> Any:
+        raise AssertionError("streaming ReAct final answer should not call chat()")
+
+    async def stream_chat(self, **kwargs: Any) -> Any:
+        self.stream_calls.append(kwargs)
+        yield StreamChunk(type=ChunkType.TOKEN, delta="Plain")
+        yield StreamChunk(type=ChunkType.TOKEN, delta=" final.")
+        yield StreamChunk(type=ChunkType.END)
+
+
+class StreamingFinalAnswerToolLLM:
+    def __init__(self) -> None:
+        self.stream_calls: list[dict[str, Any]] = []
+
+    async def chat(self, **kwargs: Any) -> Any:
+        raise AssertionError("streaming ReAct final_answer tool should not call chat()")
+
+    async def stream_chat(self, **kwargs: Any) -> Any:
+        self.stream_calls.append(kwargs)
+        prefix = '{"answer":"'
+        for arguments in [
+            prefix + "Hi",
+            prefix + "Hi there",
+            prefix + 'Hi there."}',
+        ]:
+            yield StreamChunk(
+                type=ChunkType.TOOL_CALL,
+                tool_calls=[
+                    {
+                        "id": "call_final",
+                        "function": {
+                            "name": "final_answer",
+                            "arguments": arguments,
+                        },
+                    }
+                ],
+            )
         yield StreamChunk(type=ChunkType.END)
 
 
@@ -370,16 +416,71 @@ async def test_react_pattern_streams_only_final_answer_after_tool_call() -> None
     assert result["success"] is True
     assert result["response"] == "The result is 4."
     assert tool.calls == [{"expression": "2+2"}]
-    assert len(llm.calls) == 1
-    assert len(llm.stream_calls) == 1
-    assert llm.calls[0]["tools"][0]["function"]["name"] == "calculator"
-    assert llm.stream_calls[0]["tools"] is None
+    assert len(llm.calls) == 0
+    assert len(llm.stream_calls) == 2
+    assert llm.stream_calls[0]["tools"][0]["function"]["name"] == "calculator"
+    assert llm.stream_calls[1]["tools"] is None
     assert [event["type"] for event in outbound.events] == [
         "final_answer_start",
         "final_answer_delta",
         "final_answer_delta",
         "final_answer_end",
     ]
+
+
+@pytest.mark.asyncio
+async def test_react_pattern_streams_plain_text_final_answer_with_tools() -> None:
+    llm = StreamingPlainTextFinalAnswerLLM()
+    pattern = ReActPattern(max_iterations=1)
+    context = ExecutionContext(system_prompt="You are helpful.", execution_id="task-1")
+    context.add_user_message("Answer directly")
+    outbound = OutboundCollector()
+    runtime = PatternRuntime(execution_id="task-1", outbound_message_handler=outbound)
+
+    result = await pattern.run(context=context, tools=[], llm=llm, runtime=runtime)
+
+    assert result["success"] is True
+    assert result["response"] == "Plain final."
+    assert llm.stream_calls[0]["tools"] is not None
+    assert [event["type"] for event in outbound.events] == [
+        "final_answer_start",
+        "final_answer_delta",
+        "final_answer_delta",
+        "final_answer_end",
+    ]
+    assert [event.get("delta") for event in outbound.events[1:3]] == [
+        "Plain",
+        " final.",
+    ]
+    assert outbound.events[-1]["content"] == "Plain final."
+
+
+@pytest.mark.asyncio
+async def test_react_pattern_streams_final_answer_control_tool() -> None:
+    llm = StreamingFinalAnswerToolLLM()
+    pattern = ReActPattern(max_iterations=1)
+    context = ExecutionContext(system_prompt="You are helpful.", execution_id="task-1")
+    context.add_user_message("Answer directly")
+    outbound = OutboundCollector()
+    runtime = PatternRuntime(execution_id="task-1", outbound_message_handler=outbound)
+
+    result = await pattern.run(context=context, tools=[], llm=llm, runtime=runtime)
+
+    assert result["success"] is True
+    assert result["response"] == "Hi there."
+    assert [event["type"] for event in outbound.events] == [
+        "final_answer_start",
+        "final_answer_delta",
+        "final_answer_delta",
+        "final_answer_delta",
+        "final_answer_end",
+    ]
+    assert [event.get("delta") for event in outbound.events[1:4]] == [
+        "Hi",
+        " there",
+        ".",
+    ]
+    assert outbound.events[-1]["content"] == "Hi there."
 
 
 @pytest.mark.asyncio

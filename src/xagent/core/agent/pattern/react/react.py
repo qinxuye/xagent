@@ -17,6 +17,7 @@ from ...context.enrichment import (
 from ...result import unwrap_final_answer_content
 from ...runtime import LLMCallInterrupted, PatternRuntime
 from ..base import AgentPattern, PatternResult
+from ..final_answer_stream import ReActFinalAnswerStreamer
 
 
 class ReActReasoningMode(str, Enum):
@@ -294,6 +295,7 @@ class ReActPattern(AgentPattern):
                 tools=tool_schemas or None,
                 metadata={"iteration": iteration},
             )
+            answer_streamer: ReActFinalAnswerStreamer | None = None
             try:
                 llm_kwargs = {
                     "messages": messages,
@@ -301,7 +303,12 @@ class ReActPattern(AgentPattern):
                     "tool_choice": self.tool_choice if tool_schemas else None,
                 }
                 if tool_schemas:
-                    response = await runtime.run_llm_call(llm, **llm_kwargs)
+                    answer_streamer = ReActFinalAnswerStreamer(runtime)
+                    response = await runtime.run_streaming_llm_call(
+                        llm,
+                        on_chunk=answer_streamer.handle_chunk,
+                        **llm_kwargs,
+                    )
                 else:
                     response = await runtime.stream_final_answer(llm, **llm_kwargs)
             except LLMCallInterrupted:
@@ -332,6 +339,12 @@ class ReActPattern(AgentPattern):
                 )
 
             tool_calls = normalized.get("tool_calls", [])
+            if answer_streamer is not None:
+                await self._finish_streamed_answer_if_final(
+                    answer_streamer=answer_streamer,
+                    assistant_content=assistant_content,
+                    tool_calls=tool_calls,
+                )
             if tool_calls:
                 self.status = "acting"
                 self.pending_tool_calls = list(tool_calls)
@@ -364,6 +377,34 @@ class ReActPattern(AgentPattern):
             error="ReActPattern reached max iterations without a final answer.",
             metadata={"iterations": self.max_iterations, "status": self.status},
         ).to_dict()
+
+    async def _finish_streamed_answer_if_final(
+        self,
+        *,
+        answer_streamer: ReActFinalAnswerStreamer,
+        assistant_content: Any,
+        tool_calls: list[dict[str, Any]],
+    ) -> None:
+        if not answer_streamer.started:
+            return
+        final_answer = self._final_answer_tool_content(tool_calls)
+        if final_answer is not None:
+            await answer_streamer.finish(final_answer)
+            return
+        if not tool_calls and assistant_content is not None:
+            await answer_streamer.finish(str(assistant_content))
+
+    def _final_answer_tool_content(
+        self,
+        tool_calls: list[dict[str, Any]],
+    ) -> str | None:
+        for tool_call in tool_calls:
+            if tool_call.get("name") != "final_answer":
+                continue
+            args = tool_call.get("args")
+            if isinstance(args, dict):
+                return str(args.get("answer", ""))
+        return None
 
     def _messages_for_llm(
         self,
