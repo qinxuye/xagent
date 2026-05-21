@@ -485,10 +485,14 @@ def build_code_mount_volumes() -> list[tuple[str, str, str]]:
     volumes: list[tuple[str, str, str]] = []
 
     src_dir = project_root / "src"
-    volumes.append((str(src_dir.resolve()), SANDBOX_SRC_ROOT, "ro"))
+    src_path = str(src_dir if host_project_root is not None else src_dir.resolve())
+    volumes.append((src_path, SANDBOX_SRC_ROOT, "ro"))
 
     tests_dir = project_root / "tests"
-    if host_project_root is None and tests_dir.exists():
-        volumes.append((str(tests_dir.resolve()), "/app/tests", "ro"))
+    if host_project_root is not None or tests_dir.exists():
+        tests_path = str(
+            tests_dir if host_project_root is not None else tests_dir.resolve()
+        )
+        volumes.append((tests_path, "/app/tests", "ro"))
 
     return volumes

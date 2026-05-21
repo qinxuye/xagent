@@ -734,6 +734,13 @@ class TestGetSandboxHostProjectRoot:
         result = get_sandbox_host_project_root()
         assert result == Path("/host/xagent")
 
+    def test_project_root_expands_env_vars_without_user_or_abspath(self, monkeypatch):
+        """Host paths should not be resolved against the backend container."""
+        monkeypatch.setenv("HOST_PROJECT_ROOT", "/host/xagent")
+        monkeypatch.setenv(SANDBOX_HOST_PROJECT_ROOT, "$HOST_PROJECT_ROOT/../xagent")
+        result = get_sandbox_host_project_root()
+        assert result == Path("/host/xagent/../xagent")
+
 
 class TestGetBoxliteHomeDir:
     """Test get_boxlite_home_dir() function."""

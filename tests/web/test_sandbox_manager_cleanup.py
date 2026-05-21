@@ -52,7 +52,10 @@ def test_build_code_mount_volumes_uses_host_project_root(tmp_path: Path):
     ):
         volumes = build_code_mount_volumes()
 
-    assert volumes == [(str((tmp_path / "src").resolve()), "/app/src", "ro")]
+    assert volumes == [
+        (str(tmp_path / "src"), "/app/src", "ro"),
+        (str(tmp_path / "tests"), "/app/tests", "ro"),
+    ]
 
 
 @pytest.mark.asyncio

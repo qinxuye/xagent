@@ -696,7 +696,7 @@ def get_sandbox_host_project_root() -> Path | None:
     """
     env_str = os.getenv(SANDBOX_HOST_PROJECT_ROOT)
     if env_str:
-        return Path(os.path.abspath(os.path.expanduser(os.path.expandvars(env_str))))
+        return Path(os.path.expandvars(env_str.strip()))
     return None
 
 
