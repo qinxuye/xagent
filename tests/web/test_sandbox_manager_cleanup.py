@@ -43,6 +43,18 @@ def manager(service: AsyncMock) -> SandboxManager:
     return SandboxManager(service)
 
 
+def test_build_code_mount_volumes_uses_host_project_root(tmp_path: Path):
+    """Docker sibling mode should mount source paths from the Docker host."""
+    with patch.dict(
+        "os.environ",
+        {"XAGENT_SANDBOX_HOST_PROJECT_ROOT": str(tmp_path)},
+        clear=True,
+    ):
+        volumes = build_code_mount_volumes()
+
+    assert volumes == [(str((tmp_path / "src").resolve()), "/app/src", "ro")]
+
+
 @pytest.mark.asyncio
 async def test_cleanup_deletes_on_image_change(
     manager: SandboxManager, service: AsyncMock
