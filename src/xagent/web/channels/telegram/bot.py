@@ -5,6 +5,7 @@ import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from ....core.agent.service import AgentService
@@ -377,7 +378,8 @@ class TelegramBotInstance:
 
                 await restore_telegram_task_context(agent_service, db, int(task.id))
 
-                context: dict = {}
+                message_turn_id = str(uuid4())
+                context: dict = {"turn_id": message_turn_id}
 
                 if files:
                     uploaded_info = await self._download_and_register_files(
@@ -413,6 +415,7 @@ class TelegramBotInstance:
                     task_id=int(task.id),  # type: ignore
                     user_id=int(user.id),  # type: ignore
                     content=text,
+                    turn_id=message_turn_id,
                 )
 
                 loading_msg = await last_message.answer(

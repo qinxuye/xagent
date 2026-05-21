@@ -351,6 +351,27 @@ def _attachment_fingerprint(attachments: Any) -> str:
     return "|".join(sorted(file_ids))
 
 
+def _trace_user_message_turn_id(event_type: str, data: Any) -> str | None:
+    if event_type != "user_message" or not isinstance(data, dict):
+        return None
+    turn_id = data.get("turn_id")
+    return turn_id if isinstance(turn_id, str) and turn_id else None
+
+
+def _is_duplicate_user_message_turn(
+    event_type: str,
+    data: Any,
+    seen_turn_ids: set[str],
+) -> bool:
+    turn_id = _trace_user_message_turn_id(event_type, data)
+    if turn_id is None:
+        return False
+    if turn_id in seen_turn_ids:
+        return True
+    seen_turn_ids.add(turn_id)
+    return False
+
+
 def create_stream_event(
     event_type: str,
     task_id: Union[int, str],
@@ -2968,6 +2989,8 @@ async def send_historical_data_as_stream(
             # files no longer collapse into one — the second row used to
             # be dropped and its file chips disappeared on reload.
             trace_message_keys: set[tuple[str, str, str]] = set()
+            trace_user_turn_ids: set[str] = set()
+            seen_trace_user_turn_ids: set[str] = set()
 
             for trace_event in trace_events:
                 normalized_event_data = trace_event.data
@@ -2990,24 +3013,39 @@ async def send_historical_data_as_stream(
                     content = normalized_event_data.get(
                         "message"
                     ) or normalized_event_data.get("content")
-                    if isinstance(content, str) and content.strip():
-                        event_attachments = normalized_event_data.get(
-                            "files"
-                        ) or normalized_event_data.get("attachments")
-                        attachment_key = _attachment_fingerprint(event_attachments)
-                        if trace_event.event_type == "user_message":
+                    event_attachments = normalized_event_data.get(
+                        "files"
+                    ) or normalized_event_data.get("attachments")
+                    attachment_key = _attachment_fingerprint(event_attachments)
+                    if trace_event.event_type == "user_message":
+                        trace_turn_id = _trace_user_message_turn_id(
+                            "user_message", normalized_event_data
+                        )
+                        if trace_turn_id:
+                            trace_user_turn_ids.add(trace_turn_id)
+                        elif isinstance(content, str) and content.strip():
                             trace_message_keys.add(
                                 ("user", content.strip(), attachment_key)
                             )
-                        elif trace_event.event_type in {"agent_message", "ai_message"}:
-                            trace_message_keys.add(
-                                ("assistant", content.strip(), attachment_key)
-                            )
+                    elif (
+                        trace_event.event_type in {"agent_message", "ai_message"}
+                        and isinstance(content, str)
+                        and content.strip()
+                    ):
+                        trace_message_keys.add(
+                            ("assistant", content.strip(), attachment_key)
+                        )
 
             for trace_event in trace_events:
                 normalized_event_data = normalized_trace_data_by_event_id.get(
                     str(trace_event.event_id), trace_event.data
                 )
+                if _is_duplicate_user_message_turn(
+                    str(trace_event.event_type),
+                    normalized_event_data,
+                    seen_trace_user_turn_ids,
+                ):
+                    continue
                 if _is_agent_checkpoint_data(normalized_event_data):
                     continue
                 if historical_path_to_file_id and isinstance(
@@ -3056,16 +3094,28 @@ async def send_historical_data_as_stream(
                 # turn (user uploaded files without typing) and must be kept.
                 if not content and not row_attachments:
                     continue
-                if (
-                    content
-                    and (role, content, _attachment_fingerprint(row_attachments))
-                    in trace_message_keys
-                ):
-                    continue
 
                 if role == "user":
+                    row_turn_id = getattr(chat_message, "turn_id", None)
+                    if isinstance(row_turn_id, str):
+                        row_turn_id = row_turn_id.strip() or None
+                    else:
+                        row_turn_id = None
+
+                    if row_turn_id:
+                        if row_turn_id in trace_user_turn_ids:
+                            continue
+                    elif (
+                        content
+                        and (role, content, _attachment_fingerprint(row_attachments))
+                        in trace_message_keys
+                    ):
+                        continue
+
                     event_type = "user_message"
                     data: dict[str, Any] = {"message": content, "content": content}
+                    if row_turn_id:
+                        data["turn_id"] = row_turn_id
                     if row_attachments:
                         # Surface the persisted chip payload at the top level
                         # so the frontend user-message renderer can show
@@ -3074,6 +3124,12 @@ async def send_historical_data_as_stream(
                         data["files"] = row_attachments
                         data["attachments"] = row_attachments
                 elif role == "assistant":
+                    if (
+                        content
+                        and (role, content, _attachment_fingerprint(row_attachments))
+                        in trace_message_keys
+                    ):
+                        continue
                     interactions = chat_message.interactions
                     data = {
                         "message": content,
