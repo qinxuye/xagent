@@ -14,6 +14,7 @@ from ...context.enrichment import (
     generate_and_store_react_memory,
     latest_user_text,
 )
+from ...language import final_answer_language_rule
 from ...result import unwrap_final_answer_content
 from ...runtime import LLMCallInterrupted, PatternRuntime
 from ..base import AgentPattern, PatternResult
@@ -421,7 +422,8 @@ class ReActPattern(AgentPattern):
             instruction = (
                 "You have already received the tool result needed for the current "
                 "step. Do not call tools again. Produce the final answer for this "
-                "step using the latest tool result."
+                "step using the latest tool result. "
+                f"{final_answer_language_rule()}"
             )
         elif has_tools:
             available_tools = ", ".join(tool_names or []) or "(none)"
@@ -737,12 +739,16 @@ class ReActPattern(AgentPattern):
                     "description": (
                         "Finish the current ReAct step and send the final answer to "
                         "the user. Use this once the latest tool results satisfy the "
-                        "current user request. Do not call additional tools after this."
+                        "current user request. Do not call additional tools after "
+                        f"this. {final_answer_language_rule()}"
                     ),
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "answer": {"type": "string"},
+                            "answer": {
+                                "type": "string",
+                                "description": final_answer_language_rule(),
+                            },
                         },
                         "required": ["answer"],
                     },

@@ -441,6 +441,14 @@ async def test_dag_pattern_streams_overall_completion_not_step_result() -> None:
     assert len(llm.stream_calls) == 2
     assert not has_tool(llm.stream_calls[0], DAG_COMPLETION_TOOL_NAME)
     assert has_tool(llm.stream_calls[1], DAG_COMPLETION_TOOL_NAME)
+    completion_messages = llm.stream_calls[1]["messages"]
+    assert (
+        "same natural language as the current user request"
+        in completion_messages[0]["content"]
+    )
+    completion_tool = llm.stream_calls[1]["tools"][0]["function"]
+    answer_schema = completion_tool["parameters"]["properties"]["answer"]
+    assert "tool results, source documents" in answer_schema["description"]
     assert [event["type"] for event in outbound.events] == [
         "final_answer_start",
         "final_answer_delta",

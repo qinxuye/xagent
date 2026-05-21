@@ -18,6 +18,7 @@ from ...context.enrichment import (
     latest_user_text,
 )
 from ...frame import ExecutionFrame, ExecutionSnapshot, ExecutionStatus
+from ...language import final_answer_language_rule
 from ...runtime import LLMCallInterrupted, PatternRuntime
 from ..base import AgentPattern, PatternResult
 from ..dag import DAGPattern
@@ -784,7 +785,8 @@ class AutoPattern(AgentPattern):
                 "description": (
                     "Select the execution pattern for this user request. If action "
                     "is final_answer, the answer argument is mandatory and must be "
-                    "a complete non-empty final response to the user."
+                    "a complete non-empty final response to the user. "
+                    f"{final_answer_language_rule()}"
                 ),
                 "parameters": {
                     "type": "object",
@@ -803,7 +805,7 @@ class AutoPattern(AgentPattern):
                             "description": (
                                 "Mandatory when action is final_answer: complete "
                                 "non-empty final response to the user. Leave unset "
-                                "for react or plan_execute."
+                                f"for react or plan_execute. {final_answer_language_rule()}"
                             ),
                         },
                         "requires_current_or_external_facts": {

@@ -914,6 +914,17 @@ async def test_react_pattern_reserves_control_tool_names_in_schema() -> None:
     )
     assert "tool names mentioned in memory" in system_prompt
     assert "call the final_answer tool exactly once" in system_prompt
+    final_answer_schema = next(
+        schema
+        for schema in llm.calls[0]["tools"]
+        if schema["function"]["name"] == "final_answer"
+    )["function"]
+    assert (
+        "same natural language as the current user request"
+        in final_answer_schema["description"]
+    )
+    answer_schema = final_answer_schema["parameters"]["properties"]["answer"]
+    assert "tool results, source documents" in answer_schema["description"]
 
 
 @pytest.mark.asyncio

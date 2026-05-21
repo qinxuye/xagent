@@ -12,6 +12,7 @@ from ...context.enrichment import (
     latest_user_text,
 )
 from ...frame import ExecutionFrame, ExecutionSnapshot, ExecutionStatus
+from ...language import final_answer_language_rule
 from ...result import unwrap_final_answer_content
 from ...runtime import LLMCallInterrupted, PatternRuntime
 from ..base import AgentPattern, PatternResult
@@ -1276,7 +1277,8 @@ class DAGPattern(AgentPattern):
                     "final user-facing answer in answer. If anything material is "
                     "missing, choose status=incomplete, leave answer empty, and "
                     "state the missing work plus concise replan instructions. Put "
-                    "status before answer in the tool arguments."
+                    "status before answer in the tool arguments. "
+                    f"{final_answer_language_rule()}"
                 ),
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -1303,7 +1305,8 @@ class DAGPattern(AgentPattern):
                             "type": "string",
                             "description": (
                                 "Final user-facing answer when status is completed; "
-                                "empty when status is incomplete."
+                                "empty when status is incomplete. "
+                                f"{final_answer_language_rule()}"
                             ),
                         },
                         "missing_work": {
