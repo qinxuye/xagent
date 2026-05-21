@@ -279,6 +279,35 @@ class StreamingFinalAnswerToolLLM:
         yield StreamChunk(type=ChunkType.END)
 
 
+class StreamingMixedFinalAnswerAndToolLLM:
+    async def chat(self, **kwargs: Any) -> Any:
+        raise AssertionError("streaming mixed tool path should not call chat()")
+
+    async def stream_chat(self, **kwargs: Any) -> Any:
+        yield StreamChunk(
+            type=ChunkType.TOOL_CALL,
+            tool_calls=[
+                {
+                    "index": 0,
+                    "id": "call_final",
+                    "function": {
+                        "name": "final_answer",
+                        "arguments": '{"answer":"Candidate"}',
+                    },
+                },
+                {
+                    "index": 1,
+                    "id": "call_calc",
+                    "function": {
+                        "name": "calculator",
+                        "arguments": '{"expression":"2+2"}',
+                    },
+                },
+            ],
+        )
+        yield StreamChunk(type=ChunkType.END)
+
+
 class OutboundCollector:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
@@ -519,16 +548,31 @@ async def test_react_pattern_streams_final_answer_control_tool() -> None:
     assert [event["type"] for event in outbound.events] == [
         "final_answer_start",
         "final_answer_delta",
-        "final_answer_delta",
-        "final_answer_delta",
         "final_answer_end",
     ]
-    assert [event.get("delta") for event in outbound.events[1:4]] == [
-        "Hi",
-        " there",
-        ".",
-    ]
+    assert outbound.events[1]["delta"] == "Hi there."
     assert outbound.events[-1]["content"] == "Hi there."
+
+
+@pytest.mark.asyncio
+async def test_react_pattern_does_not_stream_mixed_final_answer_candidate() -> None:
+    llm = StreamingMixedFinalAnswerAndToolLLM()
+    pattern = ReActPattern(max_iterations=1)
+    context = ExecutionContext(system_prompt="You are helpful.", execution_id="task-1")
+    context.add_user_message("Calculate 2+2")
+    outbound = OutboundCollector()
+    runtime = PatternRuntime(execution_id="task-1", outbound_message_handler=outbound)
+
+    result = await pattern.run(
+        context=context,
+        tools=[FakeTool()],
+        llm=llm,
+        runtime=runtime,
+    )
+
+    assert result["success"] is True
+    assert result["response"] == "Candidate"
+    assert outbound.events == []
 
 
 @pytest.mark.asyncio

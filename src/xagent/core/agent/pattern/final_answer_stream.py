@@ -27,6 +27,10 @@ class FinalAnswerStreamEmitter:
     def started(self) -> bool:
         return self.message_id is not None
 
+    @property
+    def has_content(self) -> bool:
+        return self._emitted_chars > 0
+
     async def emit_delta(self, delta: str) -> None:
         if not self.enabled or not delta:
             return
@@ -63,6 +67,10 @@ class BufferedFinalAnswerStreamEmitter:
     @property
     def started(self) -> bool:
         return self.message_id is not None
+
+    @property
+    def has_content(self) -> bool:
+        return bool(self._content)
 
     async def emit_delta(self, delta: str) -> None:
         if not self.enabled or not delta:
@@ -117,6 +125,10 @@ class ToolCallStringFieldStreamer:
     def started(self) -> bool:
         return self.emitter.started
 
+    @property
+    def has_candidate(self) -> bool:
+        return self.emitter.has_content
+
     async def handle_chunk(self, chunk: Any) -> None:
         if self._disabled or not _is_tool_call_chunk(chunk):
             return
@@ -160,7 +172,7 @@ class ReActFinalAnswerStreamer:
     """Streams ReAct final answers from final_answer control-tool args."""
 
     def __init__(self, runtime: PatternRuntime, *, enabled: bool = True) -> None:
-        self.emitter = FinalAnswerStreamEmitter(runtime, enabled=enabled)
+        self.emitter = BufferedFinalAnswerStreamEmitter(runtime, enabled=enabled)
         self._tool_answer_streamer = ToolCallStringFieldStreamer(
             runtime=runtime,
             tool_name="final_answer",
@@ -171,7 +183,7 @@ class ReActFinalAnswerStreamer:
 
     @property
     def started(self) -> bool:
-        return self.emitter.started
+        return self._tool_answer_streamer.has_candidate
 
     async def handle_chunk(self, chunk: Any) -> None:
         await self._tool_answer_streamer.handle_chunk(chunk)

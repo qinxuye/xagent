@@ -397,7 +397,7 @@ class ReActPattern(AgentPattern):
         if not answer_streamer.started:
             return
         final_answer = self._final_answer_tool_content(tool_calls)
-        if final_answer is not None:
+        if final_answer is not None and len(tool_calls) == 1:
             await answer_streamer.finish(final_answer)
             return
         if not tool_calls and assistant_content is not None:
