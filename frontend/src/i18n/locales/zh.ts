@@ -2801,6 +2801,9 @@ Build when you need.`
   traceEventRenderer: {
     skillSelected: "已选择技能",
     taskExecution: "正在思考",
+    thoughtProcess: "思考过程",
+    showProcess: "展开过程",
+    hideProcess: "收起过程",
     unknownModel: "未知模型",
     callLLM: "调用 LLM: {model}",
     llmResponse: "LLM 响应",

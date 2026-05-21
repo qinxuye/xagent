@@ -1028,9 +1028,27 @@ interface StepItemProps {
 }
 
 function StepItem({ step, index, onOpenTerminal, onViewDetail, onFileClick, onAgentClick }: StepItemProps) {
+  const { t } = useI18n();
   const isCompleted = step.status === 'completed';
   const isFailed = step.status === 'failed';
-  const [isExpanded, setIsExpanded] = useState(true); // Default to expanded
+  const [isExpanded, setIsExpanded] = useState(() => !isCompleted);
+  const wasCompletedRef = useRef(isCompleted);
+  const rawTitle = step.description || step.stepName;
+  const displayTitle =
+    isCompleted && step.stepName === t('traceEventRenderer.taskExecution') && !step.description
+      ? t('traceEventRenderer.thoughtProcess')
+      : rawTitle;
+
+  useEffect(() => {
+    if (isCompleted && !wasCompletedRef.current) {
+      setIsExpanded(false);
+    }
+    wasCompletedRef.current = isCompleted;
+  }, [isCompleted]);
+
+  const handleToggle = () => {
+    setIsExpanded((expanded) => !expanded);
+  };
 
   return (
     <motion.div
@@ -1040,31 +1058,34 @@ function StepItem({ step, index, onOpenTerminal, onViewDetail, onFileClick, onAg
       className="space-y-3"
     >
       {/* Step Title */}
-      <div
-        className="flex items-start gap-2 cursor-pointer group/step"
-        onClick={() => setIsExpanded(!isExpanded)}
+      <button
+        type="button"
+        className="flex w-full items-start gap-2 rounded-lg px-2 py-1 -ml-2 text-left transition-colors hover:bg-muted/50 group/step"
+        onClick={handleToggle}
+        aria-expanded={isExpanded}
       >
         {isCompleted ? (
-          <CheckCircle2 className="w-5 h-5 text-green-500" />
+          <CheckCircle2 className="w-5 h-5 text-green-500 mt-0.5" />
         ) : isFailed ? (
-          <Info className="w-5 h-5 text-red-500" />
+          <Info className="w-5 h-5 text-red-500 mt-0.5" />
         ) : (
-          <Loader2 className="w-5 h-5 text-primary animate-spin" />
+          <Loader2 className="w-5 h-5 text-primary animate-spin mt-0.5" />
         )}
 
         <div className="flex-1 min-w-0 flex items-start gap-2">
           <h3 className="min-w-0 flex-1 text-sm font-medium text-foreground break-words [overflow-wrap:anywhere]">
-            {step.description || step.stepName}
+            {displayTitle}
           </h3>
-          <div className="mt-0.5 shrink-0 opacity-0 group-hover/step:opacity-100 transition-opacity">
+          <span className="mt-0.5 shrink-0 inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/80 px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors group-hover/step:text-foreground">
+            {isExpanded ? t('traceEventRenderer.hideProcess') : t('traceEventRenderer.showProcess')}
             {isExpanded ? (
-              <ChevronDown className="w-4 h-4 text-muted-foreground/50" />
+              <ChevronDown className="w-3.5 h-3.5" />
             ) : (
-              <ChevronRight className="w-4 h-4 text-muted-foreground/50" />
+              <ChevronRight className="w-3.5 h-3.5" />
             )}
-          </div>
+          </span>
         </div>
-      </div>
+      </button>
 
       <AnimatePresence>
         {isExpanded && (

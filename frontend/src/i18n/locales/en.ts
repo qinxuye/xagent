@@ -2801,6 +2801,9 @@ Build when you need.`
   traceEventRenderer: {
     skillSelected: "Selected Skill",
     taskExecution: "Thinking",
+    thoughtProcess: "Thought process",
+    showProcess: "Show process",
+    hideProcess: "Hide process",
     unknownModel: "Unknown Model",
     callLLM: "Call LLM: {model}",
     llmResponse: "LLM Response",

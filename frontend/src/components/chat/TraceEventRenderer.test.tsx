@@ -99,7 +99,11 @@ describe("TraceEventRenderer", () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole("button"))
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /traceEventRenderer.executeTool:generate_image/,
+      }),
+    )
 
     const image = screen.getByAltText("generated_image.png")
     expect(image).toHaveAttribute(
@@ -149,7 +153,11 @@ describe("TraceEventRenderer", () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole("button"))
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /traceEventRenderer.executeTool:pptx_tool/,
+      }),
+    )
 
     const frame = screen.getByTitle("report.pptx")
     expect(frame).toHaveAttribute(
@@ -204,7 +212,11 @@ describe("TraceEventRenderer", () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole("button"))
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /traceEventRenderer.executeTool:document_tool/,
+      }),
+    )
 
     expect(await screen.findByTestId("docx-preview")).toHaveTextContent("QUI=")
     expect(apiRequestMock).toHaveBeenCalledWith(
@@ -259,7 +271,11 @@ describe("TraceEventRenderer", () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole("button"))
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /traceEventRenderer.executeTool:excel/,
+      }),
+    )
 
     expect(await screen.findByTestId("excel-preview")).toHaveTextContent("WFk=")
   })
@@ -292,5 +308,56 @@ describe("TraceEventRenderer", () => {
 
     expect(screen.getByText("I need current search results first.")).toBeInTheDocument()
     expect(screen.queryByText("traceEventRenderer.toolCallNote")).not.toBeInTheDocument()
+  })
+
+  it("collapses completed thinking process and keeps it visibly expandable", () => {
+    render(
+      <TraceEventRenderer
+        events={[
+          {
+            event_id: "start",
+            event_type: "react_task_start",
+            step_id: "step-1",
+            timestamp: Date.now(),
+            data: {},
+          },
+          {
+            event_id: "tool-start",
+            event_type: "tool_execution_start",
+            step_id: "step-1",
+            timestamp: Date.now(),
+            data: { tool_name: "web_search", tool_params: { query: "ai news" } },
+          },
+          {
+            event_id: "tool-end",
+            event_type: "tool_execution_end",
+            step_id: "step-1",
+            timestamp: Date.now(),
+            data: { result: { success: true, output: "done" } },
+          },
+          {
+            event_id: "end",
+            event_type: "react_task_end",
+            step_id: "step-1",
+            timestamp: Date.now(),
+            data: {},
+          },
+        ]}
+      />,
+    )
+
+    const toggle = screen.getByRole("button", {
+      name: /traceEventRenderer.thoughtProcess/,
+    })
+
+    expect(toggle).toHaveAttribute("aria-expanded", "false")
+    expect(screen.getByText("traceEventRenderer.showProcess")).toBeInTheDocument()
+    expect(screen.queryByText(/traceEventRenderer.executeTool:web_search/)).not.toBeInTheDocument()
+
+    fireEvent.click(toggle)
+
+    expect(toggle).toHaveAttribute("aria-expanded", "true")
+    expect(screen.getByText("traceEventRenderer.hideProcess")).toBeInTheDocument()
+    expect(screen.getByText(/traceEventRenderer.executeTool:web_search/)).toBeInTheDocument()
   })
 })
