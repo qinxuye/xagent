@@ -14,12 +14,13 @@ export type FinalAnswerStreamEventType =
   | "final_answer_start"
   | "final_answer_delta"
   | "final_answer_end"
+  | "final_answer_error"
 
 export type FinalAnswerStreamActionPayload = {
   messageId: string
   delta?: string
   content?: string
-  status: "running" | "completed"
+  status: "running" | "completed" | "failed"
   timestamp: string
 }
 
@@ -37,8 +38,35 @@ export const isFinalAnswerStreamEventType = (
   return (
     value === "final_answer_start" ||
     value === "final_answer_delta" ||
-    value === "final_answer_end"
+    value === "final_answer_end" ||
+    value === "final_answer_error"
   )
+}
+
+export const getFinalAnswerStreamMessageId = (
+  value: unknown,
+): string | undefined => {
+  const data =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {}
+  const result =
+    data.result && typeof data.result === "object"
+      ? (data.result as Record<string, unknown>)
+      : {}
+  const candidates = [
+    data.stream_message_id,
+    data.streamMessageId,
+    result.stream_message_id,
+    result.streamMessageId,
+  ]
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate) {
+      return candidate
+    }
+  }
+  return undefined
 }
 
 export const mergeTraceEventsById = <T extends TraceEventLike>(
@@ -110,6 +138,13 @@ export const getFinalAnswerStreamActionPayload = ({
       delta,
       timestamp: normalizedTimestamp,
       status: "running",
+    }
+  }
+  if (eventType === "final_answer_error") {
+    return {
+      messageId,
+      timestamp: normalizedTimestamp,
+      status: "failed",
     }
   }
 

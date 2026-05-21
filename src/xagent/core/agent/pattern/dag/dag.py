@@ -1238,6 +1238,7 @@ class DAGPattern(AgentPattern):
                 on_chunk=streamer.handle_chunk,
             )
         except Exception as exc:
+            await streamer.fail(str(exc))
             await runtime.on_llm_error(
                 context=context,
                 error=exc,

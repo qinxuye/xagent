@@ -42,6 +42,7 @@ import { normalizeTimestampMs } from "@/lib/time-utils"
 import { unwrapFinalAnswerContent } from "@/lib/final-answer"
 import {
   getFinalAnswerStreamActionPayload,
+  getFinalAnswerStreamMessageId,
   isFinalAnswerStreamEventType,
   isStreamingFinalAnswerMessage,
   mergeTraceEventsById,
@@ -309,6 +310,7 @@ interface Message {
   status?: "pending" | "running" | "completed" | "failed"
   isResult?: boolean
   isFileOutput?: boolean
+  streamMessageId?: string
   traceEvents?: TraceEvent[]
   interactions?: Interaction[]
 }
@@ -566,8 +568,6 @@ function appReducer(state: AppState, action: AppAction): AppState {
       }
 
       if (newMessage.role === "assistant" && newMessage.isResult) {
-        const newContent =
-          typeof newMessage.content === "string" ? newMessage.content : undefined
         const replaceMessageAt = (targetIndex: number) => {
           const updatedMessages = state.messages.map((message, index) =>
             index === targetIndex
@@ -582,25 +582,15 @@ function appReducer(state: AppState, action: AppAction): AppState {
           )
           return { ...state, messages: updatedMessages, traceEvents: newTraceEvents }
         }
-        if (newContent) {
-          const existingIndex = [...state.messages]
-            .reverse()
-            .findIndex(
-              message =>
-                message.role === "assistant" &&
-                message.isResult &&
-                typeof message.content === "string" &&
-                message.content === newContent
-            )
-          if (existingIndex >= 0) {
-            return replaceMessageAt(state.messages.length - 1 - existingIndex)
+        if (newMessage.streamMessageId) {
+          const streamingIndex = state.messages.findIndex(
+            message =>
+              message.id === newMessage.streamMessageId &&
+              isStreamingFinalAnswerMessage(message)
+          )
+          if (streamingIndex >= 0) {
+            return replaceMessageAt(streamingIndex)
           }
-        }
-        const streamingIndex = [...state.messages]
-          .reverse()
-          .findIndex(isStreamingFinalAnswerMessage)
-        if (streamingIndex >= 0) {
-          return replaceMessageAt(state.messages.length - 1 - streamingIndex)
         }
       }
 
@@ -1413,7 +1403,11 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                 }
               })
             }
-            if (isDuplicateMessage(messageContent, 'agent-message')) {
+            const streamMessageId =
+              eventType === "ai_message"
+                ? getFinalAnswerStreamMessageId(eventData)
+                : undefined
+            if (!streamMessageId && isDuplicateMessage(messageContent, 'agent-message')) {
               return
             }
             const msgId = generateMessageId("msg-agent")
@@ -1427,6 +1421,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                 timestamp: message.timestamp,
                 status: eventData.status === "completed" ? "completed" : "running",
                 isResult: true,
+                streamMessageId,
                 interactions: interactions.length > 0 ? interactions : undefined,
               }
             })
@@ -2344,6 +2339,8 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
             delete (metaInfo as any).content
             delete (metaInfo as any).file_outputs
             delete (metaInfo as any).history
+            delete (metaInfo as any).stream_message_id
+            delete (metaInfo as any).streamMessageId
             const hasMetaInfo = Object.keys(metaInfo).length > 0 && metaInfo !== null && metaInfo !== undefined
 
             // 1.5. Extract step data from history and update state.steps

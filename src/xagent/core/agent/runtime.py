@@ -15,6 +15,7 @@ from ..agent.trace import (
 )
 from ..model.chat.basic.base import BaseLLM
 from ..model.chat.types import ChunkType
+from .streaming import merge_streamed_tool_call_arguments
 
 
 class LLMCallInterrupted(Exception):
@@ -42,6 +43,7 @@ class PatternRuntime:
     finished_spans: list[dict[str, Any]] = field(default_factory=list)
     trace_runs: list[dict[str, Any]] = field(default_factory=list)
     active_react_step_id: str | None = None
+    last_final_answer_stream_message_id: str | None = None
     _active_llm_tasks: set[asyncio.Future[Any]] = field(
         default_factory=set,
         init=False,
@@ -110,9 +112,13 @@ class PatternRuntime:
             if delta:
                 await self.emit_final_answer_delta(message_id, delta)
 
-        response = await self.run_streaming_llm_call(
-            llm, on_chunk=emit_text_delta, **kwargs
-        )
+        try:
+            response = await self.run_streaming_llm_call(
+                llm, on_chunk=emit_text_delta, **kwargs
+            )
+        except Exception as exc:
+            await self.fail_final_answer_stream(message_id, str(exc))
+            raise
         content = self._response_content(response)
 
         await self.end_final_answer_stream(message_id, content)
@@ -263,10 +269,15 @@ class PatternRuntime:
         existing = current.get("arguments")
         if not isinstance(existing, str) or not existing:
             current["arguments"] = arguments
-        elif arguments.lstrip().startswith("{"):
-            current["arguments"] = arguments
         else:
-            current["arguments"] = existing + arguments
+            mode = incoming.get("arguments_mode") or incoming.get(
+                "arguments_stream_mode"
+            )
+            current["arguments"] = merge_streamed_tool_call_arguments(
+                existing,
+                arguments,
+                mode=str(mode) if isinstance(mode, str) else None,
+            )
 
     def _response_content(self, response: Any) -> str:
         if isinstance(response, str):
@@ -290,6 +301,7 @@ class PatternRuntime:
         if self.outbound_message_handler is None:
             return None
         message_id = f"final_answer_{uuid4().hex}"
+        self.last_final_answer_stream_message_id = message_id
         await self._emit_outbound(
             {
                 "type": "final_answer_start",
@@ -318,6 +330,16 @@ class PatternRuntime:
                 "message_id": message_id,
                 "task_id": self.execution_id,
                 "content": content,
+            }
+        )
+
+    async def fail_final_answer_stream(self, message_id: str, error: str) -> None:
+        await self._emit_outbound(
+            {
+                "type": "final_answer_error",
+                "message_id": message_id,
+                "task_id": self.execution_id,
+                "error": error,
             }
         )
 

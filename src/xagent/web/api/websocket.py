@@ -496,6 +496,7 @@ def make_agent_outbound_handler(task_id: int) -> Any:
             "final_answer_start",
             "final_answer_delta",
             "final_answer_end",
+            "final_answer_error",
         }:
             await manager.broadcast_to_task(
                 create_final_answer_stream_event(payload_type, task_id, dict(payload)),

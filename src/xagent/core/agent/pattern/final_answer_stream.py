@@ -5,6 +5,7 @@ from typing import Any
 
 from ...model.chat.types import ChunkType
 from ..runtime import PatternRuntime
+from ..streaming import merge_streamed_tool_call_arguments
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,47 @@ class FinalAnswerStreamEmitter:
         if self.message_id is not None:
             await self.runtime.end_final_answer_stream(self.message_id, content)
 
+    async def fail(self, error: str) -> None:
+        if self.message_id is not None:
+            await self.runtime.fail_final_answer_stream(self.message_id, error)
+
+
+class BufferedFinalAnswerStreamEmitter:
+    """Collect a candidate answer and flush it only after validation succeeds."""
+
+    def __init__(self, runtime: PatternRuntime, *, enabled: bool = True) -> None:
+        self.runtime = runtime
+        self.enabled = enabled
+        self.message_id: str | None = None
+        self._content = ""
+
+    @property
+    def started(self) -> bool:
+        return self.message_id is not None
+
+    async def emit_delta(self, delta: str) -> None:
+        if not self.enabled or not delta:
+            return
+        self._content += delta
+
+    async def emit_prefix(self, content: str) -> None:
+        if not self.enabled or len(content) <= len(self._content):
+            return
+        self._content = content
+
+    async def finish(self, content: str) -> None:
+        if not self.enabled or not content:
+            return
+        self.message_id = await self.runtime.start_final_answer_stream()
+        if self.message_id is None:
+            return
+        await self.runtime.emit_final_answer_delta(self.message_id, content)
+        await self.runtime.end_final_answer_stream(self.message_id, content)
+
+    async def fail(self, error: str) -> None:
+        if self.message_id is not None:
+            await self.runtime.fail_final_answer_stream(self.message_id, error)
+
 
 class ToolCallStringFieldStreamer:
     """Streams a string field from accumulated streamed tool-call arguments."""
@@ -57,7 +99,9 @@ class ToolCallStringFieldStreamer:
         field_name: str,
         guard_field: str | None = None,
         guard_value: str | None = None,
-        emitter: FinalAnswerStreamEmitter | None = None,
+        emitter: FinalAnswerStreamEmitter
+        | BufferedFinalAnswerStreamEmitter
+        | None = None,
         enabled: bool = True,
     ) -> None:
         self.tool_name = tool_name
@@ -108,6 +152,9 @@ class ToolCallStringFieldStreamer:
     async def finish(self, final_content: str) -> None:
         await self.emitter.finish(final_content)
 
+    async def fail(self, error: str) -> None:
+        await self.emitter.fail(error)
+
 
 class ReActFinalAnswerStreamer:
     """Streams ReAct final answers from final_answer control-tool args."""
@@ -131,6 +178,9 @@ class ReActFinalAnswerStreamer:
 
     async def finish(self, final_content: str) -> None:
         await self.emitter.finish(final_content)
+
+    async def fail(self, error: str) -> None:
+        await self.emitter.fail(error)
 
 
 def _is_tool_call_chunk(chunk: Any) -> bool:
@@ -160,19 +210,7 @@ def _tool_call_arguments(chunk: Any, tool_name: str) -> str | None:
 
 
 def _merge_json_arguments_fragment(existing: str, fragment: str) -> str:
-    """Merge provider tool-call argument fragments.
-
-    Some providers stream tool-call arguments as JSON string deltas, while local
-    fakes and a few adapters emit the accumulated arguments on every chunk. A
-    non-initial fragment starting with "{" is treated as an accumulated snapshot;
-    other fragments are appended as deltas.
-    """
-
-    if not existing:
-        return fragment
-    if fragment.lstrip().startswith("{"):
-        return fragment
-    return existing + fragment
+    return merge_streamed_tool_call_arguments(existing, fragment)
 
 
 def _function_payload(tool_call: Any) -> dict[str, Any]:

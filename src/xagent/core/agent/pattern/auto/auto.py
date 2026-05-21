@@ -22,7 +22,10 @@ from ...language import final_answer_language_rule
 from ...runtime import LLMCallInterrupted, PatternRuntime
 from ..base import AgentPattern, PatternResult
 from ..dag import DAGPattern
-from ..final_answer_stream import ToolCallStringFieldStreamer
+from ..final_answer_stream import (
+    BufferedFinalAnswerStreamEmitter,
+    ToolCallStringFieldStreamer,
+)
 from ..react import ReActPattern
 
 logger = logging.getLogger(__name__)
@@ -161,6 +164,9 @@ class _AutoChildRuntime:
 
     async def end_final_answer_stream(self, message_id: str, content: str) -> None:
         await self.parent.end_final_answer_stream(message_id, content)
+
+    async def fail_final_answer_stream(self, message_id: str, error: str) -> None:
+        await self.parent.fail_final_answer_stream(message_id, error)
 
     async def run_streaming_llm_call(
         self,
@@ -631,7 +637,6 @@ class AutoPattern(AgentPattern):
         decision_prompt = self._decision_prompt(tools)
         decision_tools = [self._decision_tool_schema()]
         retry_feedback: str | None = None
-        stream_decision_answer = True
         for attempt in range(MAX_DECISION_PARSE_ATTEMPTS):
             messages = list(base_messages)
             messages.append({"role": "user", "content": decision_prompt})
@@ -646,13 +651,17 @@ class AutoPattern(AgentPattern):
                 tools=decision_tools,
                 metadata=metadata,
             )
+            answer_emitter = BufferedFinalAnswerStreamEmitter(
+                runtime,
+                enabled=True,
+            )
             answer_streamer = ToolCallStringFieldStreamer(
                 runtime=runtime,
                 tool_name=DECISION_TOOL_NAME,
                 field_name="answer",
                 guard_field="action",
                 guard_value=AutoAction.FINAL_ANSWER.value,
-                enabled=stream_decision_answer,
+                emitter=answer_emitter,
             )
             try:
                 response = await runtime.run_streaming_llm_call(
@@ -664,6 +673,7 @@ class AutoPattern(AgentPattern):
                     on_chunk=answer_streamer.handle_chunk,
                 )
             except Exception as exc:
+                await answer_streamer.fail(str(exc))
                 await runtime.on_llm_error(
                     context=context, error=exc, metadata=metadata
                 )
@@ -676,8 +686,6 @@ class AutoPattern(AgentPattern):
             except AutoDecisionArgumentsError as exc:
                 if attempt + 1 >= MAX_DECISION_PARSE_ATTEMPTS:
                     raise
-                if answer_streamer.started:
-                    stream_decision_answer = False
                 retry_feedback = self._decision_retry_feedback(exc)
                 logger.warning(
                     "AutoPattern decision arguments were invalid JSON; retrying "

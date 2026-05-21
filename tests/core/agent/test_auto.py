@@ -562,7 +562,9 @@ async def test_auto_pattern_final_answer_completes_without_child_pattern() -> No
 
 
 @pytest.mark.asyncio
-async def test_auto_pattern_streams_direct_final_answer_from_decision_tool() -> None:
+async def test_auto_pattern_buffers_direct_final_answer_until_decision_is_validated() -> (
+    None
+):
     prefix = (
         '{"action":"final_answer","reason":"simple",'
         '"requires_current_or_external_facts":false,'
@@ -595,15 +597,9 @@ async def test_auto_pattern_streams_direct_final_answer_from_decision_tool() -> 
     assert [event["type"] for event in collector.events] == [
         "final_answer_start",
         "final_answer_delta",
-        "final_answer_delta",
-        "final_answer_delta",
         "final_answer_end",
     ]
-    assert [event.get("delta") for event in collector.events[1:4]] == [
-        "Hi",
-        " there",
-        ".",
-    ]
+    assert collector.events[1]["delta"] == "Hi there."
     assert collector.events[-1]["content"] == "Hi there."
     assert len({event["message_id"] for event in collector.events}) == 1
     assert len(llm.calls) == 1
@@ -898,6 +894,39 @@ async def test_auto_pattern_retries_truncated_final_answer_arguments() -> None:
         checkpoint["label"] == "auto_decision_retry"
         for checkpoint in runtime.checkpoints
     )
+
+
+@pytest.mark.asyncio
+async def test_auto_pattern_does_not_stream_rejected_final_answer_candidate() -> None:
+    llm = FakeLLM(
+        [
+            truncated_final_answer_decision_tool_response(),
+            decision_tool_response(
+                "final_answer",
+                "Retry produced the full answer.",
+                answer="Complete answer after retry.",
+            ),
+        ]
+    )
+    pattern = AutoPattern()
+    context = ExecutionContext(execution_id="auto-retry-stream")
+    context.add_user_message("Continue")
+    collector = OutboundCollector()
+    runtime = PatternRuntime(
+        execution_id="auto-retry-stream",
+        outbound_message_handler=collector,
+    )
+
+    result = await pattern.run(context=context, tools=[], llm=llm, runtime=runtime)
+
+    assert result["success"] is True
+    assert result["output"] == "Complete answer after retry."
+    assert [event["type"] for event in collector.events] == [
+        "final_answer_start",
+        "final_answer_delta",
+        "final_answer_end",
+    ]
+    assert collector.events[1]["delta"] == "Complete answer after retry."
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,7 @@ import { useI18n } from "@/contexts/i18n-context"
 import { unwrapFinalAnswerContent } from "@/lib/final-answer"
 import {
   getFinalAnswerStreamActionPayload,
+  getFinalAnswerStreamMessageId,
   isFinalAnswerStreamEventType,
   isStreamingFinalAnswerMessage,
 } from "@/lib/streaming-final-answer"
@@ -145,6 +146,7 @@ interface Message {
   status?: "pending" | "running" | "completed" | "failed"
   isResult?: boolean
   isFileOutput?: boolean
+  streamMessageId?: string
   interactions?: unknown[]
 }
 
@@ -363,8 +365,6 @@ function appReducer(state: AppState, action: AppAction): AppState {
     case "ADD_MESSAGE":
       const newMessage = action.payload
       if (newMessage.role === "assistant" && newMessage.isResult) {
-        const newContent =
-          typeof newMessage.content === "string" ? newMessage.content : undefined
         const replaceMessageAt = (targetIndex: number) => ({
           ...state,
           messages: state.messages.map((message, index) =>
@@ -378,25 +378,15 @@ function appReducer(state: AppState, action: AppAction): AppState {
               : message
           ),
         })
-        if (newContent) {
-          const existingIndex = [...state.messages]
-            .reverse()
-            .findIndex(
-              message =>
-                message.role === "assistant" &&
-                message.isResult &&
-                typeof message.content === "string" &&
-                message.content === newContent
-            )
-          if (existingIndex >= 0) {
-            return replaceMessageAt(state.messages.length - 1 - existingIndex)
+        if (newMessage.streamMessageId) {
+          const streamingIndex = state.messages.findIndex(
+            message =>
+              message.id === newMessage.streamMessageId &&
+              isStreamingFinalAnswerMessage(message)
+          )
+          if (streamingIndex >= 0) {
+            return replaceMessageAt(streamingIndex)
           }
-        }
-        const streamingIndex = [...state.messages]
-          .reverse()
-          .findIndex(isStreamingFinalAnswerMessage)
-        if (streamingIndex >= 0) {
-          return replaceMessageAt(state.messages.length - 1 - streamingIndex)
         }
       }
       const updatedMessages = [...state.messages, newMessage]
@@ -1866,6 +1856,8 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
             delete (metaInfo as any).content
             delete (metaInfo as any).file_outputs
             delete (metaInfo as any).history
+            delete (metaInfo as any).stream_message_id
+            delete (metaInfo as any).streamMessageId
             const hasMetaInfo = Object.keys(metaInfo).length > 0 && metaInfo !== null && metaInfo !== undefined
 
             // 1.5. Extract step data from history and update state.steps
@@ -2072,6 +2064,10 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
             // 3. Output execution result
             const finalOutput = (resultData as any).output
             if (finalOutput && finalOutput.trim() !== '') {
+              const streamMessageId = getFinalAnswerStreamMessageId({
+                ...eventData,
+                result: resultData,
+              })
               const resultContent = (
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 text-sm text-blue-400">
@@ -2093,6 +2089,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                     timestamp: message.timestamp,
                     status: success ? "completed" : "failed",
                     isResult: true,
+                    streamMessageId,
                   }
                 })
               }
@@ -2195,6 +2192,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
 
           // AI Message Events
           else if (eventType === "ai_message") {
+            const streamMessageId = getFinalAnswerStreamMessageId(eventData)
             dispatch({
               type: "ADD_MESSAGE",
               payload: {
@@ -2207,6 +2205,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                 timestamp: message.timestamp,
                 status: "completed",
                 isResult: true,
+                streamMessageId,
               }
             })
           }

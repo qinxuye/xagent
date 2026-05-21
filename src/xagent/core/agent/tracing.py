@@ -154,10 +154,18 @@ class TraceEventCallback:
             "status": status or ("completed" if result.get("success") else "failed"),
             "pattern": result.get("pattern"),
         }
+        stream_message_id = self._final_answer_stream_message_id(
+            runner=runner,
+            execution_id=execution_id,
+        )
+        if stream_message_id:
+            data["stream_message_id"] = stream_message_id
 
         if result.get("success"):
             if output:
                 completion_result: dict[str, Any] = {"content": output}
+                if stream_message_id:
+                    completion_result["stream_message_id"] = stream_message_id
                 file_outputs = result.get("file_outputs")
                 if file_outputs:
                     completion_result["file_outputs"] = file_outputs
@@ -184,6 +192,17 @@ class TraceEventCallback:
             error_message=str(result.get("error") or "agent execution failed"),
             data={**data, "context": self._context_payload(context)},
         )
+
+    def _final_answer_stream_message_id(
+        self,
+        *,
+        runner: Any,
+        execution_id: str,
+    ) -> str | None:
+        control = getattr(runner, "_active_controls", {}).get(execution_id)
+        runtime = getattr(control, "runtime", None)
+        message_id = getattr(runtime, "last_final_answer_stream_message_id", None)
+        return message_id if isinstance(message_id, str) and message_id else None
 
     async def _emit_user_message_trace(
         self,

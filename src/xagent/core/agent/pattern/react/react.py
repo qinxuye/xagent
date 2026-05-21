@@ -314,6 +314,8 @@ class ReActPattern(AgentPattern):
                 else:
                     response = await runtime.stream_final_answer(llm, **llm_kwargs)
             except LLMCallInterrupted:
+                if answer_streamer is not None:
+                    await answer_streamer.fail("interrupted during LLM stream")
                 interrupted = await self._interrupt_if_requested(
                     runtime=runtime,
                     context=context,
@@ -321,6 +323,10 @@ class ReActPattern(AgentPattern):
                 )
                 if interrupted is not None:
                     return interrupted
+                raise
+            except Exception as exc:
+                if answer_streamer is not None:
+                    await answer_streamer.fail(str(exc))
                 raise
             await runtime.on_llm_end(
                 context=context,
