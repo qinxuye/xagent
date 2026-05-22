@@ -103,25 +103,27 @@ class PatternRuntime:
         ):
             return await self.run_llm_call(llm, **kwargs)
 
-        message_id = await self.start_final_answer_stream()
-        if message_id is None:
+        from .pattern.final_answer_stream import FinalAnswerStreamSession
+
+        stream = FinalAnswerStreamSession(self)
+        if await stream.start() is None:
             return await self.run_llm_call(llm, **kwargs)
 
         async def emit_text_delta(chunk: Any) -> None:
             delta = self._chunk_text_delta(chunk)
             if delta:
-                await self.emit_final_answer_delta(message_id, delta)
+                await stream.emit_delta(delta)
 
         try:
             response = await self.run_streaming_llm_call(
                 llm, on_chunk=emit_text_delta, **kwargs
             )
         except Exception as exc:
-            await self.fail_final_answer_stream(message_id, str(exc))
+            await stream.fail(str(exc))
             raise
         content = self._response_content(response)
 
-        await self.end_final_answer_stream(message_id, content)
+        await stream.finish(content)
         return content
 
     async def run_streaming_llm_call(

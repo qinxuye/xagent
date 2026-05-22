@@ -14,55 +14,22 @@ class _StringField:
     complete: bool
 
 
-class FinalAnswerStreamEmitter:
-    """Lazy final-answer UI stream emitter."""
+class FinalAnswerStreamSession:
+    """Owns one final-answer stream lifecycle or buffered candidate."""
 
-    def __init__(self, runtime: PatternRuntime, *, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        runtime: PatternRuntime,
+        *,
+        enabled: bool = True,
+        buffer_deltas: bool = False,
+    ) -> None:
         self.runtime = runtime
         self.enabled = enabled
-        self.message_id: str | None = None
-        self._emitted_chars = 0
-
-    @property
-    def started(self) -> bool:
-        return self.message_id is not None
-
-    @property
-    def has_content(self) -> bool:
-        return self._emitted_chars > 0
-
-    async def emit_delta(self, delta: str) -> None:
-        if not self.enabled or not delta:
-            return
-        if self.message_id is None:
-            self.message_id = await self.runtime.start_final_answer_stream()
-            if self.message_id is None:
-                return
-        self._emitted_chars += len(delta)
-        await self.runtime.emit_final_answer_delta(self.message_id, delta)
-
-    async def emit_prefix(self, content: str) -> None:
-        if len(content) <= self._emitted_chars:
-            return
-        await self.emit_delta(content[self._emitted_chars :])
-
-    async def finish(self, content: str) -> None:
-        if self.message_id is not None:
-            await self.runtime.end_final_answer_stream(self.message_id, content)
-
-    async def fail(self, error: str) -> None:
-        if self.message_id is not None:
-            await self.runtime.fail_final_answer_stream(self.message_id, error)
-
-
-class BufferedFinalAnswerStreamEmitter:
-    """Collect a candidate answer and flush it only after validation succeeds."""
-
-    def __init__(self, runtime: PatternRuntime, *, enabled: bool = True) -> None:
-        self.runtime = runtime
-        self.enabled = enabled
+        self.buffer_deltas = buffer_deltas
         self.message_id: str | None = None
         self._content = ""
+        self._closed = False
 
     @property
     def started(self) -> bool:
@@ -72,28 +39,73 @@ class BufferedFinalAnswerStreamEmitter:
     def has_content(self) -> bool:
         return bool(self._content)
 
+    async def start(self) -> str | None:
+        if not self.enabled or self.message_id is not None:
+            return self.message_id
+        self.message_id = await self.runtime.start_final_answer_stream()
+        return self.message_id
+
     async def emit_delta(self, delta: str) -> None:
-        if not self.enabled or not delta:
+        if not self.enabled or not delta or self._closed:
+            return
+        if self.buffer_deltas:
+            self._content += delta
+            return
+        if await self.start() is None:
             return
         self._content += delta
+        if self.message_id is not None:
+            await self.runtime.emit_final_answer_delta(self.message_id, delta)
 
     async def emit_prefix(self, content: str) -> None:
-        if not self.enabled or len(content) <= len(self._content):
+        if len(content) <= len(self._content):
             return
-        self._content = content
+        if self.buffer_deltas:
+            self._content = content
+            return
+        await self.emit_delta(content[len(self._content) :])
 
     async def finish(self, content: str) -> None:
-        if not self.enabled or not content:
+        if not self.enabled or self._closed:
             return
-        self.message_id = await self.runtime.start_final_answer_stream()
-        if self.message_id is None:
-            return
-        await self.runtime.emit_final_answer_delta(self.message_id, content)
-        await self.runtime.end_final_answer_stream(self.message_id, content)
+        final_content = content or self._content
+        if self.buffer_deltas:
+            if not final_content:
+                return
+            self._content = final_content
+            message_id = await self.start()
+            if message_id is None:
+                return
+            await self.runtime.emit_final_answer_delta(
+                message_id,
+                final_content,
+            )
+        else:
+            await self.emit_prefix(final_content)
+            message_id = self.message_id
+            if message_id is None:
+                return
+        await self.runtime.end_final_answer_stream(message_id, final_content)
+        self._closed = True
 
     async def fail(self, error: str) -> None:
-        if self.message_id is not None:
+        if self.message_id is not None and not self._closed:
             await self.runtime.fail_final_answer_stream(self.message_id, error)
+            self._closed = True
+
+
+class FinalAnswerStreamEmitter(FinalAnswerStreamSession):
+    """Lazy final-answer UI stream emitter."""
+
+    def __init__(self, runtime: PatternRuntime, *, enabled: bool = True) -> None:
+        super().__init__(runtime, enabled=enabled, buffer_deltas=False)
+
+
+class BufferedFinalAnswerStreamEmitter(FinalAnswerStreamSession):
+    """Collect a candidate answer and flush it only after validation succeeds."""
+
+    def __init__(self, runtime: PatternRuntime, *, enabled: bool = True) -> None:
+        super().__init__(runtime, enabled=enabled, buffer_deltas=True)
 
 
 class ToolCallStringFieldStreamer:
@@ -107,9 +119,7 @@ class ToolCallStringFieldStreamer:
         field_name: str,
         guard_field: str | None = None,
         guard_value: str | None = None,
-        emitter: FinalAnswerStreamEmitter
-        | BufferedFinalAnswerStreamEmitter
-        | None = None,
+        emitter: FinalAnswerStreamSession | None = None,
         enabled: bool = True,
     ) -> None:
         self.tool_name = tool_name
@@ -172,7 +182,11 @@ class ReActFinalAnswerStreamer:
     """Streams ReAct final answers from final_answer control-tool args."""
 
     def __init__(self, runtime: PatternRuntime, *, enabled: bool = True) -> None:
-        self.emitter = BufferedFinalAnswerStreamEmitter(runtime, enabled=enabled)
+        self.emitter = FinalAnswerStreamSession(
+            runtime,
+            enabled=enabled,
+            buffer_deltas=True,
+        )
         self._tool_answer_streamer = ToolCallStringFieldStreamer(
             runtime=runtime,
             tool_name="final_answer",

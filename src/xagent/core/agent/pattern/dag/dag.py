@@ -16,7 +16,7 @@ from ...language import final_answer_language_rule
 from ...result import unwrap_final_answer_content
 from ...runtime import LLMCallInterrupted, PatternRuntime
 from ..base import AgentPattern, PatternResult
-from ..final_answer_stream import ToolCallStringFieldStreamer
+from ..final_answer_stream import FinalAnswerStreamSession, ToolCallStringFieldStreamer
 from ..react import ReActPattern, ReActReasoningMode
 from .plan_generator import (
     CallablePlanGenerator,
@@ -1221,12 +1221,17 @@ class DAGPattern(AgentPattern):
             tools=tools,
             metadata={"phase": "dag_completion_assessment"},
         )
+        final_answer_stream = FinalAnswerStreamSession(
+            runtime,
+            buffer_deltas=True,
+        )
         streamer = ToolCallStringFieldStreamer(
             runtime=runtime,
             tool_name=DAG_COMPLETION_TOOL_NAME,
             field_name="answer",
             guard_field="status",
             guard_value="completed",
+            emitter=final_answer_stream,
         )
         try:
             response = await runtime.run_streaming_llm_call(
@@ -1252,7 +1257,7 @@ class DAGPattern(AgentPattern):
         )
         assessment = self._parse_completion_assessment(response)
         if assessment.complete:
-            await streamer.finish(assessment.answer)
+            await final_answer_stream.finish(assessment.answer)
         return assessment
 
     def _completion_assessment_messages(self, context: Any) -> list[dict[str, Any]]:

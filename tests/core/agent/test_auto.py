@@ -1159,9 +1159,13 @@ async def test_auto_pattern_empty_final_answer_falls_back_to_react() -> None:
         ]
     )
     pattern = AutoPattern()
-    context = ExecutionContext()
+    context = ExecutionContext(execution_id="auto-empty-final-candidate")
     context.add_user_message("Continue")
-    runtime = RecordingRuntime()
+    collector = OutboundCollector()
+    runtime = PatternRuntime(
+        execution_id="auto-empty-final-candidate",
+        outbound_message_handler=collector,
+    )
 
     result = await pattern.run(
         context=context,
@@ -1185,6 +1189,7 @@ async def test_auto_pattern_empty_final_answer_falls_back_to_react() -> None:
     }
     assert pattern.selected_pattern == "react"
     assert len(llm.calls) == 2
+    assert collector.events == []
 
 
 @pytest.mark.asyncio
@@ -1206,9 +1211,13 @@ async def test_auto_pattern_final_answer_requiring_external_facts_falls_back_to_
         ]
     )
     pattern = AutoPattern()
-    context = ExecutionContext()
+    context = ExecutionContext(execution_id="auto-external-facts-candidate")
     context.add_user_message("总结最近 AI 圈子的供应链攻击")
-    runtime = RecordingRuntime()
+    collector = OutboundCollector()
+    runtime = PatternRuntime(
+        execution_id="auto-external-facts-candidate",
+        outbound_message_handler=collector,
+    )
 
     result = await pattern.run(
         context=context,
@@ -1233,6 +1242,7 @@ async def test_auto_pattern_final_answer_requiring_external_facts_falls_back_to_
     }
     assert pattern.selected_pattern == "react"
     assert len(llm.calls) == 2
+    assert collector.events == []
 
 
 @pytest.mark.asyncio

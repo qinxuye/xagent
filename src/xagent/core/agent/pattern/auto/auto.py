@@ -23,7 +23,7 @@ from ...runtime import LLMCallInterrupted, PatternRuntime
 from ..base import AgentPattern, PatternResult
 from ..dag import DAGPattern
 from ..final_answer_stream import (
-    BufferedFinalAnswerStreamEmitter,
+    FinalAnswerStreamSession,
     ToolCallStringFieldStreamer,
 )
 from ..react import ReActPattern
@@ -88,6 +88,12 @@ class AutoDecision:
             evidence_basis=str(payload.get("evidence_basis", "")),
             missing_verification=str(payload.get("missing_verification", "")),
         )
+
+
+@dataclass
+class AutoDecisionResult:
+    decision: AutoDecision
+    final_answer_stream: FinalAnswerStreamSession | None = None
 
 
 DECISION_TOOL_NAME = "select_execution_pattern"
@@ -408,6 +414,7 @@ class AutoPattern(AgentPattern):
         **kwargs: Any,
     ) -> dict[str, Any]:
         self._invalidate_stale_final_answer_decision(context)
+        final_answer_stream: FinalAnswerStreamSession | None = None
         if self.decision is None:
             self.status = "deciding"
             task_text = latest_user_text(context)
@@ -448,9 +455,11 @@ class AutoPattern(AgentPattern):
                 "auto_before_decision", context=context, pattern=self
             )
             try:
-                self.decision = await self._decide(
+                decision_result = await self._decide(
                     context=context, tools=tools, llm=llm, runtime=runtime
                 )
+                self.decision = decision_result.decision
+                final_answer_stream = decision_result.final_answer_stream
             except LLMCallInterrupted:
                 interrupted = await self._interrupt_if_requested(
                     runtime=runtime,
@@ -484,6 +493,8 @@ class AutoPattern(AgentPattern):
 
         if self.decision.action == AutoAction.FINAL_ANSWER:
             answer = self.decision.answer or ""
+            if final_answer_stream is not None:
+                await final_answer_stream.finish(answer)
             if answer:
                 context.add_assistant_message(answer)
             self.status = "completed"
@@ -623,7 +634,7 @@ class AutoPattern(AgentPattern):
 
     async def _decide(
         self, *, context: Any, tools: list[Any], llm: Any, runtime: PatternRuntime
-    ) -> AutoDecision:
+    ) -> AutoDecisionResult:
         if llm is None:
             raise RuntimeError("AutoPattern requires an LLM with tool calling support.")
 
@@ -651,9 +662,10 @@ class AutoPattern(AgentPattern):
                 tools=decision_tools,
                 metadata=metadata,
             )
-            answer_emitter = BufferedFinalAnswerStreamEmitter(
+            answer_emitter = FinalAnswerStreamSession(
                 runtime,
                 enabled=True,
+                buffer_deltas=True,
             )
             answer_streamer = ToolCallStringFieldStreamer(
                 runtime=runtime,
@@ -703,9 +715,14 @@ class AutoPattern(AgentPattern):
                     },
                 )
                 continue
-            if decision.action == AutoAction.FINAL_ANSWER:
-                await answer_streamer.finish(decision.answer or "")
-            return decision
+            return AutoDecisionResult(
+                decision=decision,
+                final_answer_stream=(
+                    answer_emitter
+                    if decision.action == AutoAction.FINAL_ANSWER
+                    else None
+                ),
+            )
         raise RuntimeError("AutoPattern decision retry loop exited unexpectedly.")
 
     def _decision_retry_feedback(self, error: AutoDecisionArgumentsError) -> str:
