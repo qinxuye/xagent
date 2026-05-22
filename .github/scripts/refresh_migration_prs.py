@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import ast
-import base64
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
@@ -47,33 +47,55 @@ class GitHub:
         path: str,
         payload: dict[str, Any] | None = None,
     ) -> Any:
-        body = None
-        if payload is not None:
-            body = json.dumps(payload).encode("utf-8")
+        attempts = 3 if method == "GET" else 1
+        last_error: GitHubError | None = None
 
-        req = urllib.request.Request(
-            f"{GITHUB_API_URL}{path}",
-            data=body,
-            method=method,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {self.token}",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        if body is not None:
-            req.add_header("Content-Type", "application/json")
+        for attempt in range(attempts):
+            body = None
+            if payload is not None:
+                body = json.dumps(payload).encode("utf-8")
 
-        try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                response_body = response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            raise GitHubError(method, path, exc.code, error_body) from exc
+            req = urllib.request.Request(
+                f"{GITHUB_API_URL}{path}",
+                data=body,
+                method=method,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {self.token}",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+            if body is not None:
+                req.add_header("Content-Type", "application/json")
 
-        if not response_body:
-            return None
-        return json.loads(response_body)
+            try:
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    response_body = response.read().decode("utf-8")
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                last_error = GitHubError(method, path, exc.code, error_body)
+                if (
+                    method == "GET"
+                    and exc.code in {429, 500, 502, 503, 504}
+                    and attempt < attempts - 1
+                ):
+                    time.sleep(2**attempt)
+                    continue
+                raise last_error from exc
+            except urllib.error.URLError as exc:
+                last_error = GitHubError(method, path, 0, str(exc))
+                if method == "GET" and attempt < attempts - 1:
+                    time.sleep(2**attempt)
+                    continue
+                raise last_error from exc
+
+            if not response_body:
+                return None
+            return json.loads(response_body)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"{method} {path} failed without a response")
 
     def paginate(self, path: str) -> list[Any]:
         separator = "&" if "?" in path else "?"
@@ -165,42 +187,52 @@ def parse_revision_file(path: str, content: str) -> Revision | None:
     return Revision(revision=revision, down_revisions=down_revisions, path=path)
 
 
-def migration_files_for_ref(github: GitHub, sha: str) -> list[tuple[str, str]]:
-    quoted_dir = urllib.parse.quote(MIGRATION_VERSIONS_DIR, safe="/")
-    files = github.request(
-        "GET",
-        f"/repos/{github.repo}/contents/{quoted_dir}?ref={urllib.parse.quote(sha)}",
+def _run_git(args: list[str]) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        check=True,
+        capture_output=True,
+        text=True,
     )
-    if not isinstance(files, list):
-        raise RuntimeError(f"{MIGRATION_VERSIONS_DIR} is not a directory at {sha}")
+    return result.stdout
+
+
+def _ensure_commit_available(sha: str) -> None:
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return
+    _run_git(["fetch", "--no-tags", "--depth=1", "origin", sha])
+
+
+def migration_files_for_ref(sha: str) -> list[tuple[str, str]]:
+    _ensure_commit_available(sha)
+    paths = _run_git(
+        ["ls-tree", "-r", "--name-only", sha, "--", MIGRATION_VERSIONS_DIR]
+    )
 
     migration_files: list[tuple[str, str]] = []
-    for item in files:
-        path = item.get("path", "")
-        if item.get("type") != "file" or not path.endswith(".py"):
+    for path in paths.splitlines():
+        if not path.endswith(".py") or path.endswith("/__init__.py"):
             continue
-        if path.endswith("/__init__.py"):
-            continue
+        content = _run_git(["show", f"{sha}:{path}"])
+        migration_files.append((path, content))
 
-        quoted_path = urllib.parse.quote(path, safe="/")
-        content_item = github.request(
-            "GET", f"/repos/{github.repo}/contents/{quoted_path}?ref={sha}"
+    if not migration_files:
+        raise RuntimeError(
+            f"No Alembic migration files found in {MIGRATION_VERSIONS_DIR} at {sha}"
         )
-        encoded_content = content_item.get("content", "")
-        encoding = content_item.get("encoding")
-        if encoding != "base64":
-            raise RuntimeError(f"Unexpected encoding for {path}: {encoding}")
-        decoded = base64.b64decode(encoded_content).decode("utf-8")
-        migration_files.append((path, decoded))
-
     return migration_files
 
 
-def check_single_alembic_head(github: GitHub, sha: str) -> tuple[bool, str]:
+def check_single_alembic_head(sha: str) -> tuple[bool, str]:
     revisions_by_id: dict[str, Revision] = {}
     duplicates: dict[str, list[str]] = {}
 
-    for path, content in migration_files_for_ref(github, sha):
+    for path, content in migration_files_for_ref(sha):
         revision = parse_revision_file(path, content)
         if revision is None:
             continue
@@ -288,7 +320,14 @@ def refresh_pr(github: GitHub, pr: dict[str, Any]) -> bool:
         github.set_status(old_sha, "failure", f"Could not merge latest {BASE_BRANCH}")
         return False
 
-    new_sha = wait_for_refreshed_head(github, number)
+    try:
+        new_sha = wait_for_refreshed_head(github, number)
+    except Exception as exc:
+        message = f"Could not verify refreshed branch: {exc}"
+        print(f"PR #{number}: {message}", file=sys.stderr)
+        github.set_status(old_sha, "failure", message)
+        return False
+
     if new_sha is None:
         latest_pr = github.request("GET", f"/repos/{github.repo}/pulls/{number}")
         latest_sha = latest_pr["head"]["sha"]
@@ -298,7 +337,14 @@ def refresh_pr(github: GitHub, pr: dict[str, Any]) -> bool:
         return False
 
     github.set_status(new_sha, "pending", "Checking Alembic migration graph")
-    ok, message = check_single_alembic_head(github, new_sha)
+    try:
+        ok, message = check_single_alembic_head(new_sha)
+    except Exception as exc:
+        message = f"Failed to validate Alembic graph: {exc}"
+        print(f"PR #{number}: {message}", file=sys.stderr)
+        github.set_status(new_sha, "failure", message)
+        return False
+
     state = "success" if ok else "failure"
     print(f"PR #{number}: {message}")
     github.set_status(new_sha, state, message)
