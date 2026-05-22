@@ -55,6 +55,7 @@ describe("streaming final answer events", () => {
 
     expect(payload).toEqual({
       messageId: "final_answer_1",
+      content: "provider disconnected",
       status: "failed",
       timestamp: "2026-05-20T12:00:01.000Z",
     })

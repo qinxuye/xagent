@@ -14,6 +14,7 @@ import { TokenUsageDisplay } from "@/components/chat/TokenUsageDisplay";
 import { TaskFileManager } from "@/components/file/task-file-manager";
 import { getApiUrl } from "@/lib/utils";
 import { apiRequest } from "@/lib/api-wrapper";
+import { isStreamingFinalAnswerMessage } from "@/lib/streaming-final-answer";
 import type React from "react";
 import dagre from "dagre"
 import { CenterPanel } from "@/components/layout/center-panel"
@@ -160,6 +161,8 @@ function TaskDetailContent() {
     content: string | React.ReactNode;
     rawContent?: string;
     timestamp: number;
+    status?: "pending" | "running" | "completed" | "failed";
+    isStreamingFinalAnswer?: boolean;
     traceEvents?: any[];
     interactions?: any[];
   };
@@ -185,15 +188,24 @@ function TaskDetailContent() {
 
     const msgItems: CombinedItem[] = state.messages
       .filter((m) => m.role === 'user' || m.isResult)
-      .map((m) => ({
-        id: m.id || `${m.role}-${toTime(m.timestamp)}`,
-        role: m.role,
-        content: m.content,
-        rawContent: m.rawContent,
-        timestamp: toTime(m.timestamp),
-        traceEvents: m.traceEvents,
-        interactions: m.interactions,
-      }));
+      .map((m) => {
+        const id = m.id || `${m.role}-${toTime(m.timestamp)}`;
+        return {
+          id,
+          role: m.role,
+          content: m.content,
+          rawContent: m.rawContent,
+          timestamp: toTime(m.timestamp),
+          status: m.status,
+          isStreamingFinalAnswer: isStreamingFinalAnswerMessage({
+            id,
+            role: m.role,
+            isResult: m.isResult,
+          }),
+          traceEvents: m.traceEvents,
+          interactions: m.interactions,
+        };
+      });
 
     const merged = msgItems;
     merged.sort((a, b) => a.timestamp - b.timestamp);
@@ -402,9 +414,14 @@ function TaskDetailContent() {
     });
   }
 
+  const lastCombinedItem = combinedItems[combinedItems.length - 1];
   const hasFinalAssistantMessage =
-    combinedItems.length > 0 &&
-    combinedItems[combinedItems.length - 1].role === "assistant";
+    !!lastCombinedItem &&
+    lastCombinedItem.role === "assistant" &&
+    !(
+      lastCombinedItem.isStreamingFinalAnswer &&
+      lastCombinedItem.status === "failed"
+    );
 
   const isPlanning = dagNodes.length === 0 && state.dagExecution?.phase === "planning";
   const hasError = dagNodes.length === 0 && (state.dagExecution?.phase === "failed" || state.currentTask?.status === "failed");
@@ -458,21 +475,28 @@ function TaskDetailContent() {
                 </div>
               ) : (
                 <>
-                  {combinedItems.map((item) => (
-                    <ChatMessage
-                      key={item.id}
-                      role={item.role}
-                      content={item.content}
-                      rawContent={item.rawContent}
-                      traceEvents={item.traceEvents as any || []}
-                      showProcessView={true}
-                      timestamp={item.timestamp}
-                      interactions={item.interactions}
-                      interactionsActive={item.id === activeWaitingMessageId}
-                    />
-                  ))}
+                  {combinedItems.map((item) => {
+                    const isFailedFinalAnswerStream =
+                      item.isStreamingFinalAnswer && item.status === "failed";
+                    return (
+                      <ChatMessage
+                        key={item.id}
+                        role={item.role}
+                        content={item.content}
+                        rawContent={item.rawContent}
+                        traceEvents={item.traceEvents as any || []}
+                        showProcessView={true}
+                        taskStatus={
+                          isFailedFinalAnswerStream ? "failed" : undefined
+                        }
+                        timestamp={item.timestamp}
+                        interactions={item.interactions}
+                        interactionsActive={item.id === activeWaitingMessageId}
+                      />
+                    );
+                  })}
 
-                  {(state.isProcessing || (state.traceEvents?.length || 0) > 0 || state.currentTask?.status === 'paused' || state.currentTask?.status === 'waiting_for_user') && !hasFinalAssistantMessage && (
+                  {(state.isProcessing || (state.traceEvents?.length || 0) > 0 || state.currentTask?.status === 'paused' || state.currentTask?.status === 'waiting_for_user' || state.currentTask?.status === 'failed') && !hasFinalAssistantMessage && (
                     <ChatMessage
                       role="assistant"
                       content={

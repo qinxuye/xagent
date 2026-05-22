@@ -141,8 +141,10 @@ export const getFinalAnswerStreamActionPayload = ({
     }
   }
   if (eventType === "final_answer_error") {
+    const error = typeof streamData.error === "string" ? streamData.error : ""
     return {
       messageId,
+      content: error,
       timestamp: normalizedTimestamp,
       status: "failed",
     }
