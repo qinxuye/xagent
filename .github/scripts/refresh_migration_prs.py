@@ -274,12 +274,16 @@ def pr_touches_migrations(github: GitHub, number: int) -> bool:
     return any(file.get("filename", "").startswith(MIGRATION_PREFIX) for file in files)
 
 
-def head_contains_main(github: GitHub, head_sha: str) -> bool:
-    main_sha = os.getenv("GITHUB_SHA")
-    if not main_sha:
-        return True
+def resolve_branch_sha(github: GitHub, branch: str) -> str:
+    quoted_branch = urllib.parse.quote(branch, safe="")
+    branch_info = github.request(
+        "GET", f"/repos/{github.repo}/branches/{quoted_branch}"
+    )
+    return branch_info["commit"]["sha"]
 
-    quoted_base = urllib.parse.quote(main_sha, safe="")
+
+def head_contains_base(github: GitHub, base_sha: str, head_sha: str) -> bool:
+    quoted_base = urllib.parse.quote(base_sha, safe="")
     quoted_head = urllib.parse.quote(head_sha, safe="")
     compare = github.request(
         "GET", f"/repos/{github.repo}/compare/{quoted_base}...{quoted_head}"
@@ -287,11 +291,13 @@ def head_contains_main(github: GitHub, head_sha: str) -> bool:
     return compare.get("status") in {"ahead", "identical"}
 
 
-def wait_for_refreshed_head(github: GitHub, pr_number: int) -> str | None:
+def wait_for_refreshed_head(
+    github: GitHub, pr_number: int, base_sha: str
+) -> str | None:
     for _ in range(24):
         pr = github.request("GET", f"/repos/{github.repo}/pulls/{pr_number}")
         head_sha = pr["head"]["sha"]
-        if head_contains_main(github, head_sha):
+        if head_contains_base(github, base_sha, head_sha):
             return head_sha
         time.sleep(5)
     return None
@@ -319,7 +325,7 @@ def dispatch_workflows(github: GitHub, ref: str) -> None:
         )
 
 
-def refresh_pr(github: GitHub, pr: dict[str, Any]) -> bool:
+def refresh_pr(github: GitHub, pr: dict[str, Any], base_sha: str) -> bool:
     number = pr["number"]
     head = pr["head"]
     old_sha = head["sha"]
@@ -348,7 +354,7 @@ def refresh_pr(github: GitHub, pr: dict[str, Any]) -> bool:
         return False
 
     try:
-        new_sha = wait_for_refreshed_head(github, number)
+        new_sha = wait_for_refreshed_head(github, number, base_sha)
     except Exception as exc:
         message = f"Could not verify refreshed branch: {exc}"
         print(f"PR #{number}: {message}", file=sys.stderr)
@@ -394,6 +400,8 @@ def main() -> int:
     token = os.environ["GITHUB_TOKEN"]
     repo = os.environ["GITHUB_REPOSITORY"]
     github = GitHub(token=token, repo=repo)
+    base_sha = resolve_branch_sha(github, BASE_BRANCH)
+    print(f"{BASE_BRANCH} is currently {base_sha}")
 
     prs = github.paginate(
         f"/repos/{repo}/pulls?state=open&base={urllib.parse.quote(BASE_BRANCH)}"
@@ -402,7 +410,7 @@ def main() -> int:
 
     ok = True
     for pr in prs:
-        ok = refresh_pr(github, pr) and ok
+        ok = refresh_pr(github, pr, base_sha) and ok
     return 0 if ok else 1
 
 

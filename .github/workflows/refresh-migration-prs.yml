@@ -20,11 +20,14 @@ concurrency:
 jobs:
   refresh-migration-prs:
     name: Refresh migration PRs
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout workflow scripts
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Merge latest main into open migration PRs
         env:
