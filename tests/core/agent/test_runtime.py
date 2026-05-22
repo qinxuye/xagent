@@ -58,6 +58,22 @@ class EmptyStreamingLLM:
         yield StreamChunk(type=ChunkType.END)
 
 
+class UsageOnlyStreamingLLM:
+    async def chat(self, **_: Any) -> str:
+        return "fallback answer"
+
+    async def stream_chat(self, **_: Any) -> Any:
+        yield StreamChunk(
+            type=ChunkType.USAGE,
+            usage={
+                "prompt_tokens": 7,
+                "completion_tokens": 3,
+                "total_tokens": 10,
+            },
+        )
+        yield StreamChunk(type=ChunkType.END)
+
+
 class StreamingToolDeltaLLM:
     async def stream_chat(self, **_: Any) -> Any:
         for arguments in ['{"expression"', ':"2 + ', '2"}']:
@@ -326,6 +342,17 @@ async def test_runtime_streaming_llm_call_falls_back_when_stream_is_empty() -> N
     runtime = PatternRuntime()
 
     result = await runtime.run_streaming_llm_call(EmptyStreamingLLM(), messages=[])
+
+    assert result == "fallback answer"
+
+
+@pytest.mark.asyncio
+async def test_runtime_streaming_llm_call_falls_back_when_stream_has_only_usage() -> (
+    None
+):
+    runtime = PatternRuntime()
+
+    result = await runtime.run_streaming_llm_call(UsageOnlyStreamingLLM(), messages=[])
 
     assert result == "fallback answer"
 

@@ -173,13 +173,13 @@ class PatternRuntime:
                 if usage_payload:
                     response["usage"] = usage_payload
                 return response
+            if not saw_payload_chunk:
+                return await self.run_llm_call(llm, **kwargs)
             if usage_payload:
                 return {
                     "content": content,
                     "usage": usage_payload,
                 }
-            if not saw_payload_chunk:
-                return await self.run_llm_call(llm, **kwargs)
             return content
 
         task: asyncio.Future[Any] = asyncio.ensure_future(consume_stream())
