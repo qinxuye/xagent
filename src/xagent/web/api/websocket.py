@@ -4489,7 +4489,7 @@ async def handle_build_preview_execution(
             user_id = int(user.id)
             try:
                 sandbox = await sandbox_manager.get_or_create_sandbox(
-                    "user",
+                    "build_preview",
                     str(user_id),
                     workspace_config={
                         "base_dir": preview_workspace_base_dir,

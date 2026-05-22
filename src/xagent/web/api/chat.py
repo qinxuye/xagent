@@ -354,7 +354,7 @@ class AgentServiceManager:
 
     def __init__(self, request: Optional[Any] = None) -> None:
         self._agents: Dict[int, AgentService] = {}
-        self._sandboxes: Dict[int, Any] = {}  # workspace owner id -> Sandbox instance
+        self._sandboxes: Dict[str, Any] = {}  # lifecycle scope -> Sandbox instance
         self._default_llm = create_default_llm()
         self.request = request
 
@@ -861,7 +861,8 @@ class AgentServiceManager:
             "allowed_external_dirs": _build_allowed_external_dirs(workspace_owner_id),
         }
 
-        sandbox = self._sandboxes.get(workspace_owner_id)
+        sandbox_key = f"user:{workspace_owner_id}"
+        sandbox = self._sandboxes.get(sandbox_key)
         if sandbox is None:
             from ..sandbox_manager import get_sandbox_manager
 
@@ -873,7 +874,7 @@ class AgentServiceManager:
                         str(workspace_owner_id),
                         workspace_config=sandbox_workspace_config,
                     )
-                    self._sandboxes[workspace_owner_id] = sandbox
+                    self._sandboxes[sandbox_key] = sandbox
                 except Exception as e:
                     logger.warning(
                         f"Sandbox creation failed for workspace owner {workspace_owner_id}, "
@@ -1057,7 +1058,8 @@ class AgentServiceManager:
                 }
 
                 # Get or create owner sandbox for run task tools
-                sandbox = self._sandboxes.get(workspace_owner_id)
+                sandbox_key = f"user:{workspace_owner_id}"
+                sandbox = self._sandboxes.get(sandbox_key)
                 if sandbox is None:
                     from ..sandbox_manager import get_sandbox_manager
 
@@ -1069,7 +1071,7 @@ class AgentServiceManager:
                                 str(workspace_owner_id),
                                 workspace_config=sandbox_workspace_config,
                             )
-                            self._sandboxes[workspace_owner_id] = sandbox
+                            self._sandboxes[sandbox_key] = sandbox
                         except Exception as e:
                             # Graceful degradation: tools will run locally without sandbox
                             logger.warning(

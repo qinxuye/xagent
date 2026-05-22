@@ -201,6 +201,22 @@ class SandboxManager:
             and set(left.volumes or []) == set(right.volumes or [])
         )
 
+    @staticmethod
+    def _ensure_config_equivalent(
+        sandbox_name: str,
+        cached_config: SandboxConfig | None,
+        desired_config: SandboxConfig,
+    ) -> None:
+        if cached_config is None:
+            return
+        if SandboxManager._config_equivalent(cached_config, desired_config):
+            return
+        raise RuntimeError(
+            f"Sandbox {sandbox_name!r} already exists with different runtime "
+            "configuration. Use a distinct lifecycle id for different workspace "
+            "mounts."
+        )
+
     def _build_sandbox_config(
         self,
         lifecycle_type: str,
@@ -294,14 +310,8 @@ class SandboxManager:
         )
 
         cached_config = self._config_cache.get(sandbox_name)
-        if sandbox_name in self._cache and cached_config is not None:
-            if self._config_equivalent(cached_config, desired_config):
-                return self._cache[sandbox_name]
-            logger.info("Sandbox config changed for %s; recreating", sandbox_name)
-            await self._service.delete(sandbox_name)
-            self._cache.pop(sandbox_name, None)
-            self._config_cache.pop(sandbox_name, None)
-        elif sandbox_name in self._cache:
+        if sandbox_name in self._cache:
+            self._ensure_config_equivalent(sandbox_name, cached_config, desired_config)
             return self._cache[sandbox_name]
 
         # Acquire per-name lock to prevent concurrent creation
@@ -313,14 +323,10 @@ class SandboxManager:
         async with lock:
             # Double-check after acquiring lock
             cached_config = self._config_cache.get(sandbox_name)
-            if sandbox_name in self._cache and cached_config is not None:
-                if self._config_equivalent(cached_config, desired_config):
-                    return self._cache[sandbox_name]
-                logger.info("Sandbox config changed for %s; recreating", sandbox_name)
-                await self._service.delete(sandbox_name)
-                self._cache.pop(sandbox_name, None)
-                self._config_cache.pop(sandbox_name, None)
-            elif sandbox_name in self._cache:
+            if sandbox_name in self._cache:
+                self._ensure_config_equivalent(
+                    sandbox_name, cached_config, desired_config
+                )
                 return self._cache[sandbox_name]
 
             # Get base image and config from environment variables
