@@ -36,6 +36,20 @@ class StreamingLLM:
         yield StreamChunk(type=ChunkType.END)
 
 
+class StreamingLLMWithUsage:
+    async def stream_chat(self, **_: Any) -> Any:
+        yield StreamChunk(type=ChunkType.TOKEN, delta="hello")
+        yield StreamChunk(
+            type=ChunkType.USAGE,
+            usage={
+                "prompt_tokens": 7,
+                "completion_tokens": 3,
+                "total_tokens": 10,
+            },
+        )
+        yield StreamChunk(type=ChunkType.END)
+
+
 class EmptyStreamingLLM:
     async def chat(self, **_: Any) -> str:
         return "fallback answer"
@@ -220,6 +234,36 @@ async def test_runtime_stream_final_answer_emits_ui_events() -> None:
     assert outbound.events[2]["delta"] == " world"
     assert outbound.events[3]["content"] == "hello world"
     assert len({event["message_id"] for event in outbound.events}) == 1
+    assert (
+        runtime.last_final_answer_stream_message_id == outbound.events[0]["message_id"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_stream_final_answer_preserves_usage_metadata() -> None:
+    outbound = OutboundCollector()
+    runtime = PatternRuntime(execution_id="task-123", outbound_message_handler=outbound)
+    context = ExecutionContext(execution_id="task-123")
+
+    result = await runtime.stream_final_answer(StreamingLLMWithUsage(), messages=[])
+    await runtime.on_llm_end(context=context, response=result)
+
+    assert result == {
+        "content": "hello",
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": 3,
+            "total_tokens": 10,
+        },
+    }
+    assert [event["type"] for event in outbound.events] == [
+        "final_answer_start",
+        "final_answer_delta",
+        "final_answer_end",
+    ]
+    assert outbound.events[-1]["content"] == "hello"
+    usage = context.get_total_token_usage()
+    assert usage == {"total": 10, "input": 7, "output": 3, "call_count": 1}
 
 
 @pytest.mark.asyncio
@@ -249,6 +293,7 @@ async def test_runtime_stream_final_answer_emits_error_terminal_event() -> None:
     assert outbound.events[1]["delta"] == "partial"
     assert outbound.events[2]["error"] == "provider disconnected"
     assert len({event["message_id"] for event in outbound.events}) == 1
+    assert runtime.last_final_answer_stream_message_id is None
 
 
 @pytest.mark.asyncio

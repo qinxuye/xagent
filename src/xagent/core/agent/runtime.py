@@ -124,7 +124,7 @@ class PatternRuntime:
         content = self._response_content(response)
 
         await stream.finish(content)
-        return content
+        return response
 
     async def run_streaming_llm_call(
         self,
@@ -142,6 +142,7 @@ class PatternRuntime:
         async def consume_stream() -> Any:
             content_parts: list[str] = []
             tool_call_chunks: dict[int, dict[str, Any]] = {}
+            usage_payload: dict[str, Any] = {}
             saw_payload_chunk = False
             async for chunk in stream_chat(**kwargs):
                 await self._raise_if_interrupted("interrupted during LLM stream")
@@ -154,6 +155,9 @@ class PatternRuntime:
                 if chunk_tool_calls:
                     saw_payload_chunk = True
                     self._merge_tool_call_chunks(tool_call_chunks, chunk_tool_calls)
+                chunk_usage = self._chunk_usage(chunk)
+                if chunk_usage:
+                    self._merge_usage(usage_payload, chunk_usage)
                 if on_chunk is not None:
                     await self._maybe_await(on_chunk(chunk))
 
@@ -162,9 +166,17 @@ class PatternRuntime:
                 tool_call_chunks[index] for index in sorted(tool_call_chunks.keys())
             ]
             if tool_calls:
-                return {
+                response: dict[str, Any] = {
                     "content": content,
                     "tool_calls": tool_calls,
+                }
+                if usage_payload:
+                    response["usage"] = usage_payload
+                return response
+            if usage_payload:
+                return {
+                    "content": content,
+                    "usage": usage_payload,
                 }
             if not saw_payload_chunk:
                 return await self.run_llm_call(llm, **kwargs)
@@ -209,6 +221,45 @@ class PatternRuntime:
             return []
         tool_calls = getattr(chunk, "tool_calls", None)
         return list(tool_calls or [])
+
+    def _chunk_usage(self, chunk: Any) -> dict[str, Any]:
+        chunk_type = getattr(chunk, "type", None)
+        is_usage = callable(getattr(chunk, "is_usage", None)) and chunk.is_usage()
+        if chunk_type != ChunkType.USAGE and not is_usage:
+            return {}
+        usage = getattr(chunk, "usage", None)
+        if not usage:
+            return {}
+        if isinstance(usage, dict):
+            return dict(usage)
+        payload: dict[str, Any] = {}
+        for key in (
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "input_tokens",
+            "output_tokens",
+            "prompt_token_count",
+            "completion_token_count",
+            "candidates_token_count",
+        ):
+            value = getattr(usage, key, None)
+            if value is not None:
+                payload[key] = value
+        return payload
+
+    def _merge_usage(
+        self,
+        current: dict[str, Any],
+        incoming: dict[str, Any],
+    ) -> None:
+        for key, value in incoming.items():
+            if isinstance(value, int):
+                current[key] = value
+            elif isinstance(value, float):
+                current[key] = int(value)
+            elif value is not None:
+                current[key] = value
 
     def _merge_tool_call_chunks(
         self,
@@ -303,7 +354,7 @@ class PatternRuntime:
         if self.outbound_message_handler is None:
             return None
         message_id = f"final_answer_{uuid4().hex}"
-        self.last_final_answer_stream_message_id = message_id
+        self.last_final_answer_stream_message_id = None
         await self._emit_outbound(
             {
                 "type": "final_answer_start",
@@ -326,6 +377,7 @@ class PatternRuntime:
         )
 
     async def end_final_answer_stream(self, message_id: str, content: str) -> None:
+        self.last_final_answer_stream_message_id = message_id
         await self._emit_outbound(
             {
                 "type": "final_answer_end",
@@ -336,6 +388,8 @@ class PatternRuntime:
         )
 
     async def fail_final_answer_stream(self, message_id: str, error: str) -> None:
+        if self.last_final_answer_stream_message_id == message_id:
+            self.last_final_answer_stream_message_id = None
         await self._emit_outbound(
             {
                 "type": "final_answer_error",

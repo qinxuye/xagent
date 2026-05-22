@@ -104,6 +104,44 @@ async def test_trace_callback_attaches_final_answer_stream_message_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_trace_callback_ignores_failed_final_answer_stream_id() -> None:
+    tracer = TraceRecorder()
+    callback = TraceEventCallback()
+    outbound_events: list[dict[str, Any]] = []
+
+    async def collect_outbound(payload: dict[str, Any]) -> None:
+        outbound_events.append(payload)
+
+    runtime = PatternRuntime(outbound_message_handler=collect_outbound)
+    message_id = await runtime.start_final_answer_stream()
+    assert message_id is not None
+    await runtime.emit_final_answer_delta(message_id, "partial")
+    await runtime.fail_final_answer_stream(message_id, "provider disconnected")
+    runner = SimpleNamespace(
+        tracer=tracer,
+        _active_controls={
+            "exec-trace": SimpleNamespace(runtime=runtime),
+        },
+    )
+    context = ExecutionContext(execution_id="exec-trace")
+
+    await callback.on_run_end(
+        runner=runner,
+        context=context,
+        result={"success": True, "execution_id": "exec-trace", "answer": "Done"},
+    )
+
+    assert runtime.last_final_answer_stream_message_id is None
+    assert [event["type"] for event in outbound_events] == [
+        "final_answer_start",
+        "final_answer_delta",
+        "final_answer_error",
+    ]
+    assert "stream_message_id" not in tracer.events[0]["data"]
+    assert "stream_message_id" not in tracer.events[1]["data"]["result"]
+
+
+@pytest.mark.asyncio
 async def test_trace_callback_uses_display_user_message_when_present() -> None:
     tracer = TraceRecorder()
     callback = TraceEventCallback()
