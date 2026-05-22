@@ -4473,6 +4473,13 @@ async def handle_build_preview_execution(
                 self.user: Any = type("obj", (), {"id": user_id})()
                 self.credentials: Any = None
 
+        preview_workspace_base_dir = str(get_uploads_dir() / "build_preview")
+        allowed_external_dirs = []
+        if user and user.id:
+            user_upload_dir = get_uploads_dir() / f"user_{user.id}"
+            allowed_external_dirs.append(str(user_upload_dir))
+        allowed_external_dirs.extend([str(d) for d in get_external_upload_dirs()])
+
         # Get or create user sandbox for run preview task tools
         from ..sandbox_manager import get_sandbox_manager
 
@@ -4482,7 +4489,14 @@ async def handle_build_preview_execution(
             user_id = int(user.id)
             try:
                 sandbox = await sandbox_manager.get_or_create_sandbox(
-                    "user", str(user_id)
+                    "user",
+                    str(user_id),
+                    workspace_config={
+                        "base_dir": preview_workspace_base_dir,
+                        "task_id": preview_task_id,
+                        "user_id": user_id,
+                        "allowed_external_dirs": allowed_external_dirs,
+                    },
                 )
             except Exception as e:
                 logger.error(f"Failed to create sandbox for user {user_id}: {e}")
@@ -4593,7 +4607,7 @@ async def handle_build_preview_execution(
             allowed_skills=skills if skills is not None else None,
             allowed_tools=allowed_tools,
             task_id=preview_task_id,
-            workspace_base_dir=str(get_uploads_dir() / "build_preview"),
+            workspace_base_dir=preview_workspace_base_dir,
             vision_model=vision_llm,  # Pass vision model for tool creation
             include_mcp_tools=bool(
                 tool_categories and any(tc.startswith("mcp:") for tc in tool_categories)
@@ -4626,13 +4640,6 @@ async def handle_build_preview_execution(
         # Determine execution mode and map to pattern.
         pattern = get_agent_pattern_for_execution_mode(execution_mode)
 
-        # Build allowed external directories
-        allowed_external_dirs = []
-        if user and user.id:
-            user_upload_dir = get_uploads_dir() / f"user_{user.id}"
-            allowed_external_dirs.append(str(user_upload_dir))
-        allowed_external_dirs.extend([str(d) for d in get_external_upload_dirs()])
-
         logger.info(f"Preview execution_mode={execution_mode} -> pattern={pattern}")
 
         # Create agent service (using WebSocket tracer)
@@ -4654,7 +4661,7 @@ async def handle_build_preview_execution(
             pattern=pattern,  # Use pattern instead of use_dag_pattern
             id=preview_task_id,
             enable_workspace=True,
-            workspace_base_dir=str(get_uploads_dir() / "build_preview"),
+            workspace_base_dir=preview_workspace_base_dir,
             allowed_external_dirs=allowed_external_dirs,
             task_id=preview_task_id,
             tracer=preview_tracer,

@@ -354,7 +354,7 @@ class AgentServiceManager:
 
     def __init__(self, request: Optional[Any] = None) -> None:
         self._agents: Dict[int, AgentService] = {}
-        self._sandboxes: Dict[int, Any] = {}  # user_id -> Sandbox instance
+        self._sandboxes: Dict[int, Any] = {}  # workspace owner id -> Sandbox instance
         self._default_llm = create_default_llm()
         self.request = request
 
@@ -853,8 +853,15 @@ class AgentServiceManager:
                 f"{len(allowed_tools)} tools for task {task_id}"
             )
 
-        user_id = int(user.id)
-        sandbox = self._sandboxes.get(user_id)
+        workspace_owner_id = int(task.user_id)
+        sandbox_workspace_config = {
+            "base_dir": str(get_uploads_dir() / f"user_{workspace_owner_id}"),
+            "task_id": f"web_task_{task_id}",
+            "user_id": workspace_owner_id,
+            "allowed_external_dirs": _build_allowed_external_dirs(workspace_owner_id),
+        }
+
+        sandbox = self._sandboxes.get(workspace_owner_id)
         if sandbox is None:
             from ..sandbox_manager import get_sandbox_manager
 
@@ -862,12 +869,14 @@ class AgentServiceManager:
             if sandbox_mgr:
                 try:
                     sandbox = await sandbox_mgr.get_or_create_sandbox(
-                        "user", str(user_id)
+                        "user",
+                        str(workspace_owner_id),
+                        workspace_config=sandbox_workspace_config,
                     )
-                    self._sandboxes[user_id] = sandbox
+                    self._sandboxes[workspace_owner_id] = sandbox
                 except Exception as e:
                     logger.warning(
-                        f"Sandbox creation failed for user {user_id}, "
+                        f"Sandbox creation failed for workspace owner {workspace_owner_id}, "
                         f"falling back to local execution: {e}"
                     )
 
@@ -1033,9 +1042,22 @@ class AgentServiceManager:
                             f"Task {task_id} is associated with published agent {current_agent.id} ({current_agent.name}), will exclude from agent tools"
                         )
 
-                # Get or create user sandbox for run task tools
-                user_id = int(user.id)
-                sandbox = self._sandboxes.get(user_id)
+                workspace_owner_id = (
+                    int(task.user_id)
+                    if task and task.user_id is not None
+                    else int(user.id)
+                )
+                sandbox_workspace_config = {
+                    "base_dir": str(get_uploads_dir() / f"user_{workspace_owner_id}"),
+                    "task_id": f"web_task_{task_id}",
+                    "user_id": workspace_owner_id,
+                    "allowed_external_dirs": _build_allowed_external_dirs(
+                        workspace_owner_id
+                    ),
+                }
+
+                # Get or create owner sandbox for run task tools
+                sandbox = self._sandboxes.get(workspace_owner_id)
                 if sandbox is None:
                     from ..sandbox_manager import get_sandbox_manager
 
@@ -1043,13 +1065,15 @@ class AgentServiceManager:
                     if sandbox_mgr:
                         try:
                             sandbox = await sandbox_mgr.get_or_create_sandbox(
-                                "user", str(user_id)
+                                "user",
+                                str(workspace_owner_id),
+                                workspace_config=sandbox_workspace_config,
                             )
-                            self._sandboxes[user_id] = sandbox
+                            self._sandboxes[workspace_owner_id] = sandbox
                         except Exception as e:
                             # Graceful degradation: tools will run locally without sandbox
                             logger.warning(
-                                f"Sandbox creation failed for user {user_id}, "
+                                f"Sandbox creation failed for workspace owner {workspace_owner_id}, "
                                 f"falling back to local execution: {e}"
                             )
 
@@ -1135,12 +1159,6 @@ class AgentServiceManager:
                     logger.info(
                         f"Tool categories {tool_categories} mapped to {len(allowed_tools)} tools for task {task_id}"
                     )
-
-                workspace_owner_id = (
-                    int(task.user_id)
-                    if task and task.user_id is not None
-                    else int(user.id)
-                )
 
                 # Create tools using ToolFactory
                 tools = await create_default_tools(

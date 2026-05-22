@@ -385,6 +385,40 @@ class TestSandboxConfigParsing:
         assert config.volumes[0][1] == "/data"
         assert config.volumes[0][2] == "ro"
 
+    def test_sibling_mode_rejects_tilde_sandbox_volume_source(self):
+        """Docker sibling mode must not expand backend-container home paths."""
+        mock_service = MagicMock()
+        manager = SandboxManager(mock_service)
+
+        with patch.dict(
+            "os.environ",
+            {
+                "XAGENT_SANDBOX_HOST_STORAGE_ROOT": "/host/.xagent",
+                "SANDBOX_VOLUMES": "~/data:/data:ro",
+            },
+            clear=True,
+        ):
+            _, config = manager._get_sandbox_image_and_config()
+
+        assert config.volumes is None
+
+    def test_sibling_mode_rejects_relative_sandbox_volume_source(self):
+        """Docker sibling mode requires host-side absolute volume sources."""
+        mock_service = MagicMock()
+        manager = SandboxManager(mock_service)
+
+        with patch.dict(
+            "os.environ",
+            {
+                "XAGENT_SANDBOX_HOST_STORAGE_ROOT": "/host/.xagent",
+                "SANDBOX_VOLUMES": "relative:/data:ro",
+            },
+            clear=True,
+        ):
+            _, config = manager._get_sandbox_image_and_config()
+
+        assert config.volumes is None
+
     def test_volume_parsing_empty(self):
         """Test empty volumes string results in None."""
         mock_service = MagicMock()

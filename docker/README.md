@@ -123,9 +123,11 @@ container control.
 
 Docker sibling mode also resolves sandbox bind mounts on the Docker host. The
 overlay defaults `XAGENT_SANDBOX_HOST_PROJECT_ROOT` to the current project root
-and binds `${XAGENT_HOST_STORAGE_ROOT:-/root/.xagent}` to `/root/.xagent`.
-Override these values when the host checkout or storage directory lives
-elsewhere:
+and binds `${XAGENT_HOST_STORAGE_ROOT:-/root/.xagent}` to `/root/.xagent`. It
+also passes `XAGENT_SANDBOX_HOST_STORAGE_ROOT` into the backend so sandbox
+workspace mounts under `/root/.xagent` are translated back to the host storage
+path before they reach the host Docker daemon. Override these values when the
+host checkout or storage directory lives elsewhere:
 
 ```bash
 XAGENT_SANDBOX_HOST_PROJECT_ROOT="$PWD" \
@@ -135,6 +137,10 @@ docker compose \
   -f docker/docker-compose.sandbox.docker.yml \
   up -d
 ```
+
+In Docker sibling mode, `SANDBOX_VOLUMES` sources are host-side paths. Use
+absolute host paths; relative paths and `~` are rejected instead of being
+expanded inside the backend container.
 
 ## Docker Files
 
