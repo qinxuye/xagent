@@ -20,6 +20,11 @@ MIGRATION_PREFIX = os.getenv("MIGRATION_PREFIX", "src/xagent/migrations/")
 MIGRATION_VERSIONS_DIR = os.getenv(
     "MIGRATION_VERSIONS_DIR", "src/xagent/migrations/versions"
 )
+DISPATCH_WORKFLOWS = tuple(
+    workflow.strip()
+    for workflow in os.getenv("DISPATCH_WORKFLOWS", "").split(",")
+    if workflow.strip()
+)
 STATUS_CONTEXT = os.getenv("STATUS_CONTEXT", "migration-refresh/alembic-heads")
 GITHUB_API_URL = os.getenv("GITHUB_API_URL", "https://api.github.com")
 GITHUB_SERVER_URL = os.getenv("GITHUB_SERVER_URL", "https://github.com")
@@ -292,6 +297,28 @@ def wait_for_refreshed_head(github: GitHub, pr_number: int) -> str | None:
     return None
 
 
+def latest_pr_head_sha(github: GitHub, number: int, fallback_sha: str) -> str:
+    try:
+        pr = github.request("GET", f"/repos/{github.repo}/pulls/{number}")
+        return pr["head"]["sha"]
+    except Exception as exc:
+        print(
+            f"PR #{number}: could not read latest head after failure: {exc}",
+            file=sys.stderr,
+        )
+        return fallback_sha
+
+
+def dispatch_workflows(github: GitHub, ref: str) -> None:
+    for workflow in DISPATCH_WORKFLOWS:
+        quoted_workflow = urllib.parse.quote(workflow, safe="")
+        github.request(
+            "POST",
+            f"/repos/{github.repo}/actions/workflows/{quoted_workflow}/dispatches",
+            {"ref": ref},
+        )
+
+
 def refresh_pr(github: GitHub, pr: dict[str, Any]) -> bool:
     number = pr["number"]
     head = pr["head"]
@@ -325,7 +352,9 @@ def refresh_pr(github: GitHub, pr: dict[str, Any]) -> bool:
     except Exception as exc:
         message = f"Could not verify refreshed branch: {exc}"
         print(f"PR #{number}: {message}", file=sys.stderr)
-        github.set_status(old_sha, "failure", message)
+        github.set_status(
+            latest_pr_head_sha(github, number, old_sha), "failure", message
+        )
         return False
 
     if new_sha is None:
@@ -346,6 +375,16 @@ def refresh_pr(github: GitHub, pr: dict[str, Any]) -> bool:
         return False
 
     state = "success" if ok else "failure"
+    if ok:
+        try:
+            dispatch_workflows(github, head["ref"])
+        except Exception as exc:
+            message = f"Failed to dispatch required workflows: {exc}"
+            print(f"PR #{number}: {message}", file=sys.stderr)
+            github.set_status(new_sha, "failure", message)
+            return False
+        if DISPATCH_WORKFLOWS:
+            message = f"{message}; dispatched {', '.join(DISPATCH_WORKFLOWS)}"
     print(f"PR #{number}: {message}")
     github.set_status(new_sha, state, message)
     return ok

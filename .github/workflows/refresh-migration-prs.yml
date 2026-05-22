@@ -8,6 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
   statuses: write
@@ -31,5 +32,6 @@ jobs:
           BASE_BRANCH: main
           MIGRATION_PREFIX: src/xagent/migrations/
           MIGRATION_VERSIONS_DIR: src/xagent/migrations/versions
+          DISPATCH_WORKFLOWS: ci.yml,test-migrations.yml
           STATUS_CONTEXT: migration-refresh/alembic-heads
         run: python .github/scripts/refresh_migration_prs.py
