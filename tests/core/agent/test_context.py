@@ -198,6 +198,9 @@ def test_language_rules_distinguish_simplified_and_traditional_chinese() -> None
     assert "generic Chinese" in response_language_rules()
     assert "Simplified Chinese versus Traditional Chinese" in output_language_policy()
     assert "generic Chinese" in output_language_policy()
+    assert "match the script of the user request when generic Chinese is specified" in (
+        output_language_policy("Chinese")
+    )
     assert (
         "Simplified Chinese and Traditional Chinese are different output languages"
         in (output_language_policy("Simplified Chinese"))
