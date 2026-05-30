@@ -1381,7 +1381,8 @@ class ReActPattern(AgentPattern):
             "completed. If the latest user request explicitly requires more "
             "completed work-tool calls or results than the current context contains, "
             f"choose {REACT_DECISION_TOOL_CALL}. Do not call work tools in this "
-            "decision."
+            "decision. When choosing final_answer, "
+            f"{final_answer_language_rule()}"
         )
         return [*messages, {"role": "user", "content": prompt}]
 

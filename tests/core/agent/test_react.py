@@ -832,6 +832,10 @@ async def test_react_pattern_uses_decision_for_repeated_tools() -> None:
     assert [schema["function"]["name"] for schema in llm.calls[2]["tools"]] == [
         "react_decision"
     ]
+    decision_prompt = llm.calls[2]["messages"][-1]["content"]
+    assert "When choosing final_answer" in decision_prompt
+    assert "same natural language as the current user request" in decision_prompt
+    assert "Simplified Chinese versus Traditional Chinese" in decision_prompt
     assert pattern.pending_tool_calls == []
 
 
