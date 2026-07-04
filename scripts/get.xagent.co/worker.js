@@ -4,19 +4,21 @@
 //
 //   curl -fsSL https://get.xagent.co | sh
 //
-// The script is pinned to the latest GitHub *release tag* (not `main`), so the
-// public one-liner always fetches a shipped, reviewed version. Falls back to
-// `main` only if the release lookup fails. Deploy with `wrangler deploy`.
+// The script is pinned to the latest GitHub *release tag*, so the public
+// one-liner only ever serves a shipped, immutable version. It fails closed:
+// if the release can't be resolved or the tag doesn't contain the script, it
+// returns 502 rather than falling back to a floating ref like `main` — a public
+// `curl | sh` endpoint must never serve unreleased code. (This means the
+// endpoint only works once a release that includes scripts/install.sh exists.)
+// Deploy with `wrangler deploy`.
 
 const REPO = "xorbitsai/xagent";
 const SCRIPT_PATH = "scripts/install.sh";
-const FALLBACK_REF = "main";
 // Cache the resolved script at the edge to avoid hitting GitHub on every hit.
 const CACHE_TTL_SECONDS = 300;
 
 async function latestReleaseTag() {
-  // Never throw: a GitHub API outage/rate-limit must degrade to the main
-  // fallback, not crash the installer endpoint.
+  // Never throw: on any API failure return null so the caller fails closed.
   try {
     const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
       headers: { "User-Agent": "get.xagent.co", Accept: "application/vnd.github+json" },
@@ -55,14 +57,11 @@ export default {
     }
 
     try {
-      const ref = (await latestReleaseTag()) || FALLBACK_REF;
+      // Fail closed: only ever serve a resolved, immutable release tag.
+      const ref = await latestReleaseTag();
+      if (!ref) return UNAVAILABLE();
 
-      let servedRef = ref;
-      let res = await fetchScript(ref);
-      if (!res.ok && ref !== FALLBACK_REF) {
-        res = await fetchScript(FALLBACK_REF); // tag exists but file missing at that tag
-        servedRef = FALLBACK_REF;
-      }
+      const res = await fetchScript(ref);
       if (!res.ok) return UNAVAILABLE();
 
       const body = await res.text();
@@ -72,7 +71,7 @@ export default {
           // text/plain so `curl | sh` gets the raw script, never rendered HTML.
           "content-type": "text/plain; charset=utf-8",
           "cache-control": `public, max-age=${CACHE_TTL_SECONDS}`,
-          "x-xagent-install-ref": servedRef,
+          "x-xagent-install-ref": ref,
         },
       });
     } catch {

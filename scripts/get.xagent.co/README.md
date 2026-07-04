@@ -6,7 +6,9 @@ Cloudflare Worker that serves [`scripts/install.sh`](../install.sh) so users can
 curl -fsSL https://get.xagent.co | sh
 ```
 
-The Worker fetches the installer pinned to the **latest GitHub release tag** (falling back to `main` only if the release lookup fails), so the public one-liner always serves a shipped, reviewed version.
+The Worker serves the installer pinned to the **latest GitHub release tag**, so the public one-liner only ever runs a shipped, immutable version. It **fails closed**: if the release can't be resolved, or that tag doesn't contain the script, it returns `502` instead of falling back to a floating ref like `main` — a public `curl | sh` endpoint must never serve unreleased code.
+
+> The endpoint only works once a release that includes `scripts/install.sh` exists. Cut a release after this lands to bring it online.
 
 ## Deploy
 
@@ -23,4 +25,4 @@ Then map `get.xagent.co` to this Worker (the `routes` entry in `wrangler.toml` d
 
 - The Worker only serves the script; it runs no user code.
 - Edge-caches the resolved script for 5 minutes (`CACHE_TTL_SECONDS`).
-- To publish a change to the installer: merge it to `main`, then it goes live at the next release (or immediately via the `main` fallback if there is no release yet).
+- To publish a change to the installer: merge it to `main`, then cut a release — the endpoint serves the latest release tag, so changes go live only once released.
