@@ -1,0 +1,43 @@
+name: Install script
+
+on:
+  pull_request:
+    paths:
+      - scripts/install.sh
+      - .github/workflows/install-script.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/install.sh
+      - .github/workflows/install-script.yml
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: shellcheck scripts/install.sh  # pre-installed on ubuntu runners
+
+  smoke:
+    # Actually run the one-liner end to end so it can't silently rot.
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run installer and verify the command works
+        env:
+          # Isolate the tool install so the runner's env stays clean and we
+          # control where the `xagent` entry point lands.
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/xagent-bin
+        run: |
+          set -eu
+          sh scripts/install.sh
+          export PATH="$UV_TOOL_BIN_DIR:$PATH"
+          command -v xagent
+          xagent --help
