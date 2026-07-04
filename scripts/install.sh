@@ -56,7 +56,8 @@ command -v uv >/dev/null 2>&1 || err "uv not found on PATH after install; open a
 
 spec="$APP"
 if [ -n "${XAGENT_VERSION:-}" ]; then
-  spec="$APP==$XAGENT_VERSION"
+  # Strip a leading 'v' (e.g. v0.6.0 -> 0.6.0) so a git-tag-style value works.
+  spec="$APP==${XAGENT_VERSION#v}"
 fi
 
 info "Installing $spec ..."
@@ -72,5 +73,10 @@ printf '\n'
 
 if ! PATH="$ORIG_PATH" command -v "$CMD" >/dev/null 2>&1; then
   warn "'$CMD' is not on your PATH in this shell yet."
-  warn "Run 'uv tool update-shell' and open a new terminal, then run '$CMD'."
+  if PATH="$ORIG_PATH" command -v uv >/dev/null 2>&1; then
+    warn "Run 'uv tool update-shell' and open a new terminal, then run '$CMD'."
+  else
+    # uv was just installed by this script and isn't on the parent shell's PATH.
+    warn "Open a new terminal, or run: export PATH=\"\$HOME/.local/bin:\$PATH\""
+  fi
 fi

@@ -57,9 +57,11 @@ export default {
     try {
       const ref = (await latestReleaseTag()) || FALLBACK_REF;
 
+      let servedRef = ref;
       let res = await fetchScript(ref);
       if (!res.ok && ref !== FALLBACK_REF) {
         res = await fetchScript(FALLBACK_REF); // tag exists but file missing at that tag
+        servedRef = FALLBACK_REF;
       }
       if (!res.ok) return UNAVAILABLE();
 
@@ -70,7 +72,7 @@ export default {
           // text/plain so `curl | sh` gets the raw script, never rendered HTML.
           "content-type": "text/plain; charset=utf-8",
           "cache-control": `public, max-age=${CACHE_TTL_SECONDS}`,
-          "x-xagent-install-ref": ref,
+          "x-xagent-install-ref": servedRef,
         },
       });
     } catch {
