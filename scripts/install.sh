@@ -14,6 +14,11 @@
 #   uv tool install xagent-ai        # or, in a venv: pip install xagent-ai
 set -eu
 
+# The user's PATH before this script mutates it (below, when bootstrapping uv).
+# Used at the end to warn correctly about whether the parent shell will find the
+# installed command.
+ORIG_PATH="$PATH"
+
 APP="xagent-ai"
 CMD="xagent"
 
@@ -65,7 +70,7 @@ printf '  Open:           http://127.0.0.1:8000\n'
 printf '  Configure an LLM key (e.g. OPENAI_API_KEY) via a .env file or env var.\n'
 printf '\n'
 
-if ! command -v "$CMD" >/dev/null 2>&1; then
+if ! PATH="$ORIG_PATH" command -v "$CMD" >/dev/null 2>&1; then
   warn "'$CMD' is not on your PATH in this shell yet."
   warn "Run 'uv tool update-shell' and open a new terminal, then run '$CMD'."
 fi
