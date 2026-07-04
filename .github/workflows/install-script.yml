@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - scripts/install.sh
+      - scripts/get.xagent.co/**
       - .github/workflows/install-script.yml
   push:
     branches: [main]
     paths:
       - scripts/install.sh
+      - scripts/get.xagent.co/**
       - .github/workflows/install-script.yml
   workflow_dispatch:
 
@@ -19,6 +21,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: ShellCheck
         run: shellcheck scripts/install.sh  # pre-installed on ubuntu runners
+      - name: Check the get.xagent.co worker parses
+        # worker.js is an ES module; feed it via stdin so --input-type applies
+        # (it is rejected for a file path argument).
+        run: node --check --input-type=module < scripts/get.xagent.co/worker.js
 
   smoke:
     # Actually run the one-liner end to end so it can't silently rot.
