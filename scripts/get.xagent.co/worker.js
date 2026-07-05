@@ -23,6 +23,7 @@ async function latestReleaseTag() {
     const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
       headers: { "User-Agent": "get.xagent.co", Accept: "application/vnd.github+json" },
       cf: { cacheTtl: CACHE_TTL_SECONDS, cacheEverything: true },
+      signal: AbortSignal.timeout(5000), // don't hang the client on a stuck upstream
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -37,6 +38,7 @@ async function fetchScript(ref) {
   return fetch(url, {
     headers: { "User-Agent": "get.xagent.co" },
     cf: { cacheTtl: CACHE_TTL_SECONDS, cacheEverything: true },
+    signal: AbortSignal.timeout(10000), // a timeout here throws -> handler returns 502
   });
 }
 

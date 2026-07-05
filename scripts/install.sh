@@ -43,12 +43,7 @@ if ! command -v uv >/dev/null 2>&1; then
   # uv installs into ~/.local/bin (or ~/.cargo/bin on older installers); make it
   # visible to the rest of this script without requiring a new shell.
   for d in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
-    if [ -d "$d" ]; then
-      case ":$PATH:" in
-        *":$d:"*) ;;
-        *) PATH="$d:$PATH" ;;
-      esac
-    fi
+    [ -d "$d" ] && PATH="$d:$PATH"
   done
   export PATH
 fi
@@ -57,7 +52,9 @@ command -v uv >/dev/null 2>&1 || err "uv not found on PATH after install; open a
 spec="$APP"
 if [ -n "${XAGENT_VERSION:-}" ]; then
   # Strip a leading 'v' (e.g. v0.6.0 -> 0.6.0) so a git-tag-style value works.
-  spec="$APP==${XAGENT_VERSION#v}"
+  version="${XAGENT_VERSION#v}"
+  [ -n "$version" ] || err "XAGENT_VERSION='$XAGENT_VERSION' is not a valid version."
+  spec="$APP==$version"
 fi
 
 info "Installing $spec ..."
