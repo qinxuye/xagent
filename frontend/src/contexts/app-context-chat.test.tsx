@@ -965,6 +965,65 @@ describe("AppProvider websocket message routing", () => {
     ])
   })
 
+  it("sends selected task runtime extensions in the create request", async () => {
+    let createBody: Record<string, unknown> | undefined
+    apiRequestMock.mockImplementation(
+      async (url: string, options?: RequestInit) => {
+        if (url.endsWith("/api/chat/task/create")) {
+          createBody = JSON.parse(String(options?.body || "{}"))
+          return {
+            ok: true,
+            json: async () => ({
+              task_id: 8,
+              title: "inspect browser",
+              description: "inspect browser",
+              status: "pending",
+            }),
+          }
+        }
+        return { ok: true, json: async () => ({}) }
+      },
+    )
+
+    let send: (() => Promise<void>) | undefined
+    function RuntimeExtensionProbe() {
+      const { sendMessage } = useApp()
+      send = () => sendMessage("inspect browser", {
+        clientMessageId: "turn-local-browser",
+        runtimeExtensions: { local_browser: {} },
+      })
+      return null
+    }
+
+    wsHarness.isConnected = false
+    render(
+      <AppProvider token="token">
+        <RuntimeExtensionProbe />
+      </AppProvider>
+    )
+
+    let delivery: Promise<void> | undefined
+    await act(async () => {
+      delivery = send?.()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    expect(createBody).toEqual(
+      expect.objectContaining({
+        runtime_extensions: { local_browser: {} },
+      })
+    )
+
+    await act(async () => {
+      wsHarness.isConnected = true
+      webSocketOptions.current?.onConnect?.()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    await act(async () => {
+      await delivery
+    })
+  })
+
   it("does not crash on a trace event without data", () => {
     render(
       <AppProvider token="token">

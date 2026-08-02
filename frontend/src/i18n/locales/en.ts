@@ -234,8 +234,15 @@ const en = {
       processing: "Processing",
       usingAgentLabel: "Using",
       actions: {
+        add: "Add",
         config: "Configure Model",
         upload: "Upload",
+      },
+      localBrowser: {
+        label: "Local browser",
+        chipLabel: "Computer use",
+        checking: "Checking the Xagent host...",
+        unavailable: "Not available on this Xagent host",
       },
       noModel: "No Model",
       noModelAlert: "No model configured. Please configure a model first.",

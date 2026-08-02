@@ -234,8 +234,15 @@ const zh = {
       processing: "处理中",
       usingAgentLabel: "使用",
       actions: {
+        add: "添加",
         config: "配置模型",
         upload: "上传文件",
+      },
+      localBrowser: {
+        label: "本地浏览器",
+        chipLabel: "操作电脑",
+        checking: "正在检查 Xagent 主机...",
+        unavailable: "此 Xagent 主机不可用",
       },
       noModel: "暂无模型",
       noModelAlert: "暂无模型，请先配置模型",

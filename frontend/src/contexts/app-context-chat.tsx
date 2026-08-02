@@ -5587,6 +5587,9 @@ export function AppProvider({
         if (config?.agentConfig) {
           requestBody.agent_config = config.agentConfig
         }
+        if (config?.runtimeExtensions) {
+          requestBody.runtime_extensions = config.runtimeExtensions
+        }
 
         const response = await apiRequest(`${apiUrl}/api/chat/task/create`, {
           method: 'POST',

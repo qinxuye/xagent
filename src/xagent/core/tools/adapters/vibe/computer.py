@@ -106,12 +106,22 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         task_id: str | None = None,
         workspace: TaskWorkspace | None = None,
         environment_factory: ComputerEnvironmentFactory = BrowserComputerEnvironment,
+        environment_instructions: str | None = None,
         headless: bool = True,
     ) -> None:
         self._visibility = ToolVisibility.PUBLIC
         self._task_id = task_id
         self._workspace = workspace
         self._environment_factory = environment_factory
+        self._environment_instructions = (
+            environment_instructions.strip()
+            if isinstance(environment_instructions, str)
+            and environment_instructions.strip()
+            else (
+                "This is a new ephemeral browser. It does not inherit the user's "
+                "existing browser profile or signed-in sessions."
+            )
+        )
         self._headless = headless
         self._environments: dict[str, ComputerEnvironment] = {}
 
@@ -121,7 +131,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
 
     @property
     def description(self) -> str:
-        return """Inspect and control an isolated temporary browser through screenshots.
+        return f"""Inspect and control a browser through screenshots.
 
         First request a screenshot without expected_frame_id. Inspect the returned
         image, then send exactly one action with that frame_id as expected_frame_id.
@@ -133,8 +143,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         Use `type` to insert at the current caret and `replace_text` with a target
         to replace a field. Keyboard chords use keys such as ["CTRL", "A"].
 
-        This is a new ephemeral browser. It does not inherit the user's existing
-        browser profile or signed-in sessions.
+        {self._environment_instructions}
         """
 
     @property

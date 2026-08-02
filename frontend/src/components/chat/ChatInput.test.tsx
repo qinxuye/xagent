@@ -117,6 +117,52 @@ describe("ChatInput", () => {
     expect(onSend).not.toHaveBeenCalled()
   })
 
+  it("binds a new task to the ready local browser from the add menu", async () => {
+    apiRequestMock.mockImplementation((url: string) => {
+      if (url === "http://api.local/api/computer/local-browser/readiness") {
+        return Promise.resolve(
+          new Response(JSON.stringify({
+            ready: true,
+            connected: true,
+            attached: true,
+            application: "Google Chrome",
+            title: "GitHub",
+            permissions: {},
+            issues: [],
+            message: "",
+          }), { status: 200, headers: { "Content-Type": "application/json" } })
+        )
+      }
+      return Promise.resolve(emptyJsonResponse())
+    })
+    const onSend = vi.fn()
+    const { container } = render(
+      <ChatInput
+        hideFileUpload
+        inputValue="inspect this page"
+        onInputChange={vi.fn()}
+        onSend={onSend}
+        taskConfig={{ model: "model-1" }}
+      />
+    )
+
+    fireEvent.click(screen.getByLabelText("chatPage.input.actions.add"))
+    await screen.findByText("Google Chrome · GitHub")
+    fireEvent.click(screen.getByText("chatPage.input.localBrowser.label"))
+
+    expect(screen.getByText("chatPage.input.localBrowser.chipLabel")).toBeInTheDocument()
+    fireEvent.submit(container.querySelector("form") as HTMLFormElement)
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith(
+        "inspect this page",
+        expect.objectContaining({
+          runtimeExtensions: { local_browser: {} },
+        }),
+      )
+    })
+  })
+
   it("suppresses preseeded files and restored file previews when files are disabled", () => {
     const onSend = vi.fn()
     const onFilesChange = vi.fn()
