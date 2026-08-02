@@ -47,6 +47,13 @@ UPLOADED_FILE_RECOVERY_INTERVAL_SECONDS = (
 UPLOADED_FILE_RECOVERY_STALE_SECONDS = "XAGENT_UPLOADED_FILE_RECOVERY_STALE_SECONDS"
 UPLOADED_FILE_RECOVERY_BATCH_SIZE = "XAGENT_UPLOADED_FILE_RECOVERY_BATCH_SIZE"
 STORAGE_ROOT = "XAGENT_STORAGE_ROOT"
+LOCAL_COMPUTER_ENABLED = "XAGENT_LOCAL_COMPUTER_ENABLED"
+CUA_DRIVER_COMMAND = "XAGENT_CUA_DRIVER_COMMAND"
+CUA_DRIVER_SOCKET = "XAGENT_CUA_DRIVER_SOCKET"
+CUA_DRIVER_TIMEOUT_SECONDS = "XAGENT_CUA_DRIVER_TIMEOUT_SECONDS"
+CUA_DRIVER_MAX_ELEMENTS = "XAGENT_CUA_DRIVER_MAX_ELEMENTS"
+# Compatibility with the short-lived Local browser preview. New deployments
+# should use the Local computer names above.
 NATIVE_BROWSER_ENABLED = "XAGENT_NATIVE_BROWSER_ENABLED"
 NATIVE_BROWSER_APP_NAME = "XAGENT_NATIVE_BROWSER_APP_NAME"
 BROWSER_CUA_DRIVER_COMMAND = "XAGENT_BROWSER_CUA_DRIVER_COMMAND"
@@ -570,37 +577,68 @@ def get_task_runtime_hook_queue_timeout_seconds() -> int:
     return _get_positive_int_env(TASK_RUNTIME_HOOK_QUEUE_TIMEOUT_SECONDS, 30)
 
 
-def get_native_browser_enabled() -> bool:
-    """Whether tasks may control a browser running on the Xagent host."""
+def get_local_computer_enabled() -> bool:
+    """Whether tasks may control the interactive Xagent host through cua-driver."""
 
+    if os.getenv(LOCAL_COMPUTER_ENABLED) is not None:
+        return _get_bool_env(LOCAL_COMPUTER_ENABLED, False)
     return _get_bool_env(NATIVE_BROWSER_ENABLED, False)
 
 
+def get_native_browser_enabled() -> bool:
+    """Compatibility alias for :func:`get_local_computer_enabled`."""
+
+    return get_local_computer_enabled()
+
+
 def get_native_browser_app_name() -> str:
-    """Application name used to select the local browser window."""
+    """Legacy preferred application used by older Local browser bindings."""
 
     return (
         os.getenv(NATIVE_BROWSER_APP_NAME, "Google Chrome").strip() or "Google Chrome"
     )
 
 
-def get_browser_cua_driver_command() -> str:
+def get_cua_driver_command() -> str:
     """Executable used to start the local cua-driver MCP server."""
 
-    return os.getenv(BROWSER_CUA_DRIVER_COMMAND, "cua-driver").strip() or "cua-driver"
+    return (
+        os.getenv(CUA_DRIVER_COMMAND)
+        or os.getenv(BROWSER_CUA_DRIVER_COMMAND)
+        or "cua-driver"
+    ).strip() or "cua-driver"
 
 
-def get_browser_cua_driver_socket() -> str | None:
+def get_browser_cua_driver_command() -> str:
+    """Compatibility alias for :func:`get_cua_driver_command`."""
+
+    return get_cua_driver_command()
+
+
+def get_cua_driver_socket() -> str | None:
     """Optional cua-driver daemon socket endpoint."""
 
-    value = os.getenv(BROWSER_CUA_DRIVER_SOCKET, "").strip()
+    value = (
+        os.getenv(CUA_DRIVER_SOCKET) or os.getenv(BROWSER_CUA_DRIVER_SOCKET) or ""
+    ).strip()
     return value or None
 
 
-def get_browser_cua_driver_timeout_seconds() -> float:
-    """Per-call timeout for the local browser driver."""
+def get_browser_cua_driver_socket() -> str | None:
+    """Compatibility alias for :func:`get_cua_driver_socket`."""
 
-    raw_value = os.getenv(BROWSER_CUA_DRIVER_TIMEOUT_SECONDS, "30").strip()
+    return get_cua_driver_socket()
+
+
+def get_cua_driver_timeout_seconds() -> float:
+    """Per-call timeout for the local computer driver."""
+
+    source_name = (
+        CUA_DRIVER_TIMEOUT_SECONDS
+        if os.getenv(CUA_DRIVER_TIMEOUT_SECONDS) is not None
+        else BROWSER_CUA_DRIVER_TIMEOUT_SECONDS
+    )
+    raw_value = os.getenv(source_name, "30").strip()
     try:
         value = float(raw_value)
     except ValueError:
@@ -609,16 +647,33 @@ def get_browser_cua_driver_timeout_seconds() -> float:
         return value
     logger.warning(
         "Invalid %s=%r; falling back to 30 seconds",
-        BROWSER_CUA_DRIVER_TIMEOUT_SECONDS,
+        source_name,
         raw_value,
     )
     return 30.0
 
 
-def get_browser_cua_driver_max_elements() -> int:
+def get_browser_cua_driver_timeout_seconds() -> float:
+    """Compatibility alias for :func:`get_cua_driver_timeout_seconds`."""
+
+    return get_cua_driver_timeout_seconds()
+
+
+def get_cua_driver_max_elements() -> int:
     """Maximum AX elements requested from cua-driver per observation."""
 
-    return _get_positive_int_env(BROWSER_CUA_DRIVER_MAX_ELEMENTS, 100)
+    source_name = (
+        CUA_DRIVER_MAX_ELEMENTS
+        if os.getenv(CUA_DRIVER_MAX_ELEMENTS) is not None
+        else BROWSER_CUA_DRIVER_MAX_ELEMENTS
+    )
+    return _get_positive_int_env(source_name, 100)
+
+
+def get_browser_cua_driver_max_elements() -> int:
+    """Compatibility alias for :func:`get_cua_driver_max_elements`."""
+
+    return get_cua_driver_max_elements()
 
 
 def get_checkpoint_encoding_v2_enabled() -> bool:

@@ -990,7 +990,7 @@ describe("AppProvider websocket message routing", () => {
       const { sendMessage } = useApp()
       send = () => sendMessage("inspect browser", {
         clientMessageId: "turn-local-browser",
-        runtimeExtensions: { local_browser: {} },
+        runtimeExtensions: { local_computer: {} },
       })
       return null
     }
@@ -1010,7 +1010,7 @@ describe("AppProvider websocket message routing", () => {
 
     expect(createBody).toEqual(
       expect.objectContaining({
-        runtime_extensions: { local_browser: {} },
+        runtime_extensions: { local_computer: {} },
       })
     )
 

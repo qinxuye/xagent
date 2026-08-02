@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from xagent.core.computer.cua_driver import CuaDriverResult
-from xagent.core.computer.native_browser import NativeBrowserEnvironment
+from xagent.core.computer.native_browser import NativeComputerEnvironment
 from xagent.core.computer.schema import (
     COMPUTER_FRAME_ID_METADATA_KEY,
     COMPUTER_SESSION_ID_METADATA_KEY,
@@ -122,8 +122,8 @@ class FakeCuaDriver:
         ]
 
 
-def make_environment(driver: FakeCuaDriver) -> NativeBrowserEnvironment:
-    return NativeBrowserEnvironment(
+def make_environment(driver: FakeCuaDriver) -> NativeComputerEnvironment:
+    return NativeComputerEnvironment(
         session_id="task-1",
         workspace=object(),
         driver=driver,
@@ -139,17 +139,18 @@ def batch(frame_id: str, action: ComputerAction) -> ComputerActionBatch:
     )
 
 
-def test_native_browser_requires_explicit_enablement(
+def test_local_computer_requires_explicit_enablement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("XAGENT_NATIVE_BROWSER_ENABLED", raising=False)
+    monkeypatch.delenv("XAGENT_LOCAL_COMPUTER_ENABLED", raising=False)
 
-    with pytest.raises(RuntimeError, match="Native browser access is disabled"):
-        NativeBrowserEnvironment(session_id="task-1", workspace=object())
+    with pytest.raises(RuntimeError, match="Local computer access is disabled"):
+        NativeComputerEnvironment(session_id="task-1", workspace=object())
 
 
 @pytest.mark.asyncio
-async def test_native_browser_binds_frontmost_window_and_redacts_password() -> None:
+async def test_local_computer_binds_frontmost_window_and_redacts_password() -> None:
     driver = FakeCuaDriver()
     environment = make_environment(driver)
 
@@ -160,7 +161,13 @@ async def test_native_browser_binds_frontmost_window_and_redacts_password() -> N
     assert observation.viewport.width == 1200
     assert observation.metadata["pid"] == 200
     assert observation.metadata["window_id"] == 20
+    assert observation.environment.value == "desktop"
+    assert observation.metadata["computer_runtime_kind"] == "local_computer"
+    assert (
+        observation.metadata["available_windows"][0]["application"] == "Google Chrome"
+    )
     assert "move" not in observation.metadata["supported_actions"]
+    assert "navigate" not in observation.metadata["supported_actions"]
     assert observation.elements[0].element_id == "snapshot-1:4"
     assert observation.elements[1].label == "Sensitive input"
     assert observation.elements[1].text is None
@@ -275,44 +282,37 @@ async def test_native_browser_defensively_rejects_incomplete_drag() -> None:
 
 
 @pytest.mark.asyncio
-async def test_native_browser_navigation_and_teardown_use_driver() -> None:
+async def test_local_computer_rejects_browser_navigation_and_tears_down() -> None:
     driver = FakeCuaDriver()
-    environment = NativeBrowserEnvironment(
+    environment = NativeComputerEnvironment(
         session_id="task-1",
         workspace=object(),
         driver=driver,
         observation_store=FakeObservationStore(),  # type: ignore[arg-type]
-        navigation_allowlist=["example.com"],
     )
     first = await environment.observe()
 
-    await environment.execute(
-        batch(
-            first.frame_id,
-            ComputerAction(
-                type=ComputerActionType.NAVIGATE,
-                url="https://example.com/account",
-            ),
+    with pytest.raises(ValueError, match="not supported"):
+        await environment.execute(
+            batch(
+                first.frame_id,
+                ComputerAction(
+                    type=ComputerActionType.NAVIGATE,
+                    url="https://example.com/account",
+                ),
+            )
         )
-    )
     await environment.close()
 
-    action_calls = driver.calls[3:6]
-    assert [name for name, _payload in action_calls] == [
-        "hotkey",
-        "type_text",
-        "press_key",
-    ]
-    assert all(payload["delivery_mode"] == "foreground" for _, payload in action_calls)
     assert ("end_session", {"session": "task-1"}) in driver.calls
     assert driver.closed is True
     assert environment.closed is True
 
 
 @pytest.mark.asyncio
-async def test_native_browser_refuses_missing_or_hidden_browser() -> None:
+async def test_local_computer_refuses_missing_or_hidden_window() -> None:
     driver = FakeCuaDriver(windows=[])
-    with pytest.raises(RuntimeError, match="No local 'Google Chrome' window"):
+    with pytest.raises(RuntimeError, match="No visible application window"):
         await make_environment(driver).observe()
 
     hidden = FakeCuaDriver(
@@ -329,5 +329,36 @@ async def test_native_browser_refuses_missing_or_hidden_browser() -> None:
             }
         ]
     )
-    with pytest.raises(RuntimeError, match="No visible 'Google Chrome' window"):
+    with pytest.raises(RuntimeError, match="No visible application window"):
         await make_environment(hidden).observe()
+
+
+@pytest.mark.asyncio
+async def test_local_computer_honors_exact_user_selected_window() -> None:
+    driver = FakeCuaDriver()
+    environment = NativeComputerEnvironment(
+        session_id="task-1",
+        workspace=object(),
+        driver=driver,
+        observation_store=FakeObservationStore(),  # type: ignore[arg-type]
+        target_pid=100,
+        target_window_id=10,
+    )
+
+    # Window 10 is on another Space and is therefore not a valid selected target.
+    with pytest.raises(RuntimeError, match="no longer visible"):
+        await environment.observe()
+
+    visible_driver = FakeCuaDriver()
+    visible_driver.windows[0]["on_current_space"] = True
+    selected = NativeComputerEnvironment(
+        session_id="task-2",
+        workspace=object(),
+        driver=visible_driver,
+        observation_store=FakeObservationStore(),  # type: ignore[arg-type]
+        target_pid=100,
+        target_window_id=10,
+    )
+    observation = await selected.observe()
+    assert observation.metadata["pid"] == 100
+    assert observation.metadata["window_id"] == 10

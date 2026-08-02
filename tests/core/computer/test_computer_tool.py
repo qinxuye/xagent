@@ -90,12 +90,8 @@ async def test_computer_tool_requires_initial_screenshot_then_expected_frame() -
 
     missing_frame = await tool.run_json_async(
         {
-            "actions": [
-                {
-                    "type": "click",
-                    "target": {"point": {"x": 0.5, "y": 0.5}},
-                }
-            ]
+            "action": "click",
+            "target": {"point": {"x": 0.5, "y": 0.5}},
         }
     )
     assert missing_frame["success"] is False
@@ -104,12 +100,8 @@ async def test_computer_tool_requires_initial_screenshot_then_expected_frame() -
     acted = await tool.run_json_async(
         {
             "expected_frame_id": "frame-1",
-            "actions": [
-                {
-                    "type": "click",
-                    "target": {"point": {"x": 0.5, "y": 0.5}},
-                }
-            ],
+            "action": "click",
+            "target": {"point": {"x": 0.5, "y": 0.5}},
         }
     )
 
@@ -204,7 +196,7 @@ async def test_computer_tool_returns_validation_error_with_current_frame() -> No
 
 
 def test_computer_tool_accepts_only_one_action_per_observation() -> None:
-    with pytest.raises(ValueError, match="at most 1"):
+    with pytest.raises(ValueError, match="exactly one action object"):
         ComputerTool(
             task_id="task-1",
             workspace=object(),  # type: ignore[arg-type]
@@ -212,6 +204,31 @@ def test_computer_tool_accepts_only_one_action_per_observation() -> None:
         ).args_type().model_validate(
             {"actions": [{"type": "screenshot"}, {"type": "screenshot"}]}
         )
+
+
+def test_computer_tool_exposes_flat_action_schema_and_accepts_legacy_shape() -> None:
+    args_type = ComputerTool(
+        task_id="task-1",
+        workspace=object(),  # type: ignore[arg-type]
+        environment_factory=EnvironmentFactory(),
+    ).args_type()
+
+    schema = args_type.model_json_schema()
+    assert "action" in schema["properties"]
+    assert "actions" not in schema["properties"]
+    parsed = args_type.model_validate(
+        {
+            "expected_frame_id": "frame-1",
+            "actions": [
+                {
+                    "type": "click",
+                    "target": {"point": {"x": 0.5, "y": 0.5}},
+                }
+            ],
+        }
+    )
+    assert parsed.action.value == "click"
+    assert parsed.to_action().target is not None
 
 
 @pytest.mark.asyncio

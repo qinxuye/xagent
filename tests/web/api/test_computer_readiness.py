@@ -5,18 +5,19 @@ from types import SimpleNamespace
 import pytest
 from starlette.responses import Response
 
-from xagent.core.computer.native_browser_readiness import NativeBrowserReadiness
+from xagent.core.computer.native_browser_readiness import LocalComputerReadiness
 from xagent.web.api import computer
 
 
 @pytest.mark.asyncio
-async def test_local_browser_readiness_is_disabled_by_default(
+async def test_local_computer_readiness_is_disabled_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("XAGENT_NATIVE_BROWSER_ENABLED", raising=False)
+    monkeypatch.delenv("XAGENT_LOCAL_COMPUTER_ENABLED", raising=False)
     response = Response()
 
-    result = await computer.get_local_browser_readiness(
+    result = await computer.get_local_computer_readiness_endpoint(
         response,
         user=SimpleNamespace(is_admin=True),  # type: ignore[arg-type]
     )
@@ -27,17 +28,17 @@ async def test_local_browser_readiness_is_disabled_by_default(
 
 
 @pytest.mark.asyncio
-async def test_local_browser_readiness_does_not_probe_for_non_admin(
+async def test_local_computer_readiness_does_not_probe_for_non_admin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("XAGENT_NATIVE_BROWSER_ENABLED", "true")
 
-    async def unexpected_probe() -> NativeBrowserReadiness:
+    async def unexpected_probe() -> LocalComputerReadiness:
         raise AssertionError("driver probe must not run")
 
-    monkeypatch.setattr(computer, "get_native_browser_readiness", unexpected_probe)
+    monkeypatch.setattr(computer, "get_local_computer_readiness", unexpected_probe)
 
-    result = await computer.get_local_browser_readiness(
+    result = await computer.get_local_computer_readiness_endpoint(
         Response(),
         user=SimpleNamespace(is_admin=False),  # type: ignore[arg-type]
     )
@@ -47,11 +48,11 @@ async def test_local_browser_readiness_does_not_probe_for_non_admin(
 
 
 @pytest.mark.asyncio
-async def test_local_browser_readiness_probes_for_enabled_admin(
+async def test_local_computer_readiness_probes_for_enabled_admin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("XAGENT_NATIVE_BROWSER_ENABLED", "true")
-    expected = NativeBrowserReadiness(
+    expected = LocalComputerReadiness(
         ready=True,
         connected=True,
         attached=True,
@@ -59,12 +60,12 @@ async def test_local_browser_readiness_probes_for_enabled_admin(
         title="Inbox",
     )
 
-    async def probe() -> NativeBrowserReadiness:
+    async def probe() -> LocalComputerReadiness:
         return expected
 
-    monkeypatch.setattr(computer, "get_native_browser_readiness", probe)
+    monkeypatch.setattr(computer, "get_local_computer_readiness", probe)
 
-    result = await computer.get_local_browser_readiness(
+    result = await computer.get_local_computer_readiness_endpoint(
         Response(),
         user=SimpleNamespace(is_admin=True),  # type: ignore[arg-type]
     )

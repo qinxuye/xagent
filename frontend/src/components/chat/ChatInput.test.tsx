@@ -117,9 +117,9 @@ describe("ChatInput", () => {
     expect(onSend).not.toHaveBeenCalled()
   })
 
-  it("binds a new task to the ready local browser from the add menu", async () => {
+  it("binds a new task to a selected local computer window", async () => {
     apiRequestMock.mockImplementation((url: string) => {
-      if (url === "http://api.local/api/computer/local-browser/readiness") {
+      if (url === "http://api.local/api/computer/local-computer/readiness") {
         return Promise.resolve(
           new Response(JSON.stringify({
             ready: true,
@@ -127,6 +127,14 @@ describe("ChatInput", () => {
             attached: true,
             application: "Google Chrome",
             title: "GitHub",
+            windows: [
+              {
+                pid: 100,
+                window_id: 20,
+                application: "Google Chrome",
+                title: "GitHub",
+              },
+            ],
             permissions: {},
             issues: [],
             message: "",
@@ -147,17 +155,27 @@ describe("ChatInput", () => {
     )
 
     fireEvent.click(screen.getByLabelText("chatPage.input.actions.add"))
-    await screen.findByText("Google Chrome · GitHub")
-    fireEvent.click(screen.getByText("chatPage.input.localBrowser.label"))
+    fireEvent.click(await screen.findByText("GitHub"))
 
-    expect(screen.getByText("chatPage.input.localBrowser.chipLabel")).toBeInTheDocument()
-    fireEvent.submit(container.querySelector("form") as HTMLFormElement)
+    expect(screen.queryByText("chatPage.input.localComputer.chipLabel")).not.toBeInTheDocument()
+    expect(screen.getByRole("status", { name: "Google Chrome · GitHub" })).toBeInTheDocument()
+    const form = container.querySelector("form") as HTMLFormElement
+    expect(form).toHaveClass("rounded-2xl")
+    expect(form).not.toHaveClass("rounded-tl-none")
+    fireEvent.submit(form)
 
     await waitFor(() => {
       expect(onSend).toHaveBeenCalledWith(
         "inspect this page",
         expect.objectContaining({
-          runtimeExtensions: { local_browser: {} },
+          runtimeExtensions: {
+            local_computer: {
+              pid: 100,
+              window_id: 20,
+              application: "Google Chrome",
+              title: "GitHub",
+            },
+          },
         }),
       )
     })

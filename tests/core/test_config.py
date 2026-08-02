@@ -21,6 +21,10 @@ from xagent.config import (
     CELERY_BROKER_URL,
     CELERY_ENABLED,
     CELERY_RESULT_BACKEND,
+    CUA_DRIVER_COMMAND,
+    CUA_DRIVER_MAX_ELEMENTS,
+    CUA_DRIVER_SOCKET,
+    CUA_DRIVER_TIMEOUT_SECONDS,
     DATABASE_URL,
     DB_MAX_OVERFLOW,
     DB_POOL_SIZE,
@@ -46,6 +50,7 @@ from xagent.config import (
     HOT_PATH_TASK_CACHE_TTL_SECONDS,
     KB_COLLECTIONS_TIMEOUT_SECONDS,
     LANCEDB_PATH,
+    LOCAL_COMPUTER_ENABLED,
     MAX_TRACE_PAYLOAD_BYTES,
     MAX_UPLOAD_SIZE,
     MCP_OAUTH_ALLOW_PRIVATE_HOSTS,
@@ -115,6 +120,10 @@ from xagent.config import (
     get_celery_broker_url,
     get_celery_enabled,
     get_celery_result_backend,
+    get_cua_driver_command,
+    get_cua_driver_max_elements,
+    get_cua_driver_socket,
+    get_cua_driver_timeout_seconds,
     get_database_url,
     get_db_max_overflow,
     get_db_pool_size,
@@ -142,6 +151,7 @@ from xagent.config import (
     get_hot_path_task_cache_ttl_seconds,
     get_kb_collections_timeout_seconds,
     get_lancedb_path,
+    get_local_computer_enabled,
     get_max_trace_payload_bytes,
     get_max_upload_size_bytes,
     get_mcp_oauth_allow_private_hosts,
@@ -222,6 +232,11 @@ class TestEnvironmentVariableConstants:
         assert STORAGE_ROOT == "XAGENT_STORAGE_ROOT"
 
     def test_local_browser_constants(self):
+        assert LOCAL_COMPUTER_ENABLED == "XAGENT_LOCAL_COMPUTER_ENABLED"
+        assert CUA_DRIVER_COMMAND == "XAGENT_CUA_DRIVER_COMMAND"
+        assert CUA_DRIVER_SOCKET == "XAGENT_CUA_DRIVER_SOCKET"
+        assert CUA_DRIVER_TIMEOUT_SECONDS == "XAGENT_CUA_DRIVER_TIMEOUT_SECONDS"
+        assert CUA_DRIVER_MAX_ELEMENTS == "XAGENT_CUA_DRIVER_MAX_ELEMENTS"
         assert NATIVE_BROWSER_ENABLED == "XAGENT_NATIVE_BROWSER_ENABLED"
         assert NATIVE_BROWSER_APP_NAME == "XAGENT_NATIVE_BROWSER_APP_NAME"
         assert BROWSER_CUA_DRIVER_COMMAND == "XAGENT_BROWSER_CUA_DRIVER_COMMAND"
@@ -1613,9 +1628,14 @@ class TestTaskRuntimeHookConfig:
         assert get_task_runtime_hook_queue_timeout_seconds() == 30
 
 
-class TestLocalBrowserConfig:
+class TestLocalComputerConfig:
     def test_defaults(self, monkeypatch):
         for name in (
+            LOCAL_COMPUTER_ENABLED,
+            CUA_DRIVER_COMMAND,
+            CUA_DRIVER_SOCKET,
+            CUA_DRIVER_TIMEOUT_SECONDS,
+            CUA_DRIVER_MAX_ELEMENTS,
             NATIVE_BROWSER_ENABLED,
             NATIVE_BROWSER_APP_NAME,
             BROWSER_CUA_DRIVER_COMMAND,
@@ -1625,12 +1645,16 @@ class TestLocalBrowserConfig:
         ):
             monkeypatch.delenv(name, raising=False)
 
-        assert get_native_browser_enabled() is False
+        assert get_local_computer_enabled() is False
         assert get_native_browser_app_name() == "Google Chrome"
         assert get_browser_cua_driver_command() == "cua-driver"
         assert get_browser_cua_driver_socket() is None
         assert get_browser_cua_driver_timeout_seconds() == 30
         assert get_browser_cua_driver_max_elements() == 100
+        assert get_cua_driver_command() == "cua-driver"
+        assert get_cua_driver_socket() is None
+        assert get_cua_driver_timeout_seconds() == 30
+        assert get_cua_driver_max_elements() == 100
 
     def test_env_overrides(self, monkeypatch):
         monkeypatch.setenv(NATIVE_BROWSER_ENABLED, "true")
@@ -1646,6 +1670,22 @@ class TestLocalBrowserConfig:
         assert get_browser_cua_driver_socket() == "/tmp/cua.sock"
         assert get_browser_cua_driver_timeout_seconds() == 12.5
         assert get_browser_cua_driver_max_elements() == 250
+
+    def test_canonical_env_overrides_legacy(self, monkeypatch):
+        monkeypatch.setenv(NATIVE_BROWSER_ENABLED, "false")
+        monkeypatch.setenv(BROWSER_CUA_DRIVER_COMMAND, "/legacy/cua-driver")
+        monkeypatch.setenv(LOCAL_COMPUTER_ENABLED, "true")
+        monkeypatch.setenv(CUA_DRIVER_COMMAND, "/current/cua-driver")
+        monkeypatch.setenv(CUA_DRIVER_SOCKET, "/tmp/current.sock")
+        monkeypatch.setenv(CUA_DRIVER_TIMEOUT_SECONDS, "9")
+        monkeypatch.setenv(CUA_DRIVER_MAX_ELEMENTS, "75")
+
+        assert get_local_computer_enabled() is True
+        assert get_native_browser_enabled() is True
+        assert get_cua_driver_command() == "/current/cua-driver"
+        assert get_cua_driver_socket() == "/tmp/current.sock"
+        assert get_cua_driver_timeout_seconds() == 9
+        assert get_cua_driver_max_elements() == 75
 
     def test_invalid_values_fall_back(self, monkeypatch):
         monkeypatch.setenv(BROWSER_CUA_DRIVER_TIMEOUT_SECONDS, "0")

@@ -71,8 +71,8 @@ from .logging_config import setup_logging
 from .models.database import init_db
 from .services.a2a_protocol import A2AApiError, a2a_api_error_handler, a2a_error
 from .services.local_browser_runtime import (
-    register_local_browser_runtime,
-    unregister_local_browser_runtime,
+    register_local_computer_runtime,
+    unregister_local_computer_runtime,
 )
 from .services.orphan_upload_gc import run_orphan_upload_gc_loop
 from .services.skill_runtime import (
@@ -891,7 +891,7 @@ async def startup_event() -> None:
     # Keep built-in task-runtime providers scoped to the application lifespan.
     # Register even when disabled so task creation receives a precise 403
     # instead of an ambiguous "unknown extension" error.
-    register_local_browser_runtime()
+    register_local_computer_runtime()
 
     # Reopen process-local task admission before any trigger, command, or
     # channel ingress can create background execution work for this lifespan.
@@ -1475,7 +1475,7 @@ async def shutdown_event() -> None:
     from .services.task_runtime import shutdown_task_runtime_hook_executor
 
     shutdown_task_runtime_hook_executor()
-    unregister_local_browser_runtime()
+    unregister_local_computer_runtime()
 
     # Shutdown all sandboxes
     from .sandbox_manager import get_sandbox_manager

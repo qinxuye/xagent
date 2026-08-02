@@ -238,10 +238,11 @@ const en = {
         config: "Configure Model",
         upload: "Upload",
       },
-      localBrowser: {
-        label: "Local browser",
+      localComputer: {
+        label: "Local computer",
         chipLabel: "Computer use",
         checking: "Checking the Xagent host...",
+        chooseWindow: "Choose an application window",
         unavailable: "Not available on this Xagent host",
       },
       noModel: "No Model",

@@ -12,12 +12,14 @@ class FakeClient:
     def __init__(self, responses: dict[str, CuaDriverResult | Exception]) -> None:
         self.responses = responses
         self.closed = False
+        self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def call_tool(
         self,
         name: str,
-        _arguments: dict[str, Any],
+        arguments: dict[str, Any],
     ) -> CuaDriverResult:
+        self.calls.append((name, arguments))
         response = self.responses[name]
         if isinstance(response, Exception):
             raise response
@@ -51,9 +53,13 @@ async def test_native_browser_readiness_combines_health_and_window(
                 structured={
                     "windows": [
                         {
+                            "pid": 100,
+                            "window_id": 10,
                             "app_name": "Google Chrome",
                             "title": "Inbox",
-                            "on_current_space": True,
+                            # cua-driver 0.16 may omit Space metadata after
+                            # honoring on_screen_only at the transport layer.
+                            "on_current_space": None,
                             "is_on_screen": True,
                             "z_index": 4,
                         }
@@ -70,10 +76,12 @@ async def test_native_browser_readiness_combines_health_and_window(
     assert result.connected is True
     assert result.attached is True
     assert result.title == "Inbox"
+    assert result.windows[0].pid == 100
     assert result.permissions == {
         "accessibility": True,
         "screen_recording": True,
     }
+    assert ("list_windows", {"on_screen_only": True}) in client.calls
     assert client.closed is True
 
 
@@ -98,7 +106,7 @@ async def test_native_browser_readiness_reports_driver_failure(
 
 
 @pytest.mark.asyncio
-async def test_native_browser_readiness_reports_permissions_and_missing_browser(
+async def test_local_computer_readiness_reports_permissions_and_missing_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = FakeClient(
@@ -124,5 +132,5 @@ async def test_native_browser_readiness_reports_permissions_and_missing_browser(
     assert [issue.code for issue in result.issues] == [
         "screen_recording_permission_missing",
         "accessibility_permission_missing",
-        "browser_not_found",
+        "window_not_found",
     ]

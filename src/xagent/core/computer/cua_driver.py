@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import io
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -15,9 +14,9 @@ from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from ...config import (
-    get_browser_cua_driver_command,
-    get_browser_cua_driver_socket,
-    get_browser_cua_driver_timeout_seconds,
+    get_cua_driver_command,
+    get_cua_driver_socket,
+    get_cua_driver_timeout_seconds,
 )
 
 
@@ -62,14 +61,12 @@ class CuaDriverMCPClient:
         socket: str | None = None,
         timeout_seconds: float | None = None,
     ) -> None:
-        self.command = command or get_browser_cua_driver_command()
+        self.command = command or get_cua_driver_command()
         self.socket = (
-            get_browser_cua_driver_socket()
-            if socket is None
-            else socket.strip() or None
+            get_cua_driver_socket() if socket is None else socket.strip() or None
         )
         self.timeout_seconds = (
-            get_browser_cua_driver_timeout_seconds()
+            get_cua_driver_timeout_seconds()
             if timeout_seconds is None
             else timeout_seconds
         )
@@ -220,37 +217,38 @@ class CuaDriverMCPClient:
         )
         failure: BaseException | None = None
         try:
-            async with (
-                stdio_client(parameters, errlog=io.StringIO()) as (
-                    read_stream,
-                    write_stream,
-                ),
-                ClientSession(
-                    read_stream,
-                    write_stream,
-                    read_timeout_seconds=timedelta(seconds=self.timeout_seconds),
-                ) as session,
-            ):
-                await session.initialize()
-                if not ready.done():
-                    ready.set_result(None)
-                while True:
-                    request = await queue.get()
-                    if request is None:
-                        break
-                    if request.future.done():
-                        continue
-                    try:
-                        response = await session.call_tool(
-                            request.name,
-                            request.arguments,
-                        )
-                    except Exception as exc:
-                        if not request.future.done():
-                            request.future.set_exception(exc)
-                    else:
-                        if not request.future.done():
-                            request.future.set_result(response)
+            with open(os.devnull, "w", encoding="utf-8") as errlog:
+                async with (
+                    stdio_client(parameters, errlog=errlog) as (
+                        read_stream,
+                        write_stream,
+                    ),
+                    ClientSession(
+                        read_stream,
+                        write_stream,
+                        read_timeout_seconds=timedelta(seconds=self.timeout_seconds),
+                    ) as session,
+                ):
+                    await session.initialize()
+                    if not ready.done():
+                        ready.set_result(None)
+                    while True:
+                        request = await queue.get()
+                        if request is None:
+                            break
+                        if request.future.done():
+                            continue
+                        try:
+                            response = await session.call_tool(
+                                request.name,
+                                request.arguments,
+                            )
+                        except Exception as exc:
+                            if not request.future.done():
+                                request.future.set_exception(exc)
+                        else:
+                            if not request.future.done():
+                                request.future.set_result(response)
         except FileNotFoundError as exc:
             failure = CuaDriverError(
                 f"cua-driver executable was not found: {self.command!r}"

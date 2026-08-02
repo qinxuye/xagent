@@ -14,7 +14,7 @@ import { useFileMention, FileItem } from "@/hooks/use-file-mention";
 import { FileMentionDropdown } from "./FileMentionDropdown";
 import { toast } from "@/components/ui/sonner";
 import { useVoiceInputControls } from "@/components/voice-input-controller";
-import { LocalBrowserMenu } from "./LocalBrowserMenu";
+import { LocalComputerMenu, type LocalComputerTarget } from "./LocalBrowserMenu";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -160,7 +160,8 @@ export function ChatInput({
   const [isFocused, setIsFocused] = useState(false);
   const [showNoModelAlert, setShowNoModelAlert] = useState(false);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
-  const [localBrowserSelected, setLocalBrowserSelected] = useState(false);
+  const [localComputerTarget, setLocalComputerTarget] =
+    useState<LocalComputerTarget | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
@@ -679,7 +680,7 @@ export function ChatInput({
       const executionMode = taskConfig?.executionMode;
       const deliveryKey = JSON.stringify([
         messageToSend,
-        localBrowserSelected,
+        localComputerTarget,
         enabledFiles.map((file) => [
           file.name,
           file.size,
@@ -695,11 +696,11 @@ export function ChatInput({
       const configToSend = {
         ...agentConfig,
         clientMessageId,
-        ...(localBrowserSelected
+        ...(localComputerTarget
           ? {
               runtimeExtensions: {
                 ...(agentConfig.runtimeExtensions || {}),
-                local_browser: {},
+                local_computer: { ...localComputerTarget },
               },
             }
           : {}),
@@ -715,7 +716,7 @@ export function ChatInput({
 
       await onSend(messageToSend, configToSend);
       deliveryAttemptRef.current = null;
-      setLocalBrowserSelected(false);
+      setLocalComputerTarget(null);
       fileMention.resetMention();
 
       if (isControlled) {
@@ -868,8 +869,7 @@ export function ChatInput({
     }
   }, [filesDisabled, message, promptHighlightTerms]);
 
-  const hasTopChip =
-    selectedAgents.length > 0 || !!selectedTemplate || localBrowserSelected;
+  const hasTopChip = selectedAgents.length > 0 || !!selectedTemplate;
 
   return (
     <div className="space-y-3">
@@ -905,14 +905,6 @@ export function ChatInput({
                 label={t("chatPage.templateQuickAccess.usingTemplateLabel")}
                 value={selectedTemplate.name}
                 onRemove={onRemoveSelectedTemplate}
-                removeLabel={t("common.remove")}
-              />
-            )}
-            {localBrowserSelected && (
-              <SelectionChip
-                label={t("chatPage.input.localBrowser.chipLabel")}
-                value={t("chatPage.input.localBrowser.label")}
-                onRemove={() => setLocalBrowserSelected(false)}
                 removeLabel={t("common.remove")}
               />
             )}
@@ -1120,7 +1112,7 @@ export function ChatInput({
                     )}
                   </>
                 )}
-                {/* Add files or bind this new task to the local host browser. */}
+                {/* Add files or bind this new task to a local host window. */}
                 {(!hideFileUpload && !filesDisabled) || (!readOnlyConfig && !hideConfig) ? (
                   <>
                     {!hideFileUpload && !filesDisabled && (
@@ -1133,16 +1125,16 @@ export function ChatInput({
                         accept=".pdf,.doc,.docx,.txt,.md,.csv,.json,.xlsx,.xls,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp"
                       />
                     )}
-                    <LocalBrowserMenu
+                    <LocalComputerMenu
                       disabled={isInputBusy}
-                      selected={localBrowserSelected}
-                      onSelectedChange={setLocalBrowserSelected}
+                      selectedTarget={localComputerTarget}
+                      onTargetChange={setLocalComputerTarget}
                       onAddFiles={
                         !hideFileUpload && !filesDisabled
                           ? () => fileInputRef.current?.click()
                           : undefined
                       }
-                      showLocalBrowser={!readOnlyConfig && !hideConfig}
+                      showLocalComputer={!readOnlyConfig && !hideConfig}
                     />
                   </>
                 ) : null}

@@ -4,7 +4,7 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ....computer.browser import BrowserComputerEnvironment
 from ....computer.environment import (
@@ -16,6 +16,8 @@ from ....computer.schema import (
     ComputerActionBatch,
     ComputerActionType,
     ComputerObservation,
+    ComputerTarget,
+    NormalizedPoint,
 )
 from ....context_ref import (
     CONTEXT_REFS_KEY,
@@ -31,11 +33,17 @@ ComputerEnvironmentFactory = Callable[..., ComputerEnvironment]
 _STEP_SESSION_ARG = "_xagent_step_id"
 
 
-def _initial_screenshot_actions() -> list[ComputerAction]:
-    return [ComputerAction(type=ComputerActionType.SCREENSHOT)]
-
-
 class ComputerToolArgs(BaseModel):
+    """One flat computer action.
+
+    The public schema intentionally avoids a one-element ``actions`` array.
+    Several otherwise capable tool-calling models serialize that nested shape
+    as a string. The pre-validator still accepts the preview shape so existing
+    traces and clients remain replayable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     expected_frame_id: str | None = Field(
         default=None,
         description=(
@@ -43,46 +51,73 @@ class ComputerToolArgs(BaseModel):
             "state-changing call; omit only when requesting a fresh screenshot."
         ),
     )
-    actions: list[ComputerAction] = Field(
-        default_factory=_initial_screenshot_actions,
-        min_length=1,
-        max_length=1,
-        description=(
-            "One browser action. Coordinates are normalized from 0 to 1. Every "
-            "call returns a fresh observation before another action is planned."
-        ),
+    action: ComputerActionType = Field(
+        default=ComputerActionType.SCREENSHOT,
+        description="One action to perform. Omit for a fresh screenshot.",
     )
+    target: ComputerTarget | None = None
+    url: str | None = None
+    text: str | None = Field(default=None, max_length=65_536)
+    keys: list[str] = Field(default_factory=list, max_length=16)
+    delta_x: float = Field(default=0, ge=-1, le=1)
+    delta_y: float = Field(default=0, ge=-1, le=1)
+    start: NormalizedPoint | None = None
+    end: NormalizedPoint | None = None
+    duration_ms: int = Field(default=0, ge=0, le=30_000)
+    metadata: dict[str, Any] = Field(default_factory=dict, max_length=128)
 
     @model_validator(mode="before")
     @classmethod
-    def _lift_action_scoped_frame_id(cls, value: Any) -> Any:
-        """Normalize a common tool-call shape without weakening frame checks."""
+    def _normalize_preview_shapes(cls, value: Any) -> Any:
+        """Lift legacy nested shapes without exposing them in the JSON schema."""
 
         if not isinstance(value, Mapping):
             return value
-        raw_actions = value.get("actions")
-        if (
-            not isinstance(raw_actions, list)
-            or len(raw_actions) != 1
-            or not isinstance(raw_actions[0], Mapping)
-            or "expected_frame_id" not in raw_actions[0]
-        ):
-            return value
-
-        action = dict(raw_actions[0])
-        nested_frame_id = action.pop("expected_frame_id")
         normalized = dict(value)
-        normalized["actions"] = [action]
-        if nested_frame_id is None:
-            return normalized
-        top_level_frame_id = normalized.get("expected_frame_id")
-        if top_level_frame_id is None:
-            normalized["expected_frame_id"] = nested_frame_id
-        elif top_level_frame_id != nested_frame_id:
-            raise ValueError(
-                "action expected_frame_id conflicts with the top-level value"
-            )
+        raw_actions = normalized.pop("actions", None)
+        if raw_actions is not None:
+            if (
+                not isinstance(raw_actions, list)
+                or len(raw_actions) != 1
+                or not isinstance(raw_actions[0], Mapping)
+            ):
+                raise ValueError("actions must contain exactly one action object")
+            nested = dict(raw_actions[0])
+            nested_frame_id = nested.pop("expected_frame_id", None)
+            if nested_frame_id is not None:
+                top_level_frame_id = normalized.get("expected_frame_id")
+                if top_level_frame_id is None:
+                    normalized["expected_frame_id"] = nested_frame_id
+                elif top_level_frame_id != nested_frame_id:
+                    raise ValueError(
+                        "action expected_frame_id conflicts with the top-level value"
+                    )
+            for key, item in nested.items():
+                normalized.setdefault("action" if key == "type" else key, item)
+        raw_action = normalized.get("action")
+        if isinstance(raw_action, Mapping):
+            nested = dict(raw_action)
+            normalized.pop("action")
+            for key, item in nested.items():
+                normalized.setdefault("action" if key == "type" else key, item)
+        if "type" in normalized:
+            normalized.setdefault("action", normalized.pop("type"))
         return normalized
+
+    def to_action(self) -> ComputerAction:
+        return ComputerAction(
+            type=self.action,
+            target=self.target,
+            url=self.url,
+            text=self.text,
+            keys=self.keys,
+            delta_x=self.delta_x,
+            delta_y=self.delta_y,
+            start=self.start,
+            end=self.end,
+            duration_ms=self.duration_ms,
+            metadata=self.metadata,
+        )
 
 
 class ComputerToolResult(BaseModel):
@@ -107,12 +142,14 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         workspace: TaskWorkspace | None = None,
         environment_factory: ComputerEnvironmentFactory = BrowserComputerEnvironment,
         environment_instructions: str | None = None,
+        environment_label: str = "browser",
         headless: bool = True,
     ) -> None:
         self._visibility = ToolVisibility.PUBLIC
         self._task_id = task_id
         self._workspace = workspace
         self._environment_factory = environment_factory
+        self._environment_label = environment_label.strip() or "computer"
         self._environment_instructions = (
             environment_instructions.strip()
             if isinstance(environment_instructions, str)
@@ -131,7 +168,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
 
     @property
     def description(self) -> str:
-        return f"""Inspect and control a browser through screenshots.
+        return f"""Inspect and control {self._environment_label} through screenshots.
 
         First request a screenshot without expected_frame_id. Inspect the returned
         image, then send exactly one action with that frame_id as expected_frame_id.
@@ -148,7 +185,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
 
     @property
     def tags(self) -> list[str]:
-        return ["browser", "computer-use", "vision", "automation"]
+        return ["computer-use", "vision", "automation"]
 
     def args_type(self) -> type[BaseModel]:
         return ComputerToolArgs
@@ -169,7 +206,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         if not session_id:
             return self._error_result(
                 session_id="",
-                error="Computer tool requires a task-scoped browser session.",
+                error="Computer tool requires a task-scoped session.",
             )
         if self._workspace is None:
             return self._error_result(
@@ -178,6 +215,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
             )
         try:
             parsed = ComputerToolArgs.model_validate(raw_args)
+            action = parsed.to_action()
         except ValidationError as exc:
             environment = self._environments.get(session_id)
             current = environment.current_observation if environment else None
@@ -196,7 +234,6 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
             )
             self._environments[session_id] = environment
 
-        action = parsed.actions[0]
         screenshot_only = action.type is ComputerActionType.SCREENSHOT
         try:
             current = environment.current_observation
@@ -226,7 +263,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
                     ComputerActionBatch(
                         session_id=session_id,
                         expected_frame_id=parsed.expected_frame_id,
-                        actions=parsed.actions,
+                        actions=[action],
                     )
                 )
         except (
@@ -246,7 +283,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
             return self._error_result(
                 session_id=session_id,
                 frame_id=current.frame_id if current else None,
-                error=f"Browser computer action failed: {exc}",
+                error=f"Computer action failed: {exc}",
             )
 
         result = ComputerToolResult(
@@ -255,7 +292,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
             frame_id=observation.frame_id,
             observation=observation,
             message=(
-                f"Browser observation captured for frame {observation.frame_id}. "
+                f"Computer observation captured for frame {observation.frame_id}. "
                 "Use this exact frame_id for the next state-changing action."
             ),
         ).model_dump(mode="json", exclude_none=True)

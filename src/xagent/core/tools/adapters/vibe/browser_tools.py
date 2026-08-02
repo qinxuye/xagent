@@ -11,8 +11,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _has_local_browser_runtime(contribution: Any) -> bool:
-    from ....computer.native_browser import LOCAL_BROWSER_TASK_EXTENSION
+def _has_local_computer_runtime(contribution: Any) -> bool:
+    from ....computer.native_browser import (
+        LEGACY_LOCAL_BROWSER_TASK_EXTENSION,
+        LOCAL_COMPUTER_TASK_EXTENSION,
+    )
     from ....task_runtime import (
         TaskRuntimeContribution,
         full_task_runtime_contribution,
@@ -22,7 +25,8 @@ def _has_local_browser_runtime(contribution: Any) -> bool:
         return False
     full_contribution = full_task_runtime_contribution(contribution)
     return any(
-        provider_name == LOCAL_BROWSER_TASK_EXTENSION
+        provider_name
+        in {LOCAL_COMPUTER_TASK_EXTENSION, LEGACY_LOCAL_BROWSER_TASK_EXTENSION}
         and any(
             getattr(tool, "name", None) == "computer"
             for tool in provider_contribution.tools
@@ -39,12 +43,12 @@ async def create_browser_tools(config: "BaseToolConfig") -> List[Any]:
     if not config.get_browser_tools_enabled():
         return []
 
-    # A bound Local browser task contributes its own ``computer`` instance.
+    # A bound Local computer task contributes its own ``computer`` instance.
     # Suppress the Playwright browser family as one unit so the runtime tool
     # does not collide with the core tool or accidentally expose a second,
     # unrelated browser to the model.
     contribution = config.get_task_runtime_contribution()
-    if _has_local_browser_runtime(contribution):
+    if _has_local_computer_runtime(contribution):
         return []
 
     task_id = config.get_task_id()
@@ -57,3 +61,6 @@ async def create_browser_tools(config: "BaseToolConfig") -> List[Any]:
     except Exception as e:
         logger.warning(f"Failed to create browser tools: {e}")
         return []
+
+
+_has_local_browser_runtime = _has_local_computer_runtime

@@ -3,16 +3,14 @@ from __future__ import annotations
 import asyncio
 import math
 import struct
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 from ...config import (
-    get_browser_cua_driver_max_elements,
-    get_native_browser_app_name,
-    get_native_browser_enabled,
+    get_cua_driver_max_elements,
+    get_local_computer_enabled,
 )
 from .cua_driver import (
     CuaDriverClientProtocol,
@@ -45,7 +43,9 @@ from .schema import (
 from .store import ObservationStore
 
 _SUPPORTED_ACTIONS = tuple(
-    action for action in ComputerActionType if action is not ComputerActionType.MOVE
+    action
+    for action in ComputerActionType
+    if action not in {ComputerActionType.MOVE, ComputerActionType.NAVIGATE}
 )
 _ACTION_RESULT_FIELDS = (
     "path",
@@ -57,11 +57,14 @@ _ACTION_RESULT_FIELDS = (
 )
 
 CuaDriverClientFactory = Callable[[], CuaDriverClientProtocol]
-LOCAL_BROWSER_TASK_EXTENSION = "local_browser"
+LOCAL_COMPUTER_TASK_EXTENSION = "local_computer"
+LEGACY_LOCAL_BROWSER_TASK_EXTENSION = "local_browser"
+# Import compatibility for code written against the preview name.
+LOCAL_BROWSER_TASK_EXTENSION = LEGACY_LOCAL_BROWSER_TASK_EXTENSION
 
 
 @dataclass(frozen=True)
-class NativeBrowserWindow:
+class NativeComputerWindow:
     pid: int
     window_id: int
     app_name: str
@@ -72,15 +75,16 @@ class NativeBrowserWindow:
     height: float
     z_index: int
     is_on_screen: bool
-    on_current_space: bool
+    on_current_space: bool | None
 
 
-class NativeBrowserEnvironment(ComputerEnvironment):
-    """Control one local browser window through cua-driver's native MCP tools.
+class NativeComputerEnvironment(ComputerEnvironment):
+    """Control one local application window through cua-driver's native tools.
 
-    The first observation binds the task to one concrete ``(pid, window_id)``.
-    That binding is intentionally sticky: if the window closes, the environment
-    fails instead of silently taking over another browser window.
+    A caller may provide one exact ``(pid, window_id)`` selected by the user.
+    Otherwise the first observation chooses the frontmost visible window. The
+    resulting binding is sticky: if the window closes, the environment fails
+    instead of silently taking over another application.
     """
 
     def __init__(
@@ -91,9 +95,9 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         driver: CuaDriverClientProtocol | None = None,
         driver_factory: CuaDriverClientFactory | None = None,
         observation_store: ObservationStore | None = None,
+        target_pid: int | None = None,
+        target_window_id: int | None = None,
         browser_app_name: str | None = None,
-        navigation_allowlist: Sequence[str] | None = None,
-        navigation_denylist: Sequence[str] | None = None,
         max_elements: int | None = None,
         headless: bool = False,
     ) -> None:
@@ -101,31 +105,32 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         super().__init__(session_id)
         if driver is not None and driver_factory is not None:
             raise ValueError("provide either driver or driver_factory, not both")
-        if driver is None and not get_native_browser_enabled():
+        if driver is None and not get_local_computer_enabled():
             raise RuntimeError(
-                "Native browser access is disabled. Set "
-                "XAGENT_NATIVE_BROWSER_ENABLED=true only on a trusted "
+                "Local computer access is disabled. Set "
+                "XAGENT_LOCAL_COMPUTER_ENABLED=true only on a trusted "
                 "interactive Xagent host."
             )
         self.workspace = workspace
         self.observation_store = observation_store or ObservationStore(workspace)
-        self.browser_app_name = (
-            browser_app_name or get_native_browser_app_name()
-        ).strip()
-        if not self.browser_app_name:
-            raise ValueError("native browser application name must not be empty")
-        self.navigation_allowlist = _normalize_host_patterns(navigation_allowlist)
-        self.navigation_denylist = _normalize_host_patterns(navigation_denylist)
+        if (target_pid is None) != (target_window_id is None):
+            raise ValueError(
+                "target_pid and target_window_id must be provided together"
+            )
+        self.target_pid = target_pid
+        self.target_window_id = target_window_id
+        # Only legacy callers pass this value. Canonical Local computer tasks
+        # select an exact window or use the frontmost visible application.
+        self.preferred_app_name = (browser_app_name or "").strip() or None
         self.max_elements = (
-            get_browser_cua_driver_max_elements()
-            if max_elements is None
-            else max_elements
+            get_cua_driver_max_elements() if max_elements is None else max_elements
         )
         if self.max_elements <= 0:
-            raise ValueError("native browser max_elements must be positive")
+            raise ValueError("local computer max_elements must be positive")
         self._driver = driver
         self._driver_factory = driver_factory or CuaDriverMCPClient
-        self._target: NativeBrowserWindow | None = None
+        self._target: NativeComputerWindow | None = None
+        self._visible_windows: list[NativeComputerWindow] = []
         self._session_started = False
         self._last_action_result: dict[str, Any] | None = None
 
@@ -157,7 +162,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
 
     async def _execute(self, batch: ComputerActionBatch) -> ComputerObservation:
         if len(batch.actions) != 1:
-            raise ValueError("native browser executes exactly one action per frame")
+            raise ValueError("local computer executes exactly one action per frame")
         action = batch.actions[0]
         supported_actions = (
             self.current_observation.metadata.get("supported_actions")
@@ -169,7 +174,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             or action.type.value not in supported_actions
         ):
             raise ValueError(
-                f"{action.type.value} is not supported by the native browser runtime"
+                f"{action.type.value} is not supported by the local computer runtime"
             )
         await self._execute_action(action)
         if action.type not in {ComputerActionType.SCREENSHOT, ComputerActionType.WAIT}:
@@ -193,10 +198,10 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             self._driver = self._driver_factory()
         return self._driver
 
-    async def _select_target(self) -> NativeBrowserWindow:
+    async def _select_target(self) -> NativeComputerWindow:
         result = await self._get_driver().call_tool(
             "list_windows",
-            {"on_screen_only": False},
+            {"on_screen_only": True},
         )
         raw_windows = result.structured.get("windows")
         if not isinstance(raw_windows, list):
@@ -207,30 +212,44 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             if isinstance(raw, Mapping)
             and (parsed := self._parse_window(raw)) is not None
         ]
-        app_name = self.browser_app_name.casefold()
-        matches = [
-            window for window in windows if window.app_name.casefold() == app_name
-        ]
-        if not matches:
-            raise ComputerTargetNotFoundError(
-                f"No local {self.browser_app_name!r} window is running. Open the "
-                "browser on the Xagent host, then request a fresh screenshot."
-            )
-        visible_matches = [
+        visible = [
             window
-            for window in matches
-            if window.on_current_space and window.is_on_screen
+            for window in windows
+            if window.is_on_screen and window.on_current_space is not False
         ]
-        if not visible_matches:
-            raise ComputerTargetNotFoundError(
-                f"No visible {self.browser_app_name!r} window is on the current "
-                "desktop. Restore and show the intended window, then request a "
-                "fresh screenshot."
+        self._visible_windows = visible
+        if self.target_pid is not None and self.target_window_id is not None:
+            exact = next(
+                (
+                    window
+                    for window in visible
+                    if window.pid == self.target_pid
+                    and window.window_id == self.target_window_id
+                ),
+                None,
             )
-        return max(visible_matches, key=lambda window: window.z_index)
+            if exact is None:
+                raise ComputerTargetNotFoundError(
+                    "The selected local computer window is no longer visible. "
+                    "Choose the window again before starting a new task."
+                )
+            return exact
+        if self.preferred_app_name:
+            preferred = [
+                window
+                for window in visible
+                if window.app_name.casefold() == self.preferred_app_name.casefold()
+            ]
+            if preferred:
+                return max(preferred, key=lambda window: window.z_index)
+        if not visible:
+            raise ComputerTargetNotFoundError(
+                "No visible application window is available on the Xagent host."
+            )
+        return max(visible, key=lambda window: window.z_index)
 
     @staticmethod
-    def _parse_window(raw: Mapping[str, Any]) -> NativeBrowserWindow | None:
+    def _parse_window(raw: Mapping[str, Any]) -> NativeComputerWindow | None:
         bounds = raw.get("bounds")
         if not isinstance(bounds, Mapping):
             return None
@@ -239,7 +258,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             height = float(bounds["height"])
             if width <= 0 or height <= 0:
                 return None
-            return NativeBrowserWindow(
+            return NativeComputerWindow(
                 pid=int(raw["pid"]),
                 window_id=int(raw["window_id"]),
                 app_name=str(raw["app_name"]),
@@ -254,7 +273,11 @@ class NativeBrowserEnvironment(ComputerEnvironment):
                 height=height,
                 z_index=int(raw.get("z_index") or 0),
                 is_on_screen=raw.get("is_on_screen") is True,
-                on_current_space=raw.get("on_current_space") is True,
+                on_current_space=(
+                    raw.get("on_current_space")
+                    if isinstance(raw.get("on_current_space"), bool)
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -274,7 +297,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         )
         if not result.image_bytes:
             raise CuaDriverError(
-                "cua-driver could not capture the bound browser window. Check "
+                "cua-driver could not capture the bound application window. Check "
                 "Screen Recording permission with `cua-driver health_report`."
             )
         mime_type = result.image_mime_type or str(
@@ -295,7 +318,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             viewport=viewport,
             text_fallback=(f"Current local {target.app_name} window screenshot."),
             metadata={
-                "browser_runtime_kind": "native_browser",
+                "computer_runtime_kind": "local_computer",
                 "pid": target.pid,
                 "window_id": target.window_id,
             },
@@ -307,7 +330,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         )
         raw_element_count = self._optional_int(result.structured.get("element_count"))
         metadata: dict[str, Any] = {
-            "browser_runtime_kind": "native_browser",
+            "computer_runtime_kind": "local_computer",
             "native_driver": "cua-driver",
             "application": target.app_name,
             "pid": target.pid,
@@ -316,6 +339,15 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             "delivery_mode": "background",
             **computer_input_metadata(host_computer_input_platform()),
             "supported_actions": [action.value for action in _SUPPORTED_ACTIONS],
+            "available_windows": [
+                {
+                    "pid": window.pid,
+                    "window_id": window.window_id,
+                    "application": window.app_name,
+                    "title": window.title,
+                }
+                for window in self._visible_windows[:20]
+            ],
         }
         if result.structured.get("degraded") is True:
             metadata[ELEMENT_EXTRACTION_FAILED_KEY] = True
@@ -343,7 +375,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         return ComputerObservation(
             session_id=self.session_id,
             frame_id=frame_id,
-            environment=ComputerEnvironmentType.BROWSER,
+            environment=ComputerEnvironmentType.DESKTOP,
             viewport=viewport,
             screenshot=screenshot,
             elements=elements,
@@ -368,7 +400,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         self,
         raw_elements: list[Any],
         *,
-        target: NativeBrowserWindow,
+        target: NativeComputerWindow,
     ) -> list[ComputerElement]:
         elements: list[ComputerElement] = []
         for raw in raw_elements[:MAX_OBSERVATION_ELEMENTS]:
@@ -448,7 +480,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
     def _normalize_element_bounds(
         raw: Mapping[str, Any],
         *,
-        target: NativeBrowserWindow,
+        target: NativeComputerWindow,
     ) -> NormalizedRect | None:
         try:
             x = float(raw["x"])
@@ -502,10 +534,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
                 "verified": True,
             }
             return
-        if action.type is ComputerActionType.NAVIGATE:
-            await self._navigate(action.url or "")
-            return
-
         target = self._require_target()
         common: dict[str, Any] = {
             "session": self.session_id,
@@ -599,31 +627,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
                 },
             )
             return
-        raise ValueError(f"unsupported native browser action: {action.type.value}")
-
-    async def _navigate(self, raw_url: str) -> None:
-        url = self._validate_navigation_url(raw_url)
-        target = self._require_target()
-        common = {
-            "session": self.session_id,
-            "pid": target.pid,
-            "window_id": target.window_id,
-            "delivery_mode": "foreground",
-        }
-        await self._call_action(
-            "hotkey",
-            {**common, "keys": [self._primary_driver_modifier(), "l"]},
-            remember=False,
-        )
-        await self._call_action(
-            "type_text",
-            {**common, "text": url},
-            remember=False,
-        )
-        await self._call_action(
-            "press_key",
-            {**common, "key": "return"},
-        )
+        raise ValueError(f"unsupported local computer action: {action.type.value}")
 
     async def _call_action(
         self,
@@ -690,7 +694,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
     def _point_pixels(self, point: NormalizedPoint) -> tuple[float, float]:
         observation = self.current_observation
         if observation is None:
-            raise RuntimeError("native browser action requires a current observation")
+            raise RuntimeError("local computer action requires a current observation")
         return (
             point.x * observation.viewport.width,
             point.y * observation.viewport.height,
@@ -711,24 +715,10 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             )
         return element
 
-    def _require_target(self) -> NativeBrowserWindow:
+    def _require_target(self) -> NativeComputerWindow:
         if self._target is None:
-            raise RuntimeError("native browser window has not been selected")
+            raise RuntimeError("local computer window has not been selected")
         return self._target
-
-    def _validate_navigation_url(self, raw_url: str) -> str:
-        url = raw_url.strip()
-        parsed = urlsplit(url)
-        if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
-            raise ValueError("native browser navigation requires an absolute HTTP URL")
-        reason = _navigation_block_reason(
-            url,
-            allowlist=self.navigation_allowlist,
-            denylist=self.navigation_denylist,
-        )
-        if reason is not None:
-            raise ValueError(reason)
-        return url
 
     def _delivery_mode(self, action: ComputerAction) -> str:
         requested = str(action.metadata.get("delivery_mode") or "").strip().lower()
@@ -785,42 +775,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             return None
 
 
-def _normalize_host_patterns(patterns: Sequence[str] | None) -> tuple[str, ...]:
-    if not patterns:
-        return ()
-    return tuple(
-        dict.fromkeys(
-            normalized
-            for pattern in patterns
-            if (normalized := str(pattern).strip().lower().lstrip("."))
-        )
-    )
-
-
-def _host_matches(host: str, patterns: Sequence[str]) -> bool:
-    candidate = host.strip().lower().rstrip(".")
-    return any(
-        candidate == pattern or candidate.endswith(f".{pattern}")
-        for pattern in patterns
-    )
-
-
-def _navigation_block_reason(
-    raw_url: str,
-    *,
-    allowlist: Sequence[str],
-    denylist: Sequence[str],
-) -> str | None:
-    host = urlsplit(raw_url).hostname
-    if host is None:
-        return "Native browser navigation requires a network host."
-    if _host_matches(host, denylist):
-        return f"Navigation to {host} is blocked by the configured policy."
-    if allowlist and not _host_matches(host, allowlist):
-        return f"Navigation to {host} is outside the configured allowlist."
-    return None
-
-
 def _optional_active_url(structured: Mapping[str, Any]) -> str | None:
     for key in ("active_url", "url"):
         value = structured.get(key)
@@ -830,3 +784,9 @@ def _optional_active_url(structured: Mapping[str, Any]) -> str | None:
         if normalized.startswith(("http://", "https://", "about:")):
             return normalized
     return None
+
+
+# Compatibility aliases for the preview API. They intentionally point to the
+# generalized implementation instead of preserving Chrome-only semantics.
+NativeBrowserWindow = NativeComputerWindow
+NativeBrowserEnvironment = NativeComputerEnvironment

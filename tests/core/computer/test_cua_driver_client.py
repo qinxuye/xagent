@@ -79,7 +79,8 @@ async def test_cua_driver_client_serializes_calls_on_owned_worker(
     sessions: list[FakeSession] = []
 
     @asynccontextmanager
-    async def fake_stdio(*_args: Any, **_kwargs: Any):
+    async def fake_stdio(*_args: Any, **kwargs: Any):
+        assert kwargs["errlog"].fileno() >= 0
         yield object(), object()
 
     def fake_session(*args: Any, **kwargs: Any) -> FakeSession:

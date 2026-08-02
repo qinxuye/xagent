@@ -238,10 +238,11 @@ const zh = {
         config: "配置模型",
         upload: "上传文件",
       },
-      localBrowser: {
-        label: "本地浏览器",
+      localComputer: {
+        label: "本机电脑",
         chipLabel: "操作电脑",
         checking: "正在检查 Xagent 主机...",
+        chooseWindow: "选择一个应用窗口",
         unavailable: "此 Xagent 主机不可用",
       },
       noModel: "暂无模型",
