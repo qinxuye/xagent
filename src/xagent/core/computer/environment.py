@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 
-from .schema import ComputerActionBatch, ComputerObservation
+from .schema import (
+    ComputerActionBatch,
+    ComputerElementSurface,
+    ComputerObservation,
+)
 
 
 class ComputerEnvironmentError(RuntimeError):
@@ -127,7 +131,7 @@ class ComputerEnvironment(ABC):
                 actual_surface = elements_by_id[target_id].surface
                 if (
                     actual_surface is not None
-                    and actual_surface.value != "unknown"
+                    and actual_surface is not ComputerElementSurface.UNKNOWN
                     and target.surface is None
                 ):
                     raise ComputerTargetNotFoundError(

@@ -515,12 +515,11 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         ]
         suffix = source_path.suffix or ".png"
         destination = output_dir / f"computer-screenshot-{frame_key}{suffix}"
-        if (
-            destination.exists()
-            and destination.read_bytes() != source_path.read_bytes()
-        ):
-            content_key = hashlib.sha256(source_path.read_bytes()).hexdigest()[:12]
-            destination = output_dir / f"computer-screenshot-{content_key}{suffix}"
+        if destination.exists():
+            source_bytes = source_path.read_bytes()
+            if destination.read_bytes() != source_bytes:
+                content_key = hashlib.sha256(source_bytes).hexdigest()[:12]
+                destination = output_dir / f"computer-screenshot-{content_key}{suffix}"
         if not destination.exists():
             shutil.copy2(source_path, destination)
         file_ref = build_workspace_file_ref(
