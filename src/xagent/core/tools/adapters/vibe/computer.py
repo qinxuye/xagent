@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import shutil
 from collections.abc import Callable, Mapping
-from typing import Any
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ....computer.browser import BrowserComputerEnvironment
 from ....computer.environment import (
@@ -16,10 +21,18 @@ from ....computer.schema import (
     ComputerActionBatch,
     ComputerActionType,
     ComputerObservation,
+    ComputerPerceptionMode,
+    ComputerTarget,
+    NormalizedPoint,
 )
 from ....context_ref import (
     CONTEXT_REFS_KEY,
     SUPERSEDES_SCOPE_KEY,
+)
+from ....file_ref import (
+    build_file_id_ref,
+    build_workspace_file_ref,
+    sanitize_file_ref_for_context,
 )
 from ....workspace import TaskWorkspace
 from .base import AbstractBaseTool, ToolCategory, ToolVisibility
@@ -29,60 +42,129 @@ logger = logging.getLogger(__name__)
 
 ComputerEnvironmentFactory = Callable[..., ComputerEnvironment]
 _STEP_SESSION_ARG = "_xagent_step_id"
+_CLICK_STALL_RADIUS = 0.05
+_CLICK_STALL_LIMIT = 3
+_CLICK_HISTORY_LIMIT = 8
 
 
-def _initial_screenshot_actions() -> list[ComputerAction]:
-    return [ComputerAction(type=ComputerActionType.SCREENSHOT)]
+@dataclass(frozen=True)
+class _ClickAttempt:
+    x: float
+    y: float
+    target_key: tuple[Any, ...]
 
 
 class ComputerToolArgs(BaseModel):
+    """One flat computer action.
+
+    The public schema intentionally avoids a one-element ``actions`` array.
+    Several otherwise capable tool-calling models serialize that nested shape
+    as a string. The pre-validator still accepts the preview shape so existing
+    traces and clients remain replayable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     expected_frame_id: str | None = Field(
         default=None,
         description=(
             "Frame ID that the action was planned against. Required for every "
-            "state-changing call; omit only when requesting a fresh screenshot."
+            "state-changing call; omit for observe or screenshot."
         ),
     )
-    actions: list[ComputerAction] = Field(
-        default_factory=_initial_screenshot_actions,
-        min_length=1,
-        max_length=1,
+    action: ComputerActionType = Field(
+        default=ComputerActionType.OBSERVE,
         description=(
-            "One browser action. Coordinates are normalized from 0 to 1. Every "
-            "call returns a fresh observation before another action is planned."
+            "One action to perform. Omit or use observe for internal visual "
+            "context. Use screenshot to create a user-visible image artifact."
         ),
     )
+    target: ComputerTarget | None = Field(
+        default=None,
+        description=(
+            "Target for click, double_click, move, or replace_text. Use "
+            '{"element_id": "<exact id>", "surface": "<exact surface>"} for '
+            "a semantic element whose observation exposes surface, or "
+            '{"point": {"x": <0..1>, "y": <0..1>}} for normalized coordinates.'
+        ),
+    )
+    url: str | None = None
+    text: str | None = Field(default=None, max_length=65_536)
+    keys: list[str] = Field(default_factory=list, max_length=16)
+    delta_x: float = Field(default=0, ge=-1, le=1)
+    delta_y: float = Field(default=0, ge=-1, le=1)
+    start: NormalizedPoint | None = None
+    end: NormalizedPoint | None = None
+    duration_ms: int = Field(default=0, ge=0, le=30_000)
+    metadata: dict[str, Any] = Field(default_factory=dict, max_length=128)
 
     @model_validator(mode="before")
     @classmethod
-    def _lift_action_scoped_frame_id(cls, value: Any) -> Any:
-        """Normalize a common tool-call shape without weakening frame checks."""
+    def _normalize_preview_shapes(cls, value: Any) -> Any:
+        """Lift legacy nested shapes without exposing them in the JSON schema."""
 
         if not isinstance(value, Mapping):
             return value
-        raw_actions = value.get("actions")
-        if (
-            not isinstance(raw_actions, list)
-            or len(raw_actions) != 1
-            or not isinstance(raw_actions[0], Mapping)
-            or "expected_frame_id" not in raw_actions[0]
-        ):
-            return value
-
-        action = dict(raw_actions[0])
-        nested_frame_id = action.pop("expected_frame_id")
         normalized = dict(value)
-        normalized["actions"] = [action]
-        if nested_frame_id is None:
-            return normalized
-        top_level_frame_id = normalized.get("expected_frame_id")
-        if top_level_frame_id is None:
-            normalized["expected_frame_id"] = nested_frame_id
-        elif top_level_frame_id != nested_frame_id:
-            raise ValueError(
-                "action expected_frame_id conflicts with the top-level value"
+        raw_actions = normalized.pop("actions", None)
+        if raw_actions is not None:
+            if (
+                not isinstance(raw_actions, list)
+                or len(raw_actions) != 1
+                or not isinstance(raw_actions[0], Mapping)
+            ):
+                raise ValueError("actions must contain exactly one action object")
+            nested = dict(raw_actions[0])
+            nested_frame_id = nested.pop("expected_frame_id", None)
+            if nested_frame_id is not None:
+                top_level_frame_id = normalized.get("expected_frame_id")
+                if top_level_frame_id is None:
+                    normalized["expected_frame_id"] = nested_frame_id
+                elif top_level_frame_id != nested_frame_id:
+                    raise ValueError(
+                        "action expected_frame_id conflicts with the top-level value"
+                    )
+            for key, item in nested.items():
+                normalized.setdefault("action" if key == "type" else key, item)
+        raw_action = normalized.get("action")
+        if isinstance(raw_action, Mapping):
+            nested = dict(raw_action)
+            normalized.pop("action")
+            for key, item in nested.items():
+                normalized.setdefault("action" if key == "type" else key, item)
+        if "type" in normalized:
+            normalized.setdefault("action", normalized.pop("type"))
+        raw_target = normalized.get("target")
+        if isinstance(raw_target, str):
+            # Tool-calling models commonly either copy an exposed element_id
+            # directly or JSON-encode the nested target object as a string. Keep
+            # the canonical action protocol structured while accepting both
+            # unambiguous model-facing representations at this boundary.
+            try:
+                decoded_target = json.loads(raw_target)
+            except json.JSONDecodeError:
+                decoded_target = None
+            normalized["target"] = (
+                dict(decoded_target)
+                if isinstance(decoded_target, Mapping)
+                else {"element_id": raw_target}
             )
         return normalized
+
+    def to_action(self) -> ComputerAction:
+        return ComputerAction(
+            type=self.action,
+            target=self.target,
+            url=self.url,
+            text=self.text,
+            keys=self.keys,
+            delta_x=self.delta_x,
+            delta_y=self.delta_y,
+            start=self.start,
+            end=self.end,
+            duration_ms=self.duration_ms,
+            metadata=self.metadata,
+        )
 
 
 class ComputerToolResult(BaseModel):
@@ -90,6 +172,13 @@ class ComputerToolResult(BaseModel):
     session_id: str
     frame_id: str | None = None
     observation: ComputerObservation | None = None
+    file_ref: dict[str, Any] | None = None
+    inline_markdown: str | None = None
+    delivery: Literal[
+        "none",
+        "private_observation",
+        "user_visible_artifact",
+    ] = "none"
     message: str = ""
     error: str = ""
 
@@ -106,14 +195,29 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         task_id: str | None = None,
         workspace: TaskWorkspace | None = None,
         environment_factory: ComputerEnvironmentFactory = BrowserComputerEnvironment,
+        environment_instructions: str | None = None,
+        environment_label: str = "browser",
+        perception_mode: ComputerPerceptionMode | str = ComputerPerceptionMode.AUTO,
         headless: bool = True,
     ) -> None:
         self._visibility = ToolVisibility.PUBLIC
         self._task_id = task_id
         self._workspace = workspace
         self._environment_factory = environment_factory
+        self._environment_label = environment_label.strip() or "computer"
+        self._perception_mode = ComputerPerceptionMode(perception_mode)
+        self._environment_instructions = (
+            environment_instructions.strip()
+            if isinstance(environment_instructions, str)
+            and environment_instructions.strip()
+            else (
+                "This is a new ephemeral browser. It does not inherit the user's "
+                "existing browser profile or signed-in sessions."
+            )
+        )
         self._headless = headless
         self._environments: dict[str, ComputerEnvironment] = {}
+        self._recent_clicks: dict[str, list[_ClickAttempt]] = {}
 
     @property
     def name(self) -> str:
@@ -121,25 +225,68 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
 
     @property
     def description(self) -> str:
-        return """Inspect and control an isolated temporary browser through screenshots.
+        perception_instructions = {
+            ComputerPerceptionMode.VISION: (
+                "Plan from the screenshot and use normalized coordinates. "
+                "Semantic elements are intentionally not exposed in this mode."
+            ),
+            ComputerPerceptionMode.SEMANTIC: (
+                "Prefer an exact element_id from the current observation. Use "
+                "the screenshot to verify results and use coordinates only when "
+                "no matching semantic element is exposed."
+            ),
+            ComputerPerceptionMode.AUTO: (
+                "Use an exact element_id when the current observation exposes a "
+                "matching semantic element; otherwise inspect the screenshot and "
+                "use normalized coordinates. Never invent an element_id."
+            ),
+        }[self._perception_mode]
+        return f"""Inspect and control {self._environment_label} through fresh observations.
 
-        First request a screenshot without expected_frame_id. Inspect the returned
-        image, then send exactly one action with that frame_id as expected_frame_id.
-        Every successful call returns a fresh screenshot and frame_id; do not request
-        a second screenshot after an action.
+        First request an observation by omitting action or using action=observe.
+        Inspect the returned image, then send exactly one action with that frame_id
+        as expected_frame_id. Every successful call returns a fresh internal
+        observation and frame_id, so do not call observe again after an action.
+
+        observe and automatic post-action observations are private model context.
+        screenshot is different: it captures the current state as a user-visible
+        image artifact and returns a trusted file_ref plus exact inline_markdown.
+        Use screenshot when an image must be delivered, and include the returned
+        inline_markdown verbatim in final_answer. Do not claim an image was delivered
+        unless screenshot returned that public artifact.
+
+        The latest observation's `metadata.supported_actions` list is authoritative.
+        Never call an action that is absent. For browser URL changes, call the
+        atomic `navigate` action when it is present; never simulate navigation by
+        clicking, typing, or pressing keys in the address bar. If `navigate` is
+        absent, explain that this exact window cannot navigate safely.
+
+        Perception mode is {self._perception_mode.value}. {perception_instructions}
 
         Coordinates are normalized: (0, 0) is the viewport top-left and (1, 1)
-        is the bottom-right. Prefer element_id when the observation exposes one.
+        is the bottom-right.
+        Never keep clicking the same small region when the requested state does
+        not appear. After a click, inspect the returned observation and address
+        the newly visible semantic element or a clearly different coordinate.
+        For a semantic target, send
+        `target={{"element_id": "<exact element_id>", "surface": "<exact surface>"}}`.
+        When a semantic element exposes `surface`, copying it is mandatory; the
+        action is refused before delivery when surface is omitted or mismatched.
+        `application_chrome` means browser/application controls, not website
+        content. If a document goal has no matching `document` element, use the
+        screenshot and a coordinate instead of a similarly named application
+        control. For a coordinate target,
+        send `target={{"point": {{"x": 0.5, "y": 0.5}}}}`. Do not send a bare
+        string or null as the target of a target-requiring action.
         Use `type` to insert at the current caret and `replace_text` with a target
         to replace a field. Keyboard chords use keys such as ["CTRL", "A"].
 
-        This is a new ephemeral browser. It does not inherit the user's existing
-        browser profile or signed-in sessions.
+        {self._environment_instructions}
         """
 
     @property
     def tags(self) -> list[str]:
-        return ["browser", "computer-use", "vision", "automation"]
+        return ["computer-use", "vision", "automation"]
 
     def args_type(self) -> type[BaseModel]:
         return ComputerToolArgs
@@ -160,7 +307,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         if not session_id:
             return self._error_result(
                 session_id="",
-                error="Computer tool requires a task-scoped browser session.",
+                error="Computer tool requires a task-scoped session.",
             )
         if self._workspace is None:
             return self._error_result(
@@ -169,6 +316,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
             )
         try:
             parsed = ComputerToolArgs.model_validate(raw_args)
+            action = parsed.to_action()
         except ValidationError as exc:
             environment = self._environments.get(session_id)
             current = environment.current_observation if environment else None
@@ -187,21 +335,23 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
             )
             self._environments[session_id] = environment
 
-        action = parsed.actions[0]
-        screenshot_only = action.type is ComputerActionType.SCREENSHOT
+        observation_only = action.type in {
+            ComputerActionType.OBSERVE,
+            ComputerActionType.SCREENSHOT,
+        }
         try:
             current = environment.current_observation
             if current is None:
-                if not screenshot_only:
+                if not observation_only:
                     return self._error_result(
                         session_id=session_id,
                         error=(
-                            "No browser frame exists yet. Request a screenshot "
+                            "No computer frame exists yet. Request an observation "
                             "before planning another action."
                         ),
                     )
                 observation = await environment.observe()
-            elif screenshot_only:
+            elif observation_only:
                 observation = await environment.observe()
             elif parsed.expected_frame_id is None:
                 return self._error_result(
@@ -213,13 +363,54 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
                     ),
                 )
             else:
+                supported_actions = current.metadata.get("supported_actions")
+                if (
+                    isinstance(supported_actions, list)
+                    and action.type.value not in supported_actions
+                ):
+                    unsupported_actions = current.metadata.get("unsupported_actions")
+                    reason = (
+                        unsupported_actions.get(action.type.value)
+                        if isinstance(unsupported_actions, Mapping)
+                        else None
+                    )
+                    detail = f": {reason}" if reason else ""
+                    return self._error_result(
+                        session_id=session_id,
+                        frame_id=current.frame_id,
+                        error=(
+                            f"{action.type.value} is not supported by the current "
+                            f"computer observation{detail}. Do not retry or work "
+                            "around this capability through another tool."
+                        ),
+                    )
+                if parsed.expected_frame_id == current.frame_id:
+                    repeated_click_error = self._record_click_attempt(
+                        session_id,
+                        action,
+                        current,
+                    )
+                    if repeated_click_error is not None:
+                        return self._error_result(
+                            session_id=session_id,
+                            frame_id=current.frame_id,
+                            error=repeated_click_error,
+                        )
                 observation = await environment.execute(
                     ComputerActionBatch(
                         session_id=session_id,
                         expected_frame_id=parsed.expected_frame_id,
-                        actions=parsed.actions,
+                        actions=[action],
                     )
                 )
+                if action.type not in {
+                    ComputerActionType.CLICK,
+                    ComputerActionType.DOUBLE_CLICK,
+                } or (
+                    current.active_url != observation.active_url
+                    or current.title != observation.title
+                ):
+                    self._recent_clicks.pop(session_id, None)
         except (
             ComputerEnvironmentError,
             FileNotFoundError,
@@ -237,7 +428,29 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
             return self._error_result(
                 session_id=session_id,
                 frame_id=current.frame_id if current else None,
-                error=f"Browser computer action failed: {exc}",
+                error=f"Computer action failed: {exc}",
+            )
+
+        public_file_ref: dict[str, Any] | None = None
+        inline_markdown: str | None = None
+        if action.type is ComputerActionType.SCREENSHOT:
+            try:
+                public_file_ref = self._publish_screenshot(observation)
+            except (
+                FileNotFoundError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                return self._error_result(
+                    session_id=session_id,
+                    frame_id=observation.frame_id,
+                    error=f"Could not publish computer screenshot: {exc}",
+                )
+            filename = str(public_file_ref["filename"])
+            inline_markdown = (
+                f"![{filename}]({build_file_id_ref(str(public_file_ref['file_id']))})"
             )
 
         result = ComputerToolResult(
@@ -245,18 +458,84 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
             session_id=session_id,
             frame_id=observation.frame_id,
             observation=observation,
+            file_ref=public_file_ref,
+            inline_markdown=inline_markdown,
+            delivery=(
+                "user_visible_artifact" if inline_markdown else "private_observation"
+            ),
             message=(
-                f"Browser observation captured for frame {observation.frame_id}. "
-                "Use this exact frame_id for the next state-changing action."
+                (
+                    "Screenshot captured as a user-visible artifact. Include "
+                    f"this exact Markdown in the final answer: {inline_markdown}"
+                )
+                if inline_markdown
+                else (
+                    "Private computer observation captured for frame "
+                    f"{observation.frame_id}. It is model context only, not a "
+                    "user-visible image or delivered artifact. Use this exact "
+                    "frame_id for the next state-changing action. If the user "
+                    "needs the current view as an output, call screenshot next."
+                )
             ),
         ).model_dump(mode="json", exclude_none=True)
-        result[CONTEXT_REFS_KEY] = [observation.screenshot.durable_dict()]
+        result[CONTEXT_REFS_KEY] = (
+            []
+            if observation.metadata.get("screenshot_fresh") is False
+            else [observation.screenshot.durable_dict()]
+        )
         result[SUPERSEDES_SCOPE_KEY] = f"{self.name}:{session_id}"
         return result
+
+    def _publish_screenshot(
+        self,
+        observation: ComputerObservation,
+    ) -> dict[str, Any]:
+        """Copy one internal observation into the user-visible output space."""
+
+        if observation.metadata.get("screenshot_fresh") is False:
+            raise RuntimeError(
+                "a fresh screenshot is temporarily unavailable; "
+                "the observation contains fresh semantic state but only a reused "
+                "image. Wait for a fresh observation before publishing a screenshot."
+            )
+        workspace = self._workspace
+        if workspace is None:
+            raise ValueError("Computer screenshot requires a task workspace.")
+        resolve_file_id = getattr(workspace, "resolve_file_id", None)
+        if not callable(resolve_file_id):
+            raise TypeError("workspace cannot resolve computer observation files")
+        source = resolve_file_id(observation.screenshot.file_id)
+        if source is None:
+            raise FileNotFoundError("computer observation screenshot is unavailable")
+        source_path = Path(source).resolve()
+        output_dir = Path(workspace.output_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        frame_key = hashlib.sha256(observation.frame_id.encode("utf-8")).hexdigest()[
+            :12
+        ]
+        suffix = source_path.suffix or ".png"
+        destination = output_dir / f"computer-screenshot-{frame_key}{suffix}"
+        if (
+            destination.exists()
+            and destination.read_bytes() != source_path.read_bytes()
+        ):
+            content_key = hashlib.sha256(source_path.read_bytes()).hexdigest()[:12]
+            destination = output_dir / f"computer-screenshot-{content_key}{suffix}"
+        if not destination.exists():
+            shutil.copy2(source_path, destination)
+        file_ref = build_workspace_file_ref(
+            workspace=workspace,
+            file_path=destination,
+            mime_type=str(
+                observation.screenshot.file_ref.get("mime_type") or "image/png"
+            ),
+        )
+        return sanitize_file_ref_for_context(file_ref)
 
     async def teardown(self, task_id: str | None = None) -> None:
         environments = list(self._environments.values())
         self._environments.clear()
+        self._recent_clicks.clear()
         for environment in environments:
             try:
                 await environment.close()
@@ -267,6 +546,82 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
                     exc_info=True,
                 )
         await self._close_task_sessions(task_id)
+
+    def _record_click_attempt(
+        self,
+        session_id: str,
+        action: ComputerAction,
+        observation: ComputerObservation,
+    ) -> str | None:
+        if action.type not in {
+            ComputerActionType.CLICK,
+            ComputerActionType.DOUBLE_CLICK,
+        }:
+            return None
+        click_target = self._click_target(action, observation)
+        if click_target is None:
+            return None
+        point, target_key = click_target
+        recent = self._recent_clicks.setdefault(session_id, [])
+        nearby_count = sum(
+            attempt.target_key == target_key
+            and (attempt.x - point.x) ** 2 + (attempt.y - point.y) ** 2
+            <= _CLICK_STALL_RADIUS**2
+            for attempt in recent
+        )
+        if nearby_count >= _CLICK_STALL_LIMIT:
+            return (
+                "Repeated click region stalled: this area has already been "
+                f"targeted {_CLICK_STALL_LIMIT} times without a page or window "
+                "transition. Do not retry the same area. Use a newly exposed "
+                "semantic element, choose a clearly different coordinate from "
+                "the latest observation, or report the blocker."
+            )
+        recent.append(
+            _ClickAttempt(
+                x=point.x,
+                y=point.y,
+                target_key=target_key,
+            )
+        )
+        del recent[:-_CLICK_HISTORY_LIMIT]
+        return None
+
+    @staticmethod
+    def _click_target(
+        action: ComputerAction,
+        observation: ComputerObservation,
+    ) -> tuple[NormalizedPoint, tuple[Any, ...]] | None:
+        target = action.target
+        if target is None:
+            return None
+        if target.point is not None:
+            return target.point, ("point",)
+        element = next(
+            (
+                candidate
+                for candidate in observation.elements
+                if candidate.element_id == target.element_id
+            ),
+            None,
+        )
+        if element is None:
+            return None
+        point = NormalizedPoint(
+            x=element.bounds.x + element.bounds.width / 2,
+            y=element.bounds.y + element.bounds.height / 2,
+        )
+        return point, (
+            "element",
+            element.surface.value if element.surface is not None else "",
+            (element.role or "").casefold(),
+            element.label or "",
+            element.text or "",
+            round(element.bounds.x, 3),
+            round(element.bounds.y, 3),
+            round(element.bounds.width, 3),
+            round(element.bounds.height, 3),
+        )
 
     @staticmethod
     def _error_result(

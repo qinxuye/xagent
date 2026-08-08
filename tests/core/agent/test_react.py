@@ -1959,6 +1959,8 @@ async def test_react_pattern_uses_decision_for_repeated_tools() -> None:
     assert "Do not put user-facing final answer text in this decision" in (
         decision_prompt
     )
+    assert "private observations are evidence for reasoning" in decision_prompt
+    assert "explicitly marks it as user-visible" in decision_prompt
     assert "future tool action" in decision_prompt
     assert "response_language" not in decision_prompt
     decision_schema = llm.calls[2]["tools"][0]["function"]["parameters"]
@@ -2864,6 +2866,51 @@ def test_react_compacts_provider_tool_schema_without_losing_named_fields() -> No
         "properties": {"value": {"type": "integer"}},
     }
     assert parameters["required"] == ["title", "properties"]
+
+
+def test_visual_computer_turn_hides_redundant_understand_media_schema() -> None:
+    pattern = ReActPattern()
+    schemas = [
+        {"type": "function", "function": {"name": "computer"}},
+        {"type": "function", "function": {"name": "understand_media"}},
+        {"type": "function", "function": {"name": "read_file"}},
+    ]
+
+    filtered = pattern._tool_schemas_for_resolved_llm(
+        schemas,
+        SimpleNamespace(abilities=["vision"]),
+    )
+
+    assert pattern._schema_tool_names(filtered) == ["computer", "read_file"]
+
+
+def test_text_only_computer_turn_keeps_understand_media_fallback() -> None:
+    pattern = ReActPattern()
+    schemas = [
+        {"type": "function", "function": {"name": "computer"}},
+        {"type": "function", "function": {"name": "understand_media"}},
+    ]
+
+    filtered = pattern._tool_schemas_for_resolved_llm(
+        schemas,
+        SimpleNamespace(abilities=["chat"]),
+    )
+
+    assert filtered is schemas
+
+
+def test_visual_turn_without_computer_keeps_understand_media() -> None:
+    pattern = ReActPattern()
+    schemas = [
+        {"type": "function", "function": {"name": "understand_media"}},
+    ]
+
+    filtered = pattern._tool_schemas_for_resolved_llm(
+        schemas,
+        SimpleNamespace(abilities=["vision"]),
+    )
+
+    assert filtered is schemas
 
 
 @pytest.mark.asyncio

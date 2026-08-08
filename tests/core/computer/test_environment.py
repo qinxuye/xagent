@@ -20,6 +20,7 @@ from xagent.core.computer.schema import (
     ComputerActionType,
     ComputerElement,
     ComputerElementSource,
+    ComputerElementSurface,
     ComputerEnvironmentType,
     ComputerObservation,
     ComputerTarget,
@@ -57,6 +58,8 @@ def observation(
                     element_id="button-1",
                     source=ComputerElementSource.DOM,
                     bounds=NormalizedRect(x=0.1, y=0.1, width=0.2, height=0.1),
+                    surface=ComputerElementSurface.DOCUMENT,
+                    metadata={"surface": "document"},
                 )
             ]
             if with_element
@@ -130,6 +133,57 @@ async def test_environment_rejects_element_outside_current_frame() -> None:
 
     with pytest.raises(ComputerTargetNotFoundError, match="old-button"):
         environment.validate_action_batch(batch)
+
+
+@pytest.mark.asyncio
+async def test_environment_validates_element_surface_provenance() -> None:
+    environment = FakeEnvironment()
+    environment.next_observation = observation(with_element=True)
+    await environment.observe()
+
+    matching = ComputerActionBatch(
+        session_id="session-1",
+        expected_frame_id="frame-1",
+        actions=[
+            ComputerAction(
+                type=ComputerActionType.CLICK,
+                target=ComputerTarget(
+                    element_id="button-1",
+                    surface=ComputerElementSurface.DOCUMENT,
+                ),
+            )
+        ],
+    )
+    environment.validate_action_batch(matching)
+
+    missing_surface = matching.model_copy(
+        update={
+            "actions": [
+                ComputerAction(
+                    type=ComputerActionType.CLICK,
+                    target=ComputerTarget(element_id="button-1"),
+                )
+            ]
+        }
+    )
+    with pytest.raises(ComputerTargetNotFoundError, match="explicit surface"):
+        environment.validate_action_batch(missing_surface)
+
+    mismatched = matching.model_copy(
+        update={
+            "actions": [
+                ComputerAction(
+                    type=ComputerActionType.CLICK,
+                    target=ComputerTarget(
+                        element_id="button-1",
+                        surface=ComputerElementSurface.APPLICATION_CHROME,
+                    ),
+                )
+            ]
+        }
+    )
+    with pytest.raises(ComputerTargetNotFoundError, match="application_chrome"):
+        environment.validate_action_batch(mismatched)
 
 
 @pytest.mark.asyncio

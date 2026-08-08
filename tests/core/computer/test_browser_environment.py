@@ -19,6 +19,7 @@ from xagent.core.computer.schema import (
     ComputerAction,
     ComputerActionBatch,
     ComputerActionType,
+    ComputerElementSurface,
     ComputerTarget,
     NormalizedPoint,
 )
@@ -223,7 +224,10 @@ async def test_browser_actions_use_fresh_normalized_coordinates(
             actions=[
                 ComputerAction(
                     type=ComputerActionType.CLICK,
-                    target=ComputerTarget(element_id="dom-1"),
+                    target=ComputerTarget(
+                        element_id="dom-1",
+                        surface=ComputerElementSurface.DOCUMENT,
+                    ),
                 )
             ],
         )
