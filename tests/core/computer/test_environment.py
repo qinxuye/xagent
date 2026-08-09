@@ -59,7 +59,6 @@ def observation(
                     source=ComputerElementSource.DOM,
                     bounds=NormalizedRect(x=0.1, y=0.1, width=0.2, height=0.1),
                     surface=ComputerElementSurface.DOCUMENT,
-                    metadata={"surface": "document"},
                 )
             ]
             if with_element

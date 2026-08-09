@@ -95,8 +95,17 @@ class ComputerToolArgs(BaseModel):
         if not isinstance(value, Mapping):
             return value
         normalized = dict(value)
-        raw_actions = normalized.pop("actions", None)
-        if raw_actions is not None:
+
+        def merge_nested_field(key: str, item: Any) -> None:
+            normalized_key = "action" if key == "type" else key
+            if normalized_key in normalized and normalized[normalized_key] != item:
+                raise ValueError(
+                    f"{normalized_key} conflicts between top-level and nested action"
+                )
+            normalized.setdefault(normalized_key, item)
+
+        if "actions" in normalized:
+            raw_actions = normalized.pop("actions")
             if (
                 not isinstance(raw_actions, list)
                 or len(raw_actions) != 1
@@ -114,15 +123,15 @@ class ComputerToolArgs(BaseModel):
                         "action expected_frame_id conflicts with the top-level value"
                     )
             for key, item in nested.items():
-                normalized.setdefault("action" if key == "type" else key, item)
+                merge_nested_field(key, item)
         raw_action = normalized.get("action")
         if isinstance(raw_action, Mapping):
             nested = dict(raw_action)
             normalized.pop("action")
             for key, item in nested.items():
-                normalized.setdefault("action" if key == "type" else key, item)
+                merge_nested_field(key, item)
         if "type" in normalized:
-            normalized.setdefault("action", normalized.pop("type"))
+            merge_nested_field("type", normalized.pop("type"))
         raw_target = normalized.get("target")
         if isinstance(raw_target, str):
             # Tool-calling models commonly either copy an exposed element_id
@@ -132,12 +141,16 @@ class ComputerToolArgs(BaseModel):
             try:
                 decoded_target = json.loads(raw_target)
             except json.JSONDecodeError:
-                decoded_target = None
-            normalized["target"] = (
-                dict(decoded_target)
-                if isinstance(decoded_target, Mapping)
-                else {"element_id": raw_target}
-            )
+                normalized["target"] = {"element_id": raw_target}
+            else:
+                if isinstance(decoded_target, Mapping):
+                    normalized["target"] = dict(decoded_target)
+                elif isinstance(decoded_target, str):
+                    normalized["target"] = {"element_id": decoded_target}
+                else:
+                    raise ValueError(
+                        "target JSON must decode to an object or element ID string"
+                    )
         return normalized
 
     def to_action(self) -> ComputerAction:
@@ -216,7 +229,8 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         perception_instructions = {
             ComputerPerceptionMode.VISION: (
                 "Plan from the screenshot and use normalized coordinates. "
-                "Semantic elements are intentionally not exposed in this mode."
+                "Ignore semantic element IDs even if an adapter includes them "
+                "as auxiliary observation data."
             ),
             ComputerPerceptionMode.SEMANTIC: (
                 "Prefer an exact element_id from the current observation. Use "
@@ -240,8 +254,9 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         screenshot is different: it captures the current state as a user-visible
         image artifact and returns a trusted file_ref plus exact inline_markdown.
         Use screenshot when an image must be delivered, and include the returned
-        inline_markdown verbatim in final_answer. Do not claim an image was delivered
-        unless screenshot returned that public artifact.
+        inline_markdown verbatim in final_answer rather than file_ref.markdown_link.
+        Do not claim an image was delivered unless screenshot returned that public
+        artifact.
 
         For state-changing actions, the latest observation's
         `metadata.supported_actions` list is authoritative. Never call a
@@ -406,13 +421,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
                     self._publish_screenshot,
                     observation,
                 )
-            except (
-                FileNotFoundError,
-                OSError,
-                RuntimeError,
-                TypeError,
-                ValueError,
-            ) as exc:
+            except Exception as exc:  # noqa: BLE001 - tool boundary returns errors.
                 return self._error_result(
                     session_id=session_id,
                     frame_id=observation.frame_id,
@@ -436,7 +445,8 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
             message=(
                 (
                     "Screenshot captured as a user-visible artifact. Include "
-                    f"this exact Markdown in the final answer: {inline_markdown}"
+                    "inline_markdown rather than file_ref.markdown_link in the "
+                    f"final answer: {inline_markdown}"
                 )
                 if inline_markdown
                 else (
@@ -485,13 +495,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         ]
         suffix = source_path.suffix or ".png"
         destination = output_dir / f"computer-screenshot-{frame_key}{suffix}"
-        if destination.exists():
-            source_bytes = source_path.read_bytes()
-            if destination.read_bytes() != source_bytes:
-                content_key = hashlib.sha256(source_bytes).hexdigest()[:12]
-                destination = output_dir / f"computer-screenshot-{content_key}{suffix}"
-        if not destination.exists():
-            shutil.copy2(source_path, destination)
+        shutil.copy2(source_path, destination)
         file_ref = build_workspace_file_ref(
             workspace=workspace,
             file_path=destination,

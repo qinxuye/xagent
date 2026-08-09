@@ -174,7 +174,7 @@ class ArtifactWorkspace:
         (ComputerPerceptionMode.AUTO, "Never invent an element_id"),
         (
             ComputerPerceptionMode.VISION,
-            "Semantic elements are intentionally not exposed",
+            "Ignore semantic element IDs",
         ),
         (ComputerPerceptionMode.SEMANTIC, "Prefer an exact element_id"),
     ],
@@ -230,6 +230,7 @@ async def test_computer_tool_executes_normalized_bare_element_id_target() -> Non
 @pytest.mark.parametrize(
     ("serialized_target", "element_id", "point"),
     [
+        ('"snapshot-1:4"', "snapshot-1:4", None),
         ('{"element_id": "snapshot-1:4"}', "snapshot-1:4", None),
         ('{"point": {"x": 0.25, "y": 0.75}}', None, (0.25, 0.75)),
     ],
@@ -254,6 +255,45 @@ def test_computer_tool_normalizes_json_encoded_target(
         if parsed.target.point is None
         else (parsed.target.point.x, parsed.target.point.y)
     ) == point
+
+
+@pytest.mark.parametrize("serialized_target", ['["snapshot-1:4"]', "null", "42"])
+def test_computer_tool_rejects_json_encoded_non_target_values(
+    serialized_target: str,
+) -> None:
+    with pytest.raises(ValueError):
+        ComputerToolArgs.model_validate(
+            {
+                "expected_frame_id": "frame-1",
+                "action": "click",
+                "target": serialized_target,
+            }
+        )
+
+
+def test_computer_tool_rejects_explicit_null_legacy_actions() -> None:
+    with pytest.raises(ValueError, match="exactly one action object"):
+        ComputerToolArgs.model_validate({"actions": None})
+
+
+def test_computer_tool_rejects_conflicting_nested_target() -> None:
+    with pytest.raises(ValueError, match="target conflicts"):
+        ComputerToolArgs.model_validate(
+            {
+                "target": "outer-1",
+                "actions": [
+                    {
+                        "type": "click",
+                        "target": "inner-2",
+                    }
+                ],
+            }
+        )
+
+
+def test_computer_tool_rejects_unknown_top_level_fields() -> None:
+    with pytest.raises(ValueError, match="extra_forbidden"):
+        ComputerToolArgs.model_validate({"unexpected": "value"})
 
 
 @pytest.mark.asyncio
@@ -319,10 +359,35 @@ async def test_computer_screenshot_publishes_user_visible_artifact(tmp_path) -> 
     assert captured["inline_markdown"] == (
         f"![{captured['file_ref']['filename']}](file:public-1)"
     )
+    assert "rather than file_ref.markdown_link" in captured["message"]
     assert Path(captured["file_ref"]["relative_path"]).parent.name == "output"
     output_path = workspace.workspace_dir / captured["file_ref"]["relative_path"]
     assert output_path.read_bytes() == b"png-bytes"
     assert captured[CONTEXT_REFS_KEY][0]["file_ref"]["internal"] is True
+
+
+@pytest.mark.asyncio
+async def test_computer_screenshot_frames_unexpected_publish_failure(tmp_path) -> None:
+    factory = EnvironmentFactory()
+    workspace = ArtifactWorkspace(tmp_path / "workspace")
+    tool = ComputerTool(
+        task_id="task-1",
+        workspace=workspace,  # type: ignore[arg-type]
+        environment_factory=factory,
+    )
+    initial = await tool.run_json_async({})
+
+    def fail_to_resolve(_file_id: str) -> Path:
+        raise ImportError("backend unavailable")
+
+    workspace.resolve_file_id = fail_to_resolve  # type: ignore[method-assign]
+    captured = await tool.run_json_async({"action": "screenshot"})
+
+    assert captured["success"] is False
+    assert captured["frame_id"] != initial["frame_id"]
+    assert captured["error"] == (
+        "Could not publish computer screenshot: backend unavailable"
+    )
 
 
 @pytest.mark.asyncio
