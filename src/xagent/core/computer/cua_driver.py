@@ -80,6 +80,10 @@ class CuaDriverMCPClient:
         self._queue: asyncio.Queue[_ToolCallRequest | None] | None = None
         self._ready: asyncio.Future[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
+        # Sessions are process-local inside cua-driver. Keep only successfully
+        # established registrations so a replacement worker can restore their
+        # capture scope before it accepts another tool call.
+        self._active_sessions: dict[str, dict[str, Any]] = {}
 
     async def call_tool(
         self,
@@ -125,6 +129,8 @@ class CuaDriverMCPClient:
         if response.isError:
             raise CuaDriverError(message or f"cua-driver tool {name!r} failed")
 
+        await self._record_session_call(name, dict(arguments or {}))
+
         image_bytes: bytes | None = None
         image_mime_type: str | None = None
         if image_parts:
@@ -146,12 +152,17 @@ class CuaDriverMCPClient:
         )
 
     async def close(self) -> None:
+        await self._stop_worker(clear_sessions=True)
+
+    async def _stop_worker(self, *, clear_sessions: bool) -> None:
         async with self._lifecycle_lock:
             worker = self._worker
             queue = self._queue
             self._worker = None
             self._queue = None
             self._ready = None
+            if clear_sessions:
+                self._active_sessions.clear()
         if worker is None:
             return
         if queue is not None and not worker.done():
@@ -190,7 +201,10 @@ class CuaDriverMCPClient:
             # Initialization owns a partially started worker/subprocess. Reset
             # it before propagating timeouts, transport failures, or caller
             # cancellation so a later call can create a fresh worker.
-            await self.close()
+            # Keep registrations across an initialization failure. A later
+            # replacement must either restore every session or fail closed;
+            # silently forgetting the window-scoped session is unsafe.
+            await self._stop_worker(clear_sessions=False)
             if isinstance(exc, TimeoutError):
                 raise CuaDriverError(
                     "cua-driver MCP initialization timed out after "
@@ -238,6 +252,7 @@ class CuaDriverMCPClient:
                     ) as session,
                 ):
                     await session.initialize()
+                    await self._restore_active_sessions(session)
                     if not ready.done():
                         ready.set_result(None)
                     while True:
@@ -277,3 +292,32 @@ class CuaDriverMCPClient:
                     request.future.set_exception(
                         failure or CuaDriverError("cua-driver MCP worker stopped")
                     )
+
+    async def _record_session_call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        session_id = arguments.get("session")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        async with self._lifecycle_lock:
+            if name == "start_session":
+                self._active_sessions[session_id] = arguments
+            elif name == "end_session":
+                self._active_sessions.pop(session_id, None)
+
+    async def _restore_active_sessions(self, session: ClientSession) -> None:
+        async with self._lifecycle_lock:
+            registrations = tuple(self._active_sessions.values())
+        for arguments in registrations:
+            response = await session.call_tool("start_session", arguments)
+            if response.isError:
+                message = "\n".join(
+                    item.text
+                    for item in response.content
+                    if isinstance(item, TextContent)
+                ).strip()
+                raise CuaDriverError(
+                    message or "cua-driver could not restore an active session"
+                )

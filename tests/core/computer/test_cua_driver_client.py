@@ -139,6 +139,47 @@ async def test_cua_driver_client_surfaces_mcp_tool_error(
 
 
 @pytest.mark.asyncio
+async def test_cua_driver_client_restores_sessions_before_using_restarted_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions: list[FakeSession] = []
+
+    @asynccontextmanager
+    async def fake_stdio(*_args: Any, **_kwargs: Any):
+        yield object(), object()
+
+    def fake_session(*args: Any, **kwargs: Any) -> FakeSession:
+        session = FakeSession(*args, **kwargs)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(cua_driver, "stdio_client", fake_stdio)
+    monkeypatch.setattr(cua_driver, "ClientSession", fake_session)
+    client = CuaDriverMCPClient(command="fake-driver", timeout_seconds=1)
+
+    await client.call_tool(
+        "start_session",
+        {"session": "task-1", "capture_scope": "window"},
+    )
+    assert client._queue is not None
+    assert client._worker is not None
+    await client._queue.put(None)
+    await client._worker
+
+    await client.call_tool("capture", {"session": "task-1"})
+    await client.close()
+
+    assert len(sessions) == 2
+    assert sessions[1].calls == [
+        (
+            "start_session",
+            {"session": "task-1", "capture_scope": "window"},
+        ),
+        ("capture", {"session": "task-1"}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_cua_driver_client_cleans_up_timed_out_initialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
