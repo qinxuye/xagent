@@ -261,8 +261,10 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         content. If a document goal has no matching `document` element, use the
         screenshot and a coordinate instead of a similarly named application
         control. For a coordinate target,
-        send `target={{"point": {{"x": 0.5, "y": 0.5}}}}`. Do not send a bare
-        string or null as the target of a target-requiring action.
+        send `target={{"point": {{"x": 0.5, "y": 0.5}}}}`. Models should emit
+        these structured forms; the tool boundary only normalizes unambiguous
+        bare or JSON-encoded element IDs for compatibility. Do not send null as
+        the target of a target-requiring action.
         Use `type` to insert at the current caret and `replace_text` with a target
         to replace a field. Keyboard chords use keys such as ["CTRL", "A"].
 
