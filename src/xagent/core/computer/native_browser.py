@@ -70,6 +70,13 @@ _PID_KEYBOARD_ACTIONS = frozenset(
         ComputerActionType.KEYPRESS,
     }
 )
+_UNSCOPED_KEYBOARD_ACTIONS = frozenset(
+    {
+        ComputerActionType.TYPE,
+        ComputerActionType.KEYPRESS,
+    }
+)
+_UNSCOPED_KEYBOARD_REFUSAL_REASON = "unscoped_keyboard_input_disabled"
 _ACTION_RESULT_FIELDS = (
     "path",
     "effect",
@@ -141,7 +148,7 @@ class NativeBrowserWindow:
     y: float
     width: float
     height: float
-    z_index: int
+    z_index: int | None
     is_on_screen: bool
     on_current_space: bool | None
 
@@ -552,7 +559,13 @@ class NativeBrowserEnvironment(ComputerEnvironment):
                 f"No visible {self.browser_app_name} window is available on the "
                 "Xagent host."
             )
-        return max(browser_windows, key=lambda window: window.z_index)
+        return max(
+            browser_windows,
+            key=lambda window: (
+                window.z_index is not None,
+                window.z_index if window.z_index is not None else 0,
+            ),
+        )
 
     async def _refresh_bound_target(self) -> NativeBrowserWindow:
         target = self._require_target()
@@ -617,7 +630,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
                 y=float(bounds["y"]),
                 width=width,
                 height=height,
-                z_index=int(raw.get("z_index") or 0),
+                z_index=NativeBrowserEnvironment._optional_z_index(raw.get("z_index")),
                 is_on_screen=raw.get("is_on_screen") is True,
                 on_current_space=(
                     raw.get("on_current_space")
@@ -816,7 +829,9 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         unsupported_reasons: dict[str, str] = {}
         supported: list[str] = []
         for action in _BASE_SUPPORTED_ACTIONS:
-            if keyboard_reason is not None and action in _PID_KEYBOARD_ACTIONS:
+            if action in _UNSCOPED_KEYBOARD_ACTIONS:
+                unsupported_reasons[action.value] = _UNSCOPED_KEYBOARD_REFUSAL_REASON
+            elif keyboard_reason is not None and action in _PID_KEYBOARD_ACTIONS:
                 unsupported_reasons[action.value] = keyboard_reason
             else:
                 supported.append(action.value)
@@ -1153,6 +1168,12 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         if action.type is ComputerActionType.NAVIGATE:
             await self._navigate_to_url(target, str(action.url or ""), common=common)
             return
+        if action.type in _UNSCOPED_KEYBOARD_ACTIONS:
+            raise ValueError(
+                "Free type and keypress actions are disabled in the local browser. "
+                "Use replace_text on an exact document element, or the atomic "
+                "navigate action for an http/https URL."
+            )
         if action.type in {
             ComputerActionType.CLICK,
             ComputerActionType.DOUBLE_CLICK,
@@ -1170,11 +1191,8 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             # authorization boundary on mixed-display coordinate systems.
             await self._call_action(tool_name, arguments)
             return
-        if action.type is ComputerActionType.TYPE:
-            arguments = {**common, "text": action.text or ""}
-            await self._call_action("type_text", arguments)
-            return
         if action.type is ComputerActionType.REPLACE_TEXT:
+            self._document_text_target(action)
             x, y = self._action_point_pixels(action)
             modifier = self._primary_driver_modifier()
             await self._call_action(
@@ -1194,16 +1212,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
                     "text": action.text or "",
                 },
             )
-            return
-        if action.type is ComputerActionType.KEYPRESS:
-            keys = [self._driver_key(key) for key in action.keys]
-            if len(keys) == 1:
-                arguments = {**common, "key": keys[0]}
-                tool_name = "press_key"
-            else:
-                arguments = {**common, "keys": keys}
-                tool_name = "hotkey"
-            await self._call_action(tool_name, arguments)
             return
         if action.type is ComputerActionType.SCROLL:
             horizontal = abs(action.delta_x) > abs(action.delta_y)
@@ -1432,12 +1440,11 @@ class NativeBrowserEnvironment(ComputerEnvironment):
     def _validate_unambiguous_pixel_target(self, action: ComputerAction) -> None:
         target_window = self._require_target()
         points = self._pixel_action_points(action)
-        occluding_windows = [
+        other_windows = [
             window
             for window in self._on_screen_windows
             if (window.pid, window.window_id)
             != (target_window.pid, target_window.window_id)
-            and window.z_index > target_window.z_index
         ]
         for point in points:
             screen_x = target_window.x + point.x * target_window.width
@@ -1445,7 +1452,12 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             if any(
                 window.x <= screen_x <= window.x + window.width
                 and window.y <= screen_y <= window.y + window.height
-                for window in occluding_windows
+                and (
+                    target_window.z_index is None
+                    or window.z_index is None
+                    or window.z_index > target_window.z_index
+                )
+                for window in other_windows
             ):
                 raise ComputerTargetNotFoundError(
                     "Pixel action is ambiguous because another on-screen window "
@@ -1454,6 +1466,32 @@ class NativeBrowserEnvironment(ComputerEnvironment):
                     "select a non-overlapping window; do not retry the pixel "
                     "coordinate."
                 )
+
+    def _document_text_target(self, action: ComputerAction) -> ComputerElement:
+        target = action.target
+        if target is None or target.element_id is None:
+            raise ValueError(
+                "replace_text in the local browser requires an exact semantic "
+                "document element target; coordinate and implicit keyboard input "
+                "are disabled"
+            )
+        element = self._find_element(target.element_id)
+        if element.surface is not ComputerElementSurface.DOCUMENT:
+            raise ValueError(
+                "replace_text is limited to document elements in the selected "
+                "browser window; browser chrome and unknown surfaces are not "
+                "authorized"
+            )
+        return element
+
+    @staticmethod
+    def _optional_z_index(value: Any) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def _pixel_action_points(self, action: ComputerAction) -> list[NormalizedPoint]:
         if action.type is ComputerActionType.DRAG:
@@ -1576,24 +1614,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             "foreground delivery requires a cua-driver escalation recommendation "
             "from the current observation"
         )
-
-    @staticmethod
-    def _driver_key(key: str) -> str:
-        normalized = key.strip().lower()
-        aliases = {
-            "meta": "cmd",
-            "command": "cmd",
-            "alt": "option",
-            "enter": "return",
-            "esc": "escape",
-            "arrowup": "up",
-            "arrowdown": "down",
-            "arrowleft": "left",
-            "arrowright": "right",
-            "page_up": "pageup",
-            "page_down": "pagedown",
-        }
-        return aliases.get(normalized, normalized)
 
     @staticmethod
     def _primary_driver_modifier() -> str:

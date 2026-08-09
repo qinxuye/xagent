@@ -104,6 +104,7 @@ class LocalBrowserTaskRuntimeProvider:
             environment_label="the selected local browser window",
             perception_mode=perception_mode,
             headless=False,
+            environment_scope="task",
             environment_instructions=(
                 "This task controls one configured browser window on the same "
                 "host as Xagent through cua-driver. The window may contain the "
@@ -112,8 +113,10 @@ class LocalBrowserTaskRuntimeProvider:
                 "Control is delivered through native OS automation. It never "
                 "opens a Chrome debugging connection. "
                 "For browser URL changes, use the atomic navigate action when the "
-                "observation explicitly lists it as supported. Never simulate "
-                "navigation with address-bar clicks, typing, or key presses. "
+                "observation explicitly lists it as supported. Free type and "
+                "keypress actions are disabled; use replace_text only on an exact "
+                "document element. Never simulate navigation with address-bar "
+                "clicks, typing, or key presses. "
                 "Treat each observation's supported_actions as authoritative. If "
                 "an action is unavailable, do not retry or work around that "
                 "capability through another tool. "

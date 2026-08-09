@@ -421,12 +421,12 @@ async def test_local_browser_refuses_ambiguous_pid_keyboard_actions() -> None:
     assert "keypress" not in observation.metadata["supported_actions"]
     assert "navigate" in observation.metadata["supported_actions"]
     assert observation.metadata["unsupported_actions"] == {
-        "type": "same_pid_keyboard_ambiguity",
+        "type": "unscoped_keyboard_input_disabled",
         "replace_text": "same_pid_keyboard_ambiguity",
-        "keypress": "same_pid_keyboard_ambiguity",
+        "keypress": "unscoped_keyboard_input_disabled",
     }
 
-    with pytest.raises(ValueError, match="same_pid_keyboard_ambiguity"):
+    with pytest.raises(ValueError, match="unscoped_keyboard_input_disabled"):
         await environment.execute(
             batch(
                 observation.frame_id,
@@ -443,8 +443,90 @@ async def test_local_browser_refuses_keyboard_when_driver_capability_is_absent()
 
     assert "type" not in observation.metadata["supported_actions"]
     assert observation.metadata["unsupported_actions"]["type"] == (
-        "pid_keyboard_capability_unknown"
+        "unscoped_keyboard_input_disabled"
     )
+
+
+@pytest.mark.asyncio
+async def test_local_browser_limits_keyboard_input_to_document_text_targets() -> None:
+    elements = [
+        {
+            "element_index": 0,
+            "element_token": "snapshot-1:0",
+            "role": "AXWindow",
+            "depth": 0,
+            "frame": {"x": 100, "y": 200, "w": 1000, "h": 800},
+        },
+        {
+            "element_index": 1,
+            "element_token": "snapshot-1:1",
+            "role": "AXTextField",
+            "label": "Address and search bar",
+            "depth": 1,
+            "parent_index": 0,
+            "frame": {"x": 180, "y": 220, "w": 760, "h": 40},
+        },
+        {
+            "element_index": 2,
+            "element_token": "snapshot-1:2",
+            "role": "AXWebArea",
+            "depth": 1,
+            "parent_index": 0,
+            "frame": {"x": 100, "y": 280, "w": 1000, "h": 720},
+        },
+        {
+            "element_index": 3,
+            "element_token": "snapshot-1:3",
+            "role": "AXTextField",
+            "label": "Search",
+            "depth": 2,
+            "parent_index": 2,
+            "frame": {"x": 300, "y": 350, "w": 400, "h": 40},
+        },
+    ]
+    driver = FakeCuaDriver(
+        elements=elements,
+        background_input={
+            "routes": [{"route": "pid_keyboard", "status": "available"}],
+        },
+    )
+    environment = make_environment(driver)
+    observation = await environment.observe()
+
+    assert "replace_text" in observation.metadata["supported_actions"]
+    assert "type" not in observation.metadata["supported_actions"]
+    assert "keypress" not in observation.metadata["supported_actions"]
+    assert observation.metadata["unsupported_actions"]["type"] == (
+        "unscoped_keyboard_input_disabled"
+    )
+
+    after_document_edit = await environment.execute(
+        batch(
+            observation.frame_id,
+            ComputerAction(
+                type=ComputerActionType.REPLACE_TEXT,
+                target=ComputerTarget(element_id="snapshot-1:3"),
+                text="safe site search",
+            ),
+        )
+    )
+    action_call_count = len(driver.calls)
+
+    with pytest.raises(ValueError, match="limited to document elements"):
+        await environment.execute(
+            batch(
+                after_document_edit.frame_id,
+                ComputerAction(
+                    type=ComputerActionType.REPLACE_TEXT,
+                    target=ComputerTarget(element_id="snapshot-1:1"),
+                    text="file:///Users/admin/.ssh/id_rsa",
+                ),
+            )
+        )
+
+    assert any(name == "hotkey" for name, _ in driver.calls[:action_call_count])
+    assert any(name == "type_text" for name, _ in driver.calls[:action_call_count])
+    assert len(driver.calls) == action_call_count + 1  # Bound-window revalidation only.
 
 
 @pytest.mark.asyncio
@@ -589,6 +671,45 @@ async def test_local_browser_rejects_pixel_action_under_cross_app_occluding_wind
                     target=ComputerTarget(
                         point=NormalizedPoint(x=0.5, y=0.5),
                     ),
+                ),
+            )
+        )
+
+    assert all(name != "click" for name, _payload in driver.calls)
+
+
+@pytest.mark.asyncio
+async def test_local_browser_treats_unknown_overlapping_z_index_as_occluding() -> None:
+    driver = FakeCuaDriver()
+    driver.windows.append(
+        {
+            "window_id": 31,
+            "pid": 300,
+            "app_name": "Terminal",
+            "title": "Unknown stacking order",
+            "bounds": {"x": 100, "y": 200, "width": 1000, "height": 800},
+            "is_on_screen": True,
+            "on_current_space": True,
+        }
+    )
+    environment = NativeBrowserEnvironment(
+        session_id="task-1",
+        workspace=object(),
+        driver=driver,
+        observation_store=FakeObservationStore(),  # type: ignore[arg-type]
+        target_pid=200,
+        target_window_id=20,
+        native_browser_navigator=FakeNativeBrowserNavigator(supported=False),
+    )
+    first = await environment.observe()
+
+    with pytest.raises(ComputerTargetNotFoundError, match="Pixel action is ambiguous"):
+        await environment.execute(
+            batch(
+                first.frame_id,
+                ComputerAction(
+                    type=ComputerActionType.CLICK,
+                    target=ComputerTarget(point=NormalizedPoint(x=0.5, y=0.5)),
                 ),
             )
         )

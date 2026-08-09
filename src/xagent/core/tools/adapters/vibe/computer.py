@@ -201,7 +201,10 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         environment_label: str = "browser",
         perception_mode: ComputerPerceptionMode | str = ComputerPerceptionMode.AUTO,
         headless: bool = True,
+        environment_scope: Literal["step", "task"] = "step",
     ) -> None:
+        if environment_scope not in {"step", "task"}:
+            raise ValueError("environment_scope must be 'step' or 'task'")
         self._visibility = ToolVisibility.PUBLIC
         self._task_id = task_id
         self._workspace = workspace
@@ -218,6 +221,7 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
             )
         )
         self._headless = headless
+        self._environment_scope = environment_scope
         self._environments: dict[str, ComputerEnvironment] = {}
 
     @property
@@ -305,7 +309,9 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         # The session is an execution-scoped resource. Never let model output
         # select another task's browser, even if it invents a session_id field.
         raw_args.pop("session_id", None)
-        session_id = self._default_session_id(step_id)
+        session_id = self._default_session_id(
+            step_id if self._environment_scope == "step" else None
+        )
         if not session_id:
             return self._error_result(
                 session_id="",
