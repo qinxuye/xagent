@@ -96,7 +96,8 @@ def test_local_browser_registration_is_explicit_and_lifespan_scoped() -> None:
     unregister_task_extension(LOCAL_BROWSER_TASK_EXTENSION)
     try:
         register_local_browser_runtime()
-        register_local_browser_runtime()
+        with pytest.raises(ValueError, match="already registered"):
+            register_local_browser_runtime()
         assert registered_task_extensions().count(LOCAL_BROWSER_TASK_EXTENSION) == 1
 
         unregister_local_browser_runtime()

@@ -1880,7 +1880,11 @@ export function AppProvider({
 
   useEffect(() => {
     const taskId = state.taskId
-    if (taskId === null || sessionTransport) return
+    const hasRuntimeExtensionBinding = (
+      state.currentTask?.id === String(taskId)
+      && (state.currentTask.runtimeExtensionBindings?.length || 0) > 0
+    )
+    if (taskId === null || sessionTransport || !hasRuntimeExtensionBinding) return
 
     let cancelled = false
     const loadRuntimeExtensions = async () => {
@@ -1910,7 +1914,13 @@ export function AppProvider({
     return () => {
       cancelled = true
     }
-  }, [dispatch, sessionTransport, state.taskId])
+  }, [
+    dispatch,
+    sessionTransport,
+    state.currentTask?.id,
+    state.currentTask?.runtimeExtensionBindings,
+    state.taskId,
+  ])
 
   useEffect(() => {
     const previousIdentity = previousSessionConnectionIdentityRef.current
@@ -2344,16 +2354,6 @@ export function AppProvider({
               type: "SET_CURRENT_TASK",
               payload: task,
             })
-            if (isJsonRecord(taskData.runtime_extensions)) {
-              dispatch({
-                type: "SET_TASK_RUNTIME_EXTENSIONS",
-                payload: {
-                  taskId,
-                  extensions: normalizeTaskRuntimeExtensions(taskData.runtime_extensions),
-                },
-              })
-            }
-
             // Check if this is a new task (created within last 5 seconds)
             // If so, we don't expect historical messages, so stop loading
             // We do NOT stop loading here for new tasks anymore.

@@ -142,7 +142,7 @@ describe("ChatMessage Session file capability", () => {
     )
 
     expect(
-      screen.getByLabelText("Computer use · Local browser"),
+      screen.getByRole("note", { name: "Computer use · Local browser" }),
     ).toBeInTheDocument()
   })
 

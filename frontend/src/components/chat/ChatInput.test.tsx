@@ -167,7 +167,7 @@ describe("ChatInput", () => {
     fireEvent.click(await screen.findByText("GitHub"))
 
     expect(screen.queryByText("chatPage.input.localBrowser.chipLabel")).not.toBeInTheDocument()
-    expect(screen.getByRole("status", { name: "Google Chrome · GitHub" })).toBeInTheDocument()
+    expect(screen.getByLabelText("Google Chrome · GitHub")).toBeInTheDocument()
     const form = container.querySelector("form") as HTMLFormElement
     expect(form).toHaveClass("rounded-2xl")
     expect(form).not.toHaveClass("rounded-tl-none")
@@ -188,6 +188,54 @@ describe("ChatInput", () => {
         }),
       )
     })
+  })
+
+  it("disambiguates browser windows with the same application and title", async () => {
+    apiRequestMock.mockImplementation((url: string) => {
+      if (url === "http://api.local/api/computer/local-browser/readiness") {
+        return Promise.resolve(
+          new Response(JSON.stringify({
+            ready: true,
+            application: "Google Chrome",
+            windows: [
+              {
+                pid: 100,
+                window_id: 20,
+                application: "Google Chrome",
+                title: "GitHub",
+              },
+              {
+                pid: 100,
+                window_id: 21,
+                application: "Google Chrome",
+                title: "GitHub",
+              },
+            ],
+            issues: [],
+            message: "",
+          }), { status: 200, headers: { "Content-Type": "application/json" } }),
+        )
+      }
+      return Promise.resolve(emptyJsonResponse())
+    })
+
+    render(
+      <ChatInput
+        hideFileUpload
+        inputValue="inspect"
+        onInputChange={vi.fn()}
+        onSend={vi.fn()}
+        taskConfig={{ model: "model-1" }}
+      />,
+    )
+
+    fireEvent.click(screen.getByLabelText("chatPage.input.actions.add"))
+    fireEvent.click(screen.getByText("chatPage.input.localBrowser.label"))
+
+    expect(await screen.findAllByText("GitHub")).toHaveLength(2)
+    expect(
+      screen.getAllByText("chatPage.input.localBrowser.windowIdentifier"),
+    ).toHaveLength(2)
   })
 
   it("does not advertise local browser to a non-admin", () => {

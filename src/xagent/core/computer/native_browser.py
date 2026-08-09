@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from ...config import (
+    SUPPORTED_NATIVE_BROWSER_APP_NAMES,
     get_browser_cua_driver_max_elements,
     get_native_browser_app_name,
     get_native_browser_enabled,
@@ -85,15 +86,8 @@ _ACTION_RESULT_FIELDS = (
     "status",
     "code",
 )
-_BROWSER_APP_MARKERS = (
-    "arc",
-    "brave",
-    "chrome",
-    "chromium",
-    "edge",
-    "firefox",
-    "safari",
-    "vivaldi",
+_SUPPORTED_BROWSER_APP_NAMES = frozenset(
+    name.casefold() for name in SUPPORTED_NATIVE_BROWSER_APP_NAMES
 )
 _AX_DOCUMENT_ROOT_ROLES = frozenset({"axwebarea", "webarea"})
 _AX_OVERLAY_ROLES = frozenset(
@@ -213,7 +207,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         self._driver_factory = driver_factory or CuaDriverMCPClient
         self._target: NativeBrowserWindow | None = None
         self._on_screen_windows: list[NativeBrowserWindow] = []
-        self._visible_windows: list[NativeBrowserWindow] = []
         self._session_started = False
         self._last_action_result: dict[str, Any] | None = None
         self._unsupported_action_reasons: dict[str, str] = {}
@@ -235,12 +228,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         await driver.close()
         self._driver = None
         self._session_started = False
-
-    async def health_report(self) -> dict[str, Any]:
-        """Return cua-driver's stable structured diagnostics contract."""
-
-        result = await self._get_driver().call_tool("health_report", {})
-        return result.structured
 
     async def _observe(self) -> ComputerObservation:
         await self._ensure_session()
@@ -536,7 +523,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             for window in visible
             if window.app_name.casefold() == self.browser_app_name.casefold()
         ]
-        self._visible_windows = browser_windows
         if self.target_pid is not None and self.target_window_id is not None:
             exact = next(
                 (
@@ -590,7 +576,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             for window in visible
             if window.app_name.casefold() == self.browser_app_name.casefold()
         ]
-        self._visible_windows = browser_windows
         refreshed = next(
             (
                 window
@@ -693,7 +678,10 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             )
         else:
             previous = self.current_observation
-            assert previous is not None
+            if previous is None:
+                raise CuaDriverError(
+                    "cua-driver returned no screenshot before an observation existed"
+                )
             viewport = previous.viewport
             width = viewport.width
             height = viewport.height
@@ -885,9 +873,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         target: NativeBrowserWindow,
     ) -> tuple[list[ComputerElement], int]:
         hierarchy = self._element_hierarchy(raw_elements)
-        is_browser = any(
-            marker in target.app_name.casefold() for marker in _BROWSER_APP_MARKERS
-        )
+        is_browser = target.app_name.casefold() in _SUPPORTED_BROWSER_APP_NAMES
         elements: list[ComputerElement] = []
         for raw in raw_elements:
             if not isinstance(raw, Mapping):
@@ -1214,6 +1200,10 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             )
             return
         if action.type is ComputerActionType.SCROLL:
+            if action.target is not None:
+                raise ValueError(
+                    "targeted scroll is not supported by the local browser runtime"
+                )
             horizontal = abs(action.delta_x) > abs(action.delta_y)
             delta = action.delta_x if horizontal else action.delta_y
             direction = (
@@ -1227,8 +1217,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
                 "amount": max(1, min(20, math.ceil(abs(delta) * 10))),
                 "by": "line",
             }
-            if action.target is not None:
-                arguments.update(self._action_target_arguments(action))
             await self._call_action("scroll", arguments)
             return
         if action.type is ComputerActionType.DRAG:
@@ -1296,6 +1284,9 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             arguments = self._element_arguments(element)
             if arguments:
                 return arguments
+            raise ValueError(
+                "local browser semantic target has no driver element identity"
+            )
         x, y = self._action_point_pixels(action)
         return {"x": x, "y": y}
 
@@ -1381,9 +1372,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         *,
         target: NativeBrowserWindow,
     ) -> ComputerElement | None:
-        if not any(
-            marker in target.app_name.casefold() for marker in _BROWSER_APP_MARKERS
-        ):
+        if target.app_name.casefold() not in _SUPPORTED_BROWSER_APP_NAMES:
             return None
         candidates = [
             element

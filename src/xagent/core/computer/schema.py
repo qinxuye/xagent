@@ -119,7 +119,6 @@ class ComputerControlTransport(str, Enum):
     """Transport used to deliver actions to a selected computer target."""
 
     NATIVE_ACCESSIBILITY = "native_accessibility"
-    BROWSER_AUTOMATION = "browser_automation"
 
 
 class ComputerActionType(str, Enum):

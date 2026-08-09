@@ -20,7 +20,6 @@ from ..models.task import Task
 from ..models.user import User
 from .task_runtime import (
     register_task_extension,
-    registered_task_extensions,
     task_extension_bindings_from_agent_config,
     unregister_task_extension,
 )
@@ -172,13 +171,12 @@ class LocalBrowserTaskRuntimeProvider:
 
 
 def register_local_browser_runtime() -> None:
-    """Register the built-in provider once for this web process."""
+    """Register the built-in provider for this application lifespan."""
 
-    if LOCAL_BROWSER_TASK_EXTENSION not in registered_task_extensions():
-        register_task_extension(
-            LOCAL_BROWSER_TASK_EXTENSION,
-            LocalBrowserTaskRuntimeProvider(),
-        )
+    register_task_extension(
+        LOCAL_BROWSER_TASK_EXTENSION,
+        LocalBrowserTaskRuntimeProvider(),
+    )
 
 
 def unregister_local_browser_runtime() -> None:

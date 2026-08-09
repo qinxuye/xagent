@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronRight,
@@ -64,6 +64,7 @@ export function LocalBrowserMenu({
     readinessRequestRef.current = null;
     request?.abort();
     setLoading(false);
+    setReadiness(null);
   }, []);
 
   useEffect(() => () => {
@@ -108,6 +109,18 @@ export function LocalBrowserMenu({
 
   const localBrowserDisabled = disabled || loading || readiness?.ready !== true;
   const selected = selectedTarget !== null;
+  const duplicateWindowLabels = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const browserWindow of readiness?.windows || []) {
+      const key = `${browserWindow.application}\u0000${browserWindow.title || ""}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return new Set(
+      [...counts.entries()]
+        .filter(([, count]) => count > 1)
+        .map(([key]) => key),
+    );
+  }, [readiness?.windows]);
   const status = loading
     ? t("chatPage.input.localBrowser.checking")
     : readiness?.ready
@@ -200,16 +213,17 @@ export function LocalBrowserMenu({
                       <span>{t("chatPage.input.localBrowser.checking")}</span>
                     </div>
                   ) : readiness?.ready && readiness.windows.length > 0 ? (
-                    readiness.windows.map((window) => {
-                      const isSelected = selectedTarget?.pid === window.pid
-                        && selectedTarget?.window_id === window.window_id;
+                    readiness.windows.map((browserWindow) => {
+                      const labelKey = `${browserWindow.application}\u0000${browserWindow.title || ""}`;
+                      const isSelected = selectedTarget?.pid === browserWindow.pid
+                        && selectedTarget?.window_id === browserWindow.window_id;
                       return (
                         <button
                           type="button"
-                          key={`${window.pid}:${window.window_id}`}
+                          key={`${browserWindow.pid}:${browserWindow.window_id}`}
                           disabled={localBrowserDisabled}
                           onClick={() => {
-                            onTargetChange(window);
+                            onTargetChange(browserWindow);
                             setShowWindowPicker(false);
                             setOpen(false);
                           }}
@@ -219,10 +233,17 @@ export function LocalBrowserMenu({
                           )}
                         >
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm">{window.application}</span>
-                            {window.title && (
+                            <span className="block truncate text-sm">{browserWindow.application}</span>
+                            {browserWindow.title && (
                               <span className="block truncate text-xs text-muted-foreground">
-                                {window.title}
+                                {browserWindow.title}
+                              </span>
+                            )}
+                            {duplicateWindowLabels.has(labelKey) && (
+                              <span className="block truncate text-xs text-muted-foreground">
+                                {t("chatPage.input.localBrowser.windowIdentifier", {
+                                  id: browserWindow.window_id,
+                                })}
                               </span>
                             )}
                           </span>
@@ -246,12 +267,12 @@ export function LocalBrowserMenu({
         <div
           className="inline-flex h-8 min-w-0 max-w-[180px] items-center gap-1.5 rounded-lg border border-border bg-secondary/70 px-2.5 text-xs text-foreground"
           title={status}
+          aria-label={status}
         >
           <Laptop className="h-3.5 w-3.5 shrink-0" />
           <span className="truncate">{t("chatPage.input.localBrowser.label")}</span>
           <span
-            role="status"
-            aria-label={status}
+            aria-hidden="true"
             className={cn(
               "h-2 w-2 shrink-0 rounded-full",
               readiness?.ready

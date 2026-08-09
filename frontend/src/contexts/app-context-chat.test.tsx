@@ -212,9 +212,23 @@ function MessageContentProbe() {
 }
 
 function TaskRuntimeMetadataProbe() {
-  const { setTaskId } = useApp()
+  const { dispatch, setTaskId } = useApp()
   return (
-    <button type="button" onClick={() => setTaskId(823, { navigate: false })}>
+    <button type="button" onClick={() => {
+      dispatch({
+        type: "SET_CURRENT_TASK",
+        payload: {
+          id: "823",
+          title: "Local browser task",
+          status: "completed",
+          description: "Inspect the selected window",
+          createdAt: "2026-08-07T07:00:00Z",
+          updatedAt: "2026-08-07T07:01:00Z",
+          runtimeExtensionBindings: ["local_browser"],
+        },
+      })
+      setTaskId(823, { navigate: false })
+    }}>
       select task
     </button>
   )

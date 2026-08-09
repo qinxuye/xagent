@@ -243,6 +243,7 @@ const zh = {
         chipLabel: "操作浏览器",
         checking: "正在检查 Xagent 主机...",
         chooseWindow: "选择一个浏览器窗口",
+        windowIdentifier: "窗口 {id}",
         controlScope: "仅通过系统辅助功能控制这个浏览器窗口，不会连接 Chrome 调试。",
         unavailable: "此 Xagent 主机不可用",
       },

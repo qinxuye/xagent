@@ -515,6 +515,7 @@ export function ChatMessage({
                   {contextBadges.map((badge) => (
                     <div
                       key={`${badge.kind}:${badge.label}:${badge.detail}`}
+                      role="note"
                       className="inline-flex h-7 min-w-0 items-center gap-1.5 rounded-lg border border-border/80 bg-background/55 px-2 text-xs text-muted-foreground"
                       aria-label={`${badge.label} · ${badge.detail}`}
                     >
