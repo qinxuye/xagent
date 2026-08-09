@@ -3,11 +3,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 
-from .schema import (
-    ComputerActionBatch,
-    ComputerElementSurface,
-    ComputerObservation,
-)
+from .schema import ComputerActionBatch, ComputerObservation
 
 
 class ComputerEnvironmentError(RuntimeError):
@@ -115,36 +111,16 @@ class ComputerEnvironment(ABC):
                 f"actions target frame {batch.expected_frame_id!r}, but current "
                 f"frame is {self._current_observation.frame_id!r}"
             )
-        elements_by_id = {
-            element.element_id: element
-            for element in self._current_observation.elements
+        element_ids = {
+            element.element_id for element in self._current_observation.elements
         }
         for action in batch.actions:
-            target = action.target
-            target_id = target.element_id if target else None
-            if target_id is not None and target_id not in elements_by_id:
+            target_id = action.target.element_id if action.target else None
+            if target_id is not None and target_id not in element_ids:
                 raise ComputerTargetNotFoundError(
                     f"element {target_id!r} is not present in frame "
                     f"{self._current_observation.frame_id!r}"
                 )
-            if target_id is not None and target is not None:
-                actual_surface = elements_by_id[target_id].surface
-                if (
-                    actual_surface is not None
-                    and actual_surface is not ComputerElementSurface.UNKNOWN
-                    and target.surface is None
-                ):
-                    raise ComputerTargetNotFoundError(
-                        f"element {target_id!r} requires explicit surface "
-                        f"{actual_surface.value!r} in frame "
-                        f"{self._current_observation.frame_id!r}"
-                    )
-                if target.surface is not None and actual_surface != target.surface:
-                    raise ComputerTargetNotFoundError(
-                        f"element {target_id!r} does not belong to surface "
-                        f"{target.surface.value!r} in frame "
-                        f"{self._current_observation.frame_id!r}"
-                    )
 
     async def observe(self) -> ComputerObservation:
         """Capture and record the current environment state."""

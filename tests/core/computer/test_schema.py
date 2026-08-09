@@ -13,7 +13,6 @@ from xagent.core.computer.schema import (
     ComputerActionType,
     ComputerElement,
     ComputerElementSource,
-    ComputerElementSurface,
     ComputerEnvironmentType,
     ComputerObservation,
     ComputerTarget,
@@ -329,20 +328,6 @@ def test_action_batch_uses_normalized_target_and_expected_frame() -> None:
     assert batch.expected_frame_id == "frame-1"
     assert batch.actions[0].target is not None
     assert batch.actions[0].target.point == NormalizedPoint(x=0.25, y=0.75)
-
-
-def test_element_target_accepts_surface_but_point_target_rejects_it() -> None:
-    target = ComputerTarget(
-        element_id="button-1",
-        surface=ComputerElementSurface.DOCUMENT,
-    )
-    assert target.surface is ComputerElementSurface.DOCUMENT
-
-    with pytest.raises(ValidationError, match="only valid for an element_id"):
-        ComputerTarget(
-            point=NormalizedPoint(x=0.25, y=0.75),
-            surface=ComputerElementSurface.DOCUMENT,
-        )
 
 
 def test_action_batch_requires_a_new_frame_after_each_action() -> None:

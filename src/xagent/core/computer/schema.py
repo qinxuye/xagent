@@ -221,14 +221,11 @@ class ComputerElement(_ComputerModel):
 class ComputerTarget(_ComputerModel):
     element_id: Identifier | None = None
     point: NormalizedPoint | None = None
-    surface: ComputerElementSurface | None = None
 
     @model_validator(mode="after")
     def _exactly_one_target(self) -> "ComputerTarget":
         if (self.element_id is None) == (self.point is None):
             raise ValueError("target requires exactly one of element_id or point")
-        if self.point is not None and self.surface is not None:
-            raise ValueError("surface is only valid for an element_id target")
         return self
 
 

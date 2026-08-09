@@ -41,7 +41,6 @@ from datetime import timezone
 from enum import Enum
 from typing import Any, cast
 
-from ....context_materializer import llm_supports_vision
 from ....model.chat.exceptions import LLMToolProtocolError
 from ....model.chat.tool_protocol import get_tool_protocol_error
 from ....tools.user_interaction import (
@@ -441,12 +440,6 @@ class ReActPattern(AgentPattern):
                 messages=route_messages,
                 context=context,
             )
-            resolved_base_tool_schemas = self._tool_schemas_for_resolved_llm(
-                base_tool_schemas,
-                call_llm,
-            )
-            if not force_final_answer_now:
-                tool_schemas = resolved_base_tool_schemas
             llm_metadata = {
                 "iteration": iteration,
                 **resolved_llm_metadata(call_llm),
@@ -532,7 +525,7 @@ class ReActPattern(AgentPattern):
                         llm=call_llm,
                         runtime=runtime,
                         iteration=iteration,
-                        tool_schemas=resolved_base_tool_schemas,
+                        tool_schemas=base_tool_schemas,
                         force_final_answer=(
                             force_final_answer_now and not unavailable_tool_call
                         ),
@@ -600,7 +593,7 @@ class ReActPattern(AgentPattern):
                         llm=call_llm,
                         runtime=runtime,
                         iteration=iteration,
-                        tool_schemas=resolved_base_tool_schemas,
+                        tool_schemas=base_tool_schemas,
                         force_final_answer=(
                             force_final_answer_now and not recover_full_tool_set
                         ),
@@ -995,32 +988,6 @@ class ReActPattern(AgentPattern):
             if isinstance(function, dict) and function.get("name"):
                 names.append(str(function["name"]))
         return names
-
-    def _tool_schemas_for_resolved_llm(
-        self,
-        tool_schemas: list[dict[str, Any]],
-        llm: Any,
-    ) -> list[dict[str, Any]]:
-        """Avoid a second image-analysis hop when the selected model sees frames.
-
-        Auto routing resolves the concrete model per call. A text-only fallback
-        still needs ``understand_media``; a visual model already receives the
-        computer screenshot through its ContextReference and should reason from
-        that same frame instead of delegating coordinate selection to another
-        model.
-        """
-
-        names = self._schema_tool_names(tool_schemas)
-        if "computer" not in names or not llm_supports_vision(llm):
-            return tool_schemas
-        return [
-            schema
-            for schema in tool_schemas
-            if not (
-                isinstance(schema.get("function"), dict)
-                and schema["function"].get("name") == "understand_media"
-            )
-        ]
 
     def _tool_decision_groups_for_tools(self, tools: list[Any]) -> dict[str, str]:
         groups: dict[str, str] = {}

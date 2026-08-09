@@ -10,17 +10,13 @@ from xagent.core.computer.environment import ComputerEnvironment
 from xagent.core.computer.schema import (
     COMPUTER_FRAME_ID_METADATA_KEY,
     COMPUTER_SESSION_ID_METADATA_KEY,
-    ComputerAction,
     ComputerActionBatch,
-    ComputerActionType,
     ComputerElement,
     ComputerElementSource,
     ComputerElementSurface,
     ComputerEnvironmentType,
     ComputerObservation,
     ComputerPerceptionMode,
-    ComputerTarget,
-    NormalizedPoint,
     NormalizedRect,
     Viewport,
 )
@@ -120,6 +116,36 @@ class StaleScreenshotEnvironmentFactory(EnvironmentFactory):
         return environment
 
 
+class SemanticComputerEnvironment(FakeComputerEnvironment):
+    async def _observe(self) -> ComputerObservation:
+        observation = await super()._observe()
+        return observation.model_copy(
+            update={
+                "elements": [
+                    ComputerElement(
+                        element_id="button-1",
+                        source=ComputerElementSource.DOM,
+                        surface=ComputerElementSurface.DOCUMENT,
+                        bounds=NormalizedRect(
+                            x=0.1,
+                            y=0.1,
+                            width=0.2,
+                            height=0.1,
+                        ),
+                    )
+                ]
+            }
+        )
+
+
+class SemanticEnvironmentFactory(EnvironmentFactory):
+    def __call__(self, **kwargs: Any) -> SemanticComputerEnvironment:
+        self.calls.append(kwargs)
+        environment = SemanticComputerEnvironment(kwargs["session_id"])
+        self.environments.append(environment)
+        return environment
+
+
 class ArtifactWorkspace:
     def __init__(self, root: Path) -> None:
         self.workspace_dir = root
@@ -175,6 +201,30 @@ def test_computer_tool_normalizes_bare_element_id_target() -> None:
     assert parsed.target is not None
     assert parsed.target.element_id == "snapshot-1:4"
     assert parsed.target.point is None
+
+
+@pytest.mark.asyncio
+async def test_computer_tool_executes_normalized_bare_element_id_target() -> None:
+    factory = SemanticEnvironmentFactory()
+    tool = ComputerTool(
+        task_id="task-1",
+        workspace=object(),  # type: ignore[arg-type]
+        environment_factory=factory,
+    )
+    initial = await tool.run_json_async({})
+
+    acted = await tool.run_json_async(
+        {
+            "expected_frame_id": initial["frame_id"],
+            "action": "click",
+            "target": "button-1",
+        }
+    )
+
+    assert acted["success"] is True
+    target = factory.environments[0].executed[0].actions[0].target
+    assert target is not None
+    assert target.element_id == "button-1"
 
 
 @pytest.mark.parametrize(
@@ -244,83 +294,6 @@ async def test_computer_tool_requires_initial_observation_then_expected_frame() 
     assert acted["success"] is True
     assert acted["frame_id"] == "frame-2"
     assert factory.environments[0].executed[0].expected_frame_id == "frame-1"
-
-
-@pytest.mark.asyncio
-async def test_computer_tool_stops_repeated_clicks_in_same_region() -> None:
-    factory = EnvironmentFactory()
-    tool = ComputerTool(
-        task_id="task-1",
-        workspace=object(),  # type: ignore[arg-type]
-        environment_factory=factory,
-    )
-    current = await tool.run_json_async({})
-
-    for x, y in ((0.75, 0.08), (0.76, 0.11), (0.755, 0.09)):
-        current = await tool.run_json_async(
-            {
-                "expected_frame_id": current["frame_id"],
-                "action": ComputerActionType.CLICK.value,
-                "target": {"point": {"x": x, "y": y}},
-            }
-        )
-        assert current["success"] is True
-
-    refused = await tool.run_json_async(
-        {
-            "expected_frame_id": current["frame_id"],
-            "action": ComputerActionType.CLICK.value,
-            "target": {"point": {"x": 0.759, "y": 0.108}},
-        }
-    )
-
-    assert refused["success"] is False
-    assert refused["frame_id"] == current["frame_id"]
-    assert "Repeated click region stalled" in refused["error"]
-    assert len(factory.environments[0].executed) == 3
-
-
-def test_computer_tool_allows_new_semantic_target_after_coordinate_stall() -> None:
-    tool = ComputerTool(
-        task_id="task-1",
-        workspace=object(),  # type: ignore[arg-type]
-        environment_factory=EnvironmentFactory(),
-    )
-    observation = make_observation("task-1", 1).model_copy(
-        update={
-            "elements": [
-                ComputerElement(
-                    element_id="snapshot-2:53",
-                    source=ComputerElementSource.ACCESSIBILITY,
-                    surface=ComputerElementSurface.DOCUMENT,
-                    role="AXPopUpButton",
-                    label="Open profile",
-                    bounds=NormalizedRect(
-                        x=0.744,
-                        y=0.071,
-                        width=0.014,
-                        height=0.024,
-                    ),
-                )
-            ]
-        }
-    )
-    point_action = ComputerAction(
-        type=ComputerActionType.CLICK,
-        target=ComputerTarget(point=NormalizedPoint(x=0.751, y=0.083)),
-    )
-    for _ in range(3):
-        assert tool._record_click_attempt("task-1", point_action, observation) is None
-
-    semantic_action = ComputerAction(
-        type=ComputerActionType.CLICK,
-        target=ComputerTarget(
-            element_id="snapshot-2:53",
-            surface=ComputerElementSurface.DOCUMENT,
-        ),
-    )
-
-    assert tool._record_click_attempt("task-1", semantic_action, observation) is None
 
 
 @pytest.mark.asyncio

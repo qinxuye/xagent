@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import shutil
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -42,16 +42,6 @@ logger = logging.getLogger(__name__)
 
 ComputerEnvironmentFactory = Callable[..., ComputerEnvironment]
 _STEP_SESSION_ARG = "_xagent_step_id"
-_CLICK_STALL_RADIUS = 0.05
-_CLICK_STALL_LIMIT = 3
-_CLICK_HISTORY_LIMIT = 8
-
-
-@dataclass(frozen=True)
-class _ClickAttempt:
-    x: float
-    y: float
-    target_key: tuple[Any, ...]
 
 
 class ComputerToolArgs(BaseModel):
@@ -83,8 +73,7 @@ class ComputerToolArgs(BaseModel):
         default=None,
         description=(
             "Target for click, double_click, move, or replace_text. Use "
-            '{"element_id": "<exact id>", "surface": "<exact surface>"} for '
-            "a semantic element whose observation exposes surface, or "
+            '{"element_id": "<exact id>"} for a semantic element, or '
             '{"point": {"x": <0..1>, "y": <0..1>}} for normalized coordinates.'
         ),
     )
@@ -217,7 +206,6 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         )
         self._headless = headless
         self._environments: dict[str, ComputerEnvironment] = {}
-        self._recent_clicks: dict[str, list[_ClickAttempt]] = {}
 
     @property
     def name(self) -> str:
@@ -255,8 +243,9 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         inline_markdown verbatim in final_answer. Do not claim an image was delivered
         unless screenshot returned that public artifact.
 
-        The latest observation's `metadata.supported_actions` list is authoritative.
-        Never call an action that is absent. For browser URL changes, call the
+        For state-changing actions, the latest observation's
+        `metadata.supported_actions` list is authoritative. Never call a
+        state-changing action that is absent. For browser URL changes, call the
         atomic `navigate` action when it is present; never simulate navigation by
         clicking, typing, or pressing keys in the address bar. If `navigate` is
         absent, explain that this exact window cannot navigate safely.
@@ -265,13 +254,9 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
 
         Coordinates are normalized: (0, 0) is the viewport top-left and (1, 1)
         is the bottom-right.
-        Never keep clicking the same small region when the requested state does
-        not appear. After a click, inspect the returned observation and address
-        the newly visible semantic element or a clearly different coordinate.
         For a semantic target, send
-        `target={{"element_id": "<exact element_id>", "surface": "<exact surface>"}}`.
-        When a semantic element exposes `surface`, copying it is mandatory; the
-        action is refused before delivery when surface is omitted or mismatched.
+        `target={{"element_id": "<exact element_id>"}}`.
+        Semantic elements may expose a `surface` provenance field.
         `application_chrome` means browser/application controls, not website
         content. If a document goal has no matching `document` element, use the
         screenshot and a coordinate instead of a similarly named application
@@ -384,18 +369,6 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
                             "around this capability through another tool."
                         ),
                     )
-                if parsed.expected_frame_id == current.frame_id:
-                    repeated_click_error = self._record_click_attempt(
-                        session_id,
-                        action,
-                        current,
-                    )
-                    if repeated_click_error is not None:
-                        return self._error_result(
-                            session_id=session_id,
-                            frame_id=current.frame_id,
-                            error=repeated_click_error,
-                        )
                 observation = await environment.execute(
                     ComputerActionBatch(
                         session_id=session_id,
@@ -403,14 +376,6 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
                         actions=[action],
                     )
                 )
-                if action.type not in {
-                    ComputerActionType.CLICK,
-                    ComputerActionType.DOUBLE_CLICK,
-                } or (
-                    current.active_url != observation.active_url
-                    or current.title != observation.title
-                ):
-                    self._recent_clicks.pop(session_id, None)
         except (
             ComputerEnvironmentError,
             FileNotFoundError,
@@ -435,7 +400,10 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
         inline_markdown: str | None = None
         if action.type is ComputerActionType.SCREENSHOT:
             try:
-                public_file_ref = self._publish_screenshot(observation)
+                public_file_ref = await asyncio.to_thread(
+                    self._publish_screenshot,
+                    observation,
+                )
             except (
                 FileNotFoundError,
                 OSError,
@@ -534,7 +502,6 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
     async def teardown(self, task_id: str | None = None) -> None:
         environments = list(self._environments.values())
         self._environments.clear()
-        self._recent_clicks.clear()
         for environment in environments:
             try:
                 await environment.close()
@@ -545,82 +512,6 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
                     exc_info=True,
                 )
         await self._close_task_sessions(task_id)
-
-    def _record_click_attempt(
-        self,
-        session_id: str,
-        action: ComputerAction,
-        observation: ComputerObservation,
-    ) -> str | None:
-        if action.type not in {
-            ComputerActionType.CLICK,
-            ComputerActionType.DOUBLE_CLICK,
-        }:
-            return None
-        click_target = self._click_target(action, observation)
-        if click_target is None:
-            return None
-        point, target_key = click_target
-        recent = self._recent_clicks.setdefault(session_id, [])
-        nearby_count = sum(
-            attempt.target_key == target_key
-            and (attempt.x - point.x) ** 2 + (attempt.y - point.y) ** 2
-            <= _CLICK_STALL_RADIUS**2
-            for attempt in recent
-        )
-        if nearby_count >= _CLICK_STALL_LIMIT:
-            return (
-                "Repeated click region stalled: this area has already been "
-                f"targeted {_CLICK_STALL_LIMIT} times without a page or window "
-                "transition. Do not retry the same area. Use a newly exposed "
-                "semantic element, choose a clearly different coordinate from "
-                "the latest observation, or report the blocker."
-            )
-        recent.append(
-            _ClickAttempt(
-                x=point.x,
-                y=point.y,
-                target_key=target_key,
-            )
-        )
-        del recent[:-_CLICK_HISTORY_LIMIT]
-        return None
-
-    @staticmethod
-    def _click_target(
-        action: ComputerAction,
-        observation: ComputerObservation,
-    ) -> tuple[NormalizedPoint, tuple[Any, ...]] | None:
-        target = action.target
-        if target is None:
-            return None
-        if target.point is not None:
-            return target.point, ("point",)
-        element = next(
-            (
-                candidate
-                for candidate in observation.elements
-                if candidate.element_id == target.element_id
-            ),
-            None,
-        )
-        if element is None:
-            return None
-        point = NormalizedPoint(
-            x=element.bounds.x + element.bounds.width / 2,
-            y=element.bounds.y + element.bounds.height / 2,
-        )
-        return point, (
-            "element",
-            element.surface.value if element.surface is not None else "",
-            (element.role or "").casefold(),
-            element.label or "",
-            element.text or "",
-            round(element.bounds.x, 3),
-            round(element.bounds.y, 3),
-            round(element.bounds.width, 3),
-            round(element.bounds.height, 3),
-        )
 
     @staticmethod
     def _error_result(
