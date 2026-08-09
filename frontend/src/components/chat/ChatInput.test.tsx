@@ -190,6 +190,49 @@ describe("ChatInput", () => {
     })
   })
 
+  it("does not submit a stale local browser target after the feature is hidden", async () => {
+    apiRequestMock.mockImplementation((url: string) => {
+      if (url === "http://api.local/api/computer/local-browser/readiness") {
+        return Promise.resolve(
+          new Response(JSON.stringify({
+            ready: true,
+            application: "Google Chrome",
+            windows: [{
+              pid: 100,
+              window_id: 20,
+              application: "Google Chrome",
+              title: "GitHub",
+            }],
+            issues: [],
+            message: "",
+          }), { status: 200, headers: { "Content-Type": "application/json" } }),
+        )
+      }
+      return Promise.resolve(emptyJsonResponse())
+    })
+    const onSend = vi.fn()
+    const commonProps = {
+      hideFileUpload: true,
+      inputValue: "inspect this page",
+      onInputChange: vi.fn(),
+      onSend,
+      taskConfig: { model: "model-1" },
+    }
+    const { container, rerender } = render(<ChatInput {...commonProps} />)
+
+    fireEvent.click(screen.getByLabelText("chatPage.input.actions.add"))
+    fireEvent.click(screen.getByText("chatPage.input.localBrowser.label"))
+    fireEvent.click(await screen.findByText("GitHub"))
+    expect(screen.getByLabelText("Google Chrome · GitHub")).toBeInTheDocument()
+
+    rerender(<ChatInput {...commonProps} readOnlyConfig />)
+    expect(screen.queryByLabelText("Google Chrome · GitHub")).not.toBeInTheDocument()
+    fireEvent.submit(container.querySelector("form") as HTMLFormElement)
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1))
+    expect(onSend.mock.calls[0][1]).not.toHaveProperty("runtimeExtensions")
+  })
+
   it("disambiguates browser windows with the same application and title", async () => {
     apiRequestMock.mockImplementation((url: string) => {
       if (url === "http://api.local/api/computer/local-browser/readiness") {

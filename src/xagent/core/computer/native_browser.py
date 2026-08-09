@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import struct
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -26,7 +27,6 @@ from .environment import (
     ComputerTargetNotFoundError,
 )
 from .input_platform import (
-    ComputerInputPlatform,
     computer_input_metadata,
     host_computer_input_platform,
 )
@@ -63,13 +63,6 @@ _BASE_SUPPORTED_ACTIONS = tuple(
     action
     for action in ComputerActionType
     if action not in {ComputerActionType.MOVE, ComputerActionType.NAVIGATE}
-)
-_PID_KEYBOARD_ACTIONS = frozenset(
-    {
-        ComputerActionType.TYPE,
-        ComputerActionType.REPLACE_TEXT,
-        ComputerActionType.KEYPRESS,
-    }
 )
 _UNSCOPED_KEYBOARD_ACTIONS = frozenset(
     {
@@ -127,6 +120,29 @@ _PIXEL_FRAME_ERROR_MARKERS = (
 _POST_ACTION_SETTLE_SECONDS = 0.25
 _POST_ACTION_SETTLE_RETRIES = 3
 _SEMANTIC_SETTLE_RADIUS = 0.06
+_SENSITIVE_AUTOCOMPLETE_VALUES = frozenset(
+    {
+        "cc-csc",
+        "current-password",
+        "new-password",
+        "one-time-code",
+    }
+)
+_SENSITIVE_LABEL_MARKERS = (
+    "password",
+    "passcode",
+    "security code",
+    "verification code",
+    "one-time code",
+    "密码",
+    "口令",
+    "验证码",
+    "安全码",
+    "动态码",
+)
+_SENSITIVE_LABEL_TOKEN_RE = re.compile(
+    r"(?:^|[^a-z0-9])(?:otp|2fa|mfa|cvv|cvc|pin|ssn)(?:$|[^a-z0-9])"
+)
 
 CuaDriverClientFactory = Callable[[], CuaDriverClientProtocol]
 LOCAL_BROWSER_TASK_EXTENSION = "local_browser"
@@ -353,10 +369,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             updated_result = {
                 **dict(action_result),
                 "verified": False,
-                "escalation": {
-                    "recommended": "foreground",
-                    "reason": "no_observable_state_change_after_background_delivery",
-                },
+                "code": "no_observable_state_change_after_background_delivery",
             }
             observation = observation.model_copy(
                 update={
@@ -819,8 +832,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         for action in _BASE_SUPPORTED_ACTIONS:
             if action in _UNSCOPED_KEYBOARD_ACTIONS:
                 unsupported_reasons[action.value] = _UNSCOPED_KEYBOARD_REFUSAL_REASON
-            elif keyboard_reason is not None and action in _PID_KEYBOARD_ACTIONS:
-                unsupported_reasons[action.value] = keyboard_reason
             else:
                 supported.append(action.value)
         address_available = (
@@ -886,9 +897,12 @@ class NativeBrowserEnvironment(ComputerEnvironment):
                 continue
             token = str(raw.get("element_token") or "").strip()
             index = self._optional_int(raw.get("element_index"))
-            if not token and index is None:
+            # element_index is scoped to one driver snapshot and can be reused
+            # for a different element after a worker restart. Only expose the
+            # opaque token that cua-driver can validate against its snapshot.
+            if not token:
                 continue
-            element_id = token or f"cua-index:{index}"
+            element_id = token
             role = str(raw.get("role") or "").strip() or None
             label = str(raw.get("label") or "").strip() or None
             sensitive = self._is_sensitive_element(
@@ -1074,13 +1088,23 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             raw.get(flag) is True for flag in ("sensitive", "protected", "is_password")
         ):
             return True
+        autocomplete = str(raw.get("autocomplete") or "").strip().casefold()
+        if autocomplete in _SENSITIVE_AUTOCOMPLETE_VALUES:
+            return True
         is_text_input = any(
             marker in role_text for marker in ("text", "input", "field", "edit")
         )
-        label_text = (label or "").casefold()
-        return is_text_input and any(
-            marker in label_text
-            for marker in ("password", "passcode", "security code", "verification code")
+        label_text = " ".join(
+            str(value or "").casefold()
+            for value in (
+                label,
+                raw.get("placeholder"),
+                raw.get("description"),
+            )
+        )
+        return is_text_input and (
+            any(marker in label_text for marker in _SENSITIVE_LABEL_MARKERS)
+            or _SENSITIVE_LABEL_TOKEN_RE.search(label_text) is not None
         )
 
     @staticmethod
@@ -1178,24 +1202,15 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             await self._call_action(tool_name, arguments)
             return
         if action.type is ComputerActionType.REPLACE_TEXT:
-            self._document_text_target(action)
-            x, y = self._action_point_pixels(action)
-            modifier = self._primary_driver_modifier()
+            element = self._document_text_target(action)
             await self._call_action(
-                "hotkey",
+                "set_value",
                 {
-                    **common,
-                    "keys": [modifier, "a"],
-                    "x": x,
-                    "y": y,
-                },
-                remember=False,
-            )
-            await self._call_action(
-                "type_text",
-                {
-                    **common,
-                    "text": action.text or "",
+                    "session": self.session_id,
+                    "pid": target.pid,
+                    "window_id": target.window_id,
+                    **self._element_arguments(element),
+                    "value": action.text or "",
                 },
             )
             return
@@ -1361,9 +1376,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         token = str(element.metadata.get("element_token") or "").strip()
         if token:
             return {"element_token": token}
-        index = element.metadata.get("element_index")
-        if isinstance(index, int):
-            return {"element_index": index}
         return {}
 
     @staticmethod
@@ -1470,6 +1482,11 @@ class NativeBrowserEnvironment(ComputerEnvironment):
                 "replace_text is limited to document elements in the selected "
                 "browser window; browser chrome and unknown surfaces are not "
                 "authorized"
+            )
+        if element.metadata.get("sensitive") is True:
+            raise ValueError(
+                "replace_text is disabled for sensitive input elements in the "
+                "local browser"
             )
         return element
 
@@ -1587,28 +1604,16 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             return "background"
         observation = self.current_observation
         metadata = observation.metadata if observation is not None else {}
-        last_result = metadata.get("last_action_result")
-        escalations = [
-            last_result.get("escalation") if isinstance(last_result, Mapping) else None,
-            metadata.get("driver_escalation"),
-        ]
-        for escalation in escalations:
-            if (
-                isinstance(escalation, Mapping)
-                and str(escalation.get("recommended") or "").strip().lower()
-                == "foreground"
-            ):
-                return "foreground"
+        escalation = metadata.get("driver_escalation")
+        if (
+            isinstance(escalation, Mapping)
+            and str(escalation.get("recommended") or "").strip().lower() == "foreground"
+        ):
+            return "foreground"
         raise ValueError(
-            "foreground delivery requires a cua-driver escalation recommendation "
+            "foreground delivery requires a current cua-driver escalation recommendation "
             "from the current observation"
         )
-
-    @staticmethod
-    def _primary_driver_modifier() -> str:
-        if host_computer_input_platform() is ComputerInputPlatform.MACOS:
-            return "cmd"
-        return "ctrl"
 
     @staticmethod
     def _optional_int(value: Any) -> int | None:

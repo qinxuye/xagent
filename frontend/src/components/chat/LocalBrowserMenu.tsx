@@ -64,7 +64,9 @@ export function LocalBrowserMenu({
     readinessRequestRef.current = null;
     request?.abort();
     setLoading(false);
-    setReadiness(null);
+    // Window choices are short-lived, but the last readiness result remains
+    // useful for the already selected target's status chip.
+    setReadiness((current) => current ? { ...current, windows: [] } : null);
   }, []);
 
   useEffect(() => () => {
@@ -121,13 +123,13 @@ export function LocalBrowserMenu({
         .map(([key]) => key),
     );
   }, [readiness?.windows]);
-  const status = loading
-    ? t("chatPage.input.localBrowser.checking")
-    : readiness?.ready
-      ? selectedTarget
-        ? [selectedTarget.application, selectedTarget.title].filter(Boolean).join(" · ")
-        : t("chatPage.input.localBrowser.chooseWindow")
-      : readiness?.message || t("chatPage.input.localBrowser.unavailable");
+  const status = selectedTarget
+    ? [selectedTarget.application, selectedTarget.title].filter(Boolean).join(" · ")
+    : loading
+      ? t("chatPage.input.localBrowser.checking")
+      : readiness?.ready
+        ? t("chatPage.input.localBrowser.chooseWindow")
+        : readiness?.message || t("chatPage.input.localBrowser.unavailable");
 
   return (
     <div className="flex min-w-0 items-center gap-1.5">

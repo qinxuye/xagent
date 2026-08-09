@@ -417,12 +417,11 @@ async def test_local_browser_refuses_ambiguous_pid_keyboard_actions() -> None:
     assert observation.metadata["background_input"] == driver.background_input
     assert "click" in observation.metadata["supported_actions"]
     assert "type" not in observation.metadata["supported_actions"]
-    assert "replace_text" not in observation.metadata["supported_actions"]
+    assert "replace_text" in observation.metadata["supported_actions"]
     assert "keypress" not in observation.metadata["supported_actions"]
     assert "navigate" in observation.metadata["supported_actions"]
     assert observation.metadata["unsupported_actions"] == {
         "type": "unscoped_keyboard_input_disabled",
-        "replace_text": "same_pid_keyboard_ambiguity",
         "keypress": "unscoped_keyboard_input_disabled",
     }
 
@@ -524,9 +523,91 @@ async def test_local_browser_limits_keyboard_input_to_document_text_targets() ->
             )
         )
 
-    assert any(name == "hotkey" for name, _ in driver.calls[:action_call_count])
-    assert any(name == "type_text" for name, _ in driver.calls[:action_call_count])
+    set_value = next(
+        payload
+        for name, payload in driver.calls[:action_call_count]
+        if name == "set_value"
+    )
+    assert set_value["element_token"] == "snapshot-1:3"
+    assert set_value["value"] == "safe site search"
+    assert all(
+        name not in {"hotkey", "type_text"}
+        for name, _ in driver.calls[:action_call_count]
+    )
     assert len(driver.calls) == action_call_count + 1  # Bound-window revalidation only.
+
+
+@pytest.mark.asyncio
+async def test_local_browser_rejects_sensitive_document_text_targets() -> None:
+    elements = [
+        {
+            "element_index": 0,
+            "element_token": "snapshot-1:0",
+            "role": "AXWindow",
+            "depth": 0,
+            "frame": {"x": 100, "y": 200, "w": 1000, "h": 800},
+        },
+        {
+            "element_index": 1,
+            "element_token": "snapshot-1:1",
+            "role": "AXWebArea",
+            "depth": 1,
+            "parent_index": 0,
+            "frame": {"x": 100, "y": 280, "w": 1000, "h": 720},
+        },
+        {
+            "element_index": 2,
+            "element_token": "snapshot-1:2",
+            "role": "AXTextField",
+            "label": "一次性验证码 (OTP)",
+            "depth": 2,
+            "parent_index": 1,
+            "frame": {"x": 300, "y": 350, "w": 400, "h": 40},
+        },
+    ]
+    driver = FakeCuaDriver(elements=elements)
+    environment = make_environment(driver)
+    observation = await environment.observe()
+
+    sensitive = next(
+        element
+        for element in observation.elements
+        if element.element_id == "snapshot-1:2"
+    )
+    assert sensitive.label == "Sensitive input"
+    assert sensitive.metadata["sensitive"] is True
+
+    with pytest.raises(ValueError, match="sensitive input"):
+        await environment.execute(
+            batch(
+                observation.frame_id,
+                ComputerAction(
+                    type=ComputerActionType.REPLACE_TEXT,
+                    target=ComputerTarget(element_id="snapshot-1:2"),
+                    text="123456",
+                ),
+            )
+        )
+
+    assert all(name != "set_value" for name, _ in driver.calls)
+
+
+@pytest.mark.asyncio
+async def test_local_browser_does_not_expose_snapshot_indices_without_tokens() -> None:
+    driver = FakeCuaDriver(
+        elements=[
+            {
+                "element_index": 4,
+                "role": "AXButton",
+                "label": "Stale target",
+                "frame": {"x": 200, "y": 300, "w": 200, "h": 80},
+            }
+        ]
+    )
+
+    observation = await make_environment(driver).observe()
+
+    assert observation.elements == []
 
 
 @pytest.mark.asyncio
@@ -961,7 +1042,7 @@ async def test_local_browser_waits_for_unverified_semantic_state_change(
 
 
 @pytest.mark.asyncio
-async def test_local_browser_recommends_foreground_only_after_background_stalls(
+async def test_local_browser_records_stall_without_authorizing_foreground(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def no_sleep(_seconds: float) -> None:
@@ -997,23 +1078,22 @@ async def test_local_browser_recommends_foreground_only_after_background_stalls(
         )
     )
 
-    assert stalled.metadata["last_action_result"]["escalation"] == {
-        "recommended": "foreground",
-        "reason": "no_observable_state_change_after_background_delivery",
-    }
-
-    await environment.execute(
-        batch(
-            stalled.frame_id,
-            ComputerAction(
-                type=ComputerActionType.CLICK,
-                target=ComputerTarget(element_id="snapshot-1:4"),
-                metadata={"delivery_mode": "foreground"},
-            ),
-        )
+    assert stalled.metadata["last_action_result"]["code"] == (
+        "no_observable_state_change_after_background_delivery"
     )
-    clicks = [payload for name, payload in driver.calls if name == "click"]
-    assert clicks[-1]["delivery_mode"] == "foreground"
+    assert "escalation" not in stalled.metadata["last_action_result"]
+
+    with pytest.raises(ValueError, match="current cua-driver escalation"):
+        await environment.execute(
+            batch(
+                stalled.frame_id,
+                ComputerAction(
+                    type=ComputerActionType.CLICK,
+                    target=ComputerTarget(element_id="snapshot-1:4"),
+                    metadata={"delivery_mode": "foreground"},
+                ),
+            )
+        )
 
 
 @pytest.mark.asyncio

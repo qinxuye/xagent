@@ -582,6 +582,10 @@ export function ChatInput({
     !allowsLiveGuidanceInput &&
     !isStoppedTaskStatus(normalizedTaskStatus);
   const showLocalBrowser = Boolean(user?.is_admin) && !readOnlyConfig && !hideConfig;
+  const activeLocalBrowserTarget = showLocalBrowser ? localBrowserTarget : null;
+  useEffect(() => {
+    if (!showLocalBrowser) setLocalBrowserTarget(null);
+  }, [showLocalBrowser]);
   const voiceInputLabel =
     voiceInput.status === "recording"
       ? t("voiceInput.stop")
@@ -683,7 +687,7 @@ export function ChatInput({
       const executionMode = taskConfig?.executionMode;
       const deliveryKey = JSON.stringify([
         messageToSend,
-        localBrowserTarget,
+        activeLocalBrowserTarget,
         enabledFiles.map((file) => [
           file.name,
           file.size,
@@ -699,11 +703,11 @@ export function ChatInput({
       const configToSend = {
         ...agentConfig,
         clientMessageId,
-        ...(localBrowserTarget
+        ...(activeLocalBrowserTarget
           ? {
               runtimeExtensions: {
                 ...(agentConfig.runtimeExtensions || {}),
-                local_browser: { ...localBrowserTarget },
+                local_browser: { ...activeLocalBrowserTarget },
               },
             }
           : {}),
