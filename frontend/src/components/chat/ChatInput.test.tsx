@@ -117,6 +117,71 @@ describe("ChatInput", () => {
     expect(onSend).not.toHaveBeenCalled()
   })
 
+  it("binds a new task to a selected local browser window", async () => {
+    apiRequestMock.mockImplementation((url: string) => {
+      if (url === "http://api.local/api/computer/local-browser/readiness") {
+        return Promise.resolve(
+          new Response(JSON.stringify({
+            ready: true,
+            connected: true,
+            attached: true,
+            application: "Google Chrome",
+            title: "GitHub",
+            windows: [
+              {
+                pid: 100,
+                window_id: 20,
+                application: "Google Chrome",
+                title: "GitHub",
+              },
+            ],
+            permissions: {},
+            issues: [],
+            message: "",
+          }), { status: 200, headers: { "Content-Type": "application/json" } })
+        )
+      }
+      return Promise.resolve(emptyJsonResponse())
+    })
+    const onSend = vi.fn()
+    const { container } = render(
+      <ChatInput
+        hideFileUpload
+        inputValue="inspect this page"
+        onInputChange={vi.fn()}
+        onSend={onSend}
+        taskConfig={{ model: "model-1" }}
+      />
+    )
+
+    fireEvent.click(screen.getByLabelText("chatPage.input.actions.add"))
+    fireEvent.click(screen.getByText("chatPage.input.localBrowser.label"))
+    fireEvent.click(await screen.findByText("GitHub"))
+
+    expect(screen.queryByText("chatPage.input.localBrowser.chipLabel")).not.toBeInTheDocument()
+    expect(screen.getByRole("status", { name: "Google Chrome · GitHub" })).toBeInTheDocument()
+    const form = container.querySelector("form") as HTMLFormElement
+    expect(form).toHaveClass("rounded-2xl")
+    expect(form).not.toHaveClass("rounded-tl-none")
+    fireEvent.submit(form)
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith(
+        "inspect this page",
+        expect.objectContaining({
+          runtimeExtensions: {
+            local_browser: {
+              pid: 100,
+              window_id: 20,
+              application: "Google Chrome",
+              title: "GitHub",
+            },
+          },
+        }),
+      )
+    })
+  })
+
   it("suppresses preseeded files and restored file previews when files are disabled", () => {
     const onSend = vi.fn()
     const onFilesChange = vi.fn()
