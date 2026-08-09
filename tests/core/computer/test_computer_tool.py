@@ -227,6 +227,25 @@ async def test_computer_tool_executes_normalized_bare_element_id_target() -> Non
     assert target.element_id == "button-1"
 
 
+@pytest.mark.asyncio
+async def test_computer_tool_returns_environment_factory_failure() -> None:
+    def failing_factory(**_kwargs: Any) -> ComputerEnvironment:
+        raise RuntimeError("local browser authorization was revoked")
+
+    tool = ComputerTool(
+        task_id="task-1",
+        workspace=object(),  # type: ignore[arg-type]
+        environment_factory=failing_factory,
+    )
+
+    result = await tool.run_json_async({})
+
+    assert result["success"] is False
+    assert result["session_id"] == "task-1"
+    assert "authorization was revoked" in result["error"]
+    assert tool._environments == {}
+
+
 @pytest.mark.parametrize(
     ("serialized_target", "element_id", "point"),
     [

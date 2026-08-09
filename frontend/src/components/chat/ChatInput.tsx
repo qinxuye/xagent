@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { cn, generateClientMessageId, getApiUrl, getUploadApiUrl } from "@/lib/utils";
 import { useI18n } from "@/contexts/i18n-context";
 import { useApp } from "@/contexts/app-context-chat";
+import { useAuth } from "@/contexts/auth-context";
 import { ConfigDialog } from "@/components/config-dialog";
 import { apiRequest, getUploadErrorMessage, isJsonRecord, parseApiResponse, UPLOAD_ERROR_MESSAGES } from "@/lib/api-wrapper";
 import { sanitizeFilesDisabledPresentationText } from "@/lib/files-disabled-presentation";
@@ -170,6 +171,7 @@ export function ChatInput({
   const deliveryAttemptRef = useRef<{ key: string; clientMessageId: string } | null>(null);
   const dragDepthRef = useRef(0);
   const { t } = useI18n();
+  const { user } = useAuth();
   const { openFilePreview } = useApp();
   const voiceInput = useVoiceInputControls({ enabled: voiceInputEnabled });
 
@@ -579,6 +581,7 @@ export function ChatInput({
     !!isLoading &&
     !allowsLiveGuidanceInput &&
     !isStoppedTaskStatus(normalizedTaskStatus);
+  const showLocalBrowser = Boolean(user?.is_admin) && !readOnlyConfig && !hideConfig;
   const voiceInputLabel =
     voiceInput.status === "recording"
       ? t("voiceInput.stop")
@@ -1113,7 +1116,7 @@ export function ChatInput({
                   </>
                 )}
                 {/* Add files or bind this new task to a local host window. */}
-                {(!hideFileUpload && !filesDisabled) || (!readOnlyConfig && !hideConfig) ? (
+                {(!hideFileUpload && !filesDisabled) || showLocalBrowser ? (
                   <>
                     {!hideFileUpload && !filesDisabled && (
                       <input
@@ -1134,7 +1137,7 @@ export function ChatInput({
                           ? () => fileInputRef.current?.click()
                           : undefined
                       }
-                      showLocalBrowser={!readOnlyConfig && !hideConfig}
+                      showLocalBrowser={showLocalBrowser}
                     />
                   </>
                 ) : null}

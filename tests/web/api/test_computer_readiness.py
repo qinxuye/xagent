@@ -74,3 +74,20 @@ async def test_local_browser_readiness_probes_for_enabled_admin(
     )
 
     assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_local_browser_readiness_rejects_non_browser_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XAGENT_NATIVE_BROWSER_ENABLED", "true")
+    monkeypatch.setenv("XAGENT_NATIVE_BROWSER_APP_NAME", "Terminal")
+
+    result = await computer.get_local_browser_readiness_endpoint(
+        Response(),
+        user=SimpleNamespace(is_admin=True),  # type: ignore[arg-type]
+    )
+
+    assert result.ready is False
+    assert [issue.code for issue in result.issues] == ["invalid_configuration"]
+    assert "supported browser" in result.message

@@ -27,7 +27,6 @@ async def get_local_browser_readiness_endpoint(
     """Return whether this administrator can control the configured browser."""
 
     response.headers["Cache-Control"] = "no-store"
-    browser_app_name = get_native_browser_app_name()
     if not get_native_browser_enabled():
         issue = LocalBrowserReadinessIssue(
             code="disabled",
@@ -37,7 +36,7 @@ async def get_local_browser_readiness_endpoint(
             ready=False,
             connected=False,
             attached=False,
-            application=browser_app_name,
+            application="Local browser",
             issues=[issue],
             message=issue.message,
         )
@@ -53,7 +52,22 @@ async def get_local_browser_readiness_endpoint(
             ready=False,
             connected=False,
             attached=False,
-            application=browser_app_name,
+            application="Local browser",
+            issues=[issue],
+            message=issue.message,
+        )
+    try:
+        get_native_browser_app_name()
+    except ValueError as exc:
+        issue = LocalBrowserReadinessIssue(
+            code="invalid_configuration",
+            message=str(exc),
+        )
+        return LocalBrowserReadiness(
+            ready=False,
+            connected=False,
+            attached=False,
+            application="Local browser",
             issues=[issue],
             message=issue.message,
         )

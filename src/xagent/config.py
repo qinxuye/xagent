@@ -54,6 +54,19 @@ BROWSER_CUA_DRIVER_COMMAND = "XAGENT_BROWSER_CUA_DRIVER_COMMAND"
 BROWSER_CUA_DRIVER_SOCKET = "XAGENT_BROWSER_CUA_DRIVER_SOCKET"
 BROWSER_CUA_DRIVER_TIMEOUT_SECONDS = "XAGENT_BROWSER_CUA_DRIVER_TIMEOUT_SECONDS"
 BROWSER_CUA_DRIVER_MAX_ELEMENTS = "XAGENT_BROWSER_CUA_DRIVER_MAX_ELEMENTS"
+SUPPORTED_NATIVE_BROWSER_APP_NAMES = frozenset(
+    {
+        "Brave Browser",
+        "Google Chrome",
+        "Google Chrome Canary",
+        "Chromium",
+        "Microsoft Edge",
+        "Vivaldi",
+    }
+)
+_NATIVE_BROWSER_APP_NAMES_BY_CASEFOLD = {
+    name.casefold(): name for name in SUPPORTED_NATIVE_BROWSER_APP_NAMES
+}
 MAX_UPLOAD_SIZE = "XAGENT_MAX_UPLOAD_SIZE"
 FILE_STORAGE_URI = "XAGENT_FILE_STORAGE_URI"
 FILE_STORAGE_OPTIONS = "XAGENT_FILE_STORAGE_OPTIONS"
@@ -618,9 +631,16 @@ def get_native_browser_enabled() -> bool:
 def get_native_browser_app_name() -> str:
     """Browser application exposed by the Local browser runtime."""
 
-    return (
+    configured = (
         os.getenv(NATIVE_BROWSER_APP_NAME, "Google Chrome").strip() or "Google Chrome"
     )
+    canonical = _NATIVE_BROWSER_APP_NAMES_BY_CASEFOLD.get(configured.casefold())
+    if canonical is None:
+        supported = ", ".join(sorted(SUPPORTED_NATIVE_BROWSER_APP_NAMES))
+        raise ValueError(
+            f"{NATIVE_BROWSER_APP_NAME} must name a supported browser: {supported}"
+        )
+    return canonical
 
 
 def get_browser_cua_driver_command() -> str:

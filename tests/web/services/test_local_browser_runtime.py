@@ -156,6 +156,17 @@ def test_local_browser_create_requires_enablement_admin_and_valid_target(
             },
         )
 
+    monkeypatch.setenv("XAGENT_NATIVE_BROWSER_APP_NAME", "Terminal")
+    with pytest.raises(TaskRuntimeClientError, match="supported browser"):
+        provider.on_task_created(
+            context,
+            {
+                "pid": 100,
+                "window_id": 20,
+                "application": "Terminal",
+            },
+        )
+
 
 @pytest.mark.parametrize(
     ("configuration", "message"),
@@ -220,6 +231,50 @@ def test_local_browser_contributes_standard_computer_tool_only_when_bound(
     assert contribution.preferred_input_modalities == ("image",)
     assert "not a browser extension or remote relay" in (contribution.environment or "")
     assert sessions[-1].closed is True
+
+
+@pytest.mark.asyncio
+async def test_bound_local_browser_fails_closed_after_admin_demotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XAGENT_NATIVE_BROWSER_ENABLED", "true")
+    provider = LocalBrowserTaskRuntimeProvider()
+    context, sessions = make_context(bound=True, admin=True)
+    provider.on_task_created(
+        context,
+        {
+            "pid": 100,
+            "window_id": 20,
+            "application": "Google Chrome",
+        },
+    )
+    sessions[-1].user.is_admin = False
+
+    contribution = provider.build_runtime(context)
+
+    assert isinstance(contribution, TaskRuntimeContribution)
+    assert [tool.name for tool in contribution.tools] == ["computer"]
+    assert (
+        await create_browser_tools(
+            SimpleNamespace(
+                get_browser_tools_enabled=lambda: True,
+                get_task_runtime_contribution=lambda: merge_task_runtime_contributions(
+                    {LOCAL_BROWSER_TASK_EXTENSION: contribution}
+                ),
+            )
+        )
+        == []
+    )
+    result = await contribution.tools[0].run_json_async({})
+    assert result["success"] is False
+    assert "authorization was revoked" in result["error"]
+    assert provider.public_metadata(context) == {
+        "kind": "local_browser",
+        "enabled": False,
+        "reason": "authorization_revoked",
+        "perception_mode": "auto",
+        "control_transport": "native_accessibility",
+    }
 
 
 @pytest.mark.asyncio

@@ -328,20 +328,19 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
                 error=f"Invalid computer action: {exc}",
             )
 
-        environment = self._environments.get(session_id)
-        if environment is None:
-            environment = self._environment_factory(
-                session_id=session_id,
-                workspace=self._workspace,
-                headless=self._headless,
-            )
-            self._environments[session_id] = environment
-
         observation_only = action.type in {
             ComputerActionType.OBSERVE,
             ComputerActionType.SCREENSHOT,
         }
+        environment = self._environments.get(session_id)
         try:
+            if environment is None:
+                environment = self._environment_factory(
+                    session_id=session_id,
+                    workspace=self._workspace,
+                    headless=self._headless,
+                )
+                self._environments[session_id] = environment
             current = environment.current_observation
             if current is None:
                 if not observation_only:
@@ -399,14 +398,14 @@ class ComputerTool(BrowserTaskSessionMixin, AbstractBaseTool):
             RuntimeError,
             ValueError,
         ) as exc:
-            current = environment.current_observation
+            current = environment.current_observation if environment else None
             return self._error_result(
                 session_id=session_id,
                 frame_id=current.frame_id if current else None,
                 error=str(exc),
             )
         except Exception as exc:  # noqa: BLE001 - provider failures become tool results.
-            current = environment.current_observation
+            current = environment.current_observation if environment else None
             return self._error_result(
                 session_id=session_id,
                 frame_id=current.frame_id if current else None,

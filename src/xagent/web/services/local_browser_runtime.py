@@ -60,19 +60,41 @@ class LocalBrowserTaskRuntimeProvider:
         if not _task_is_bound(context, self.extension_name):
             return None
         if context.workspace is None:
-            raise RuntimeError("Local browser requires a task workspace")
+            return _unavailable_runtime(
+                context,
+                "Local browser requires a task workspace.",
+            )
+        if not get_native_browser_enabled():
+            return _unavailable_runtime(
+                context,
+                "Local browser is disabled on this Xagent host.",
+            )
+        if not _task_owner_is_admin(context):
+            return _unavailable_runtime(
+                context,
+                "Local browser authorization was revoked because the task owner "
+                "is no longer an Xagent administrator.",
+            )
 
         target = _task_target(context)
         if target is None:
-            raise RuntimeError("Local browser task has no selected browser window")
+            return _unavailable_runtime(
+                context,
+                "Local browser task has no selected browser window.",
+            )
         perception_mode = target.get(
             "perception_mode", ComputerPerceptionMode.AUTO.value
         )
+        try:
+            browser_app_name = get_native_browser_app_name()
+        except ValueError as exc:
+            return _unavailable_runtime(context, str(exc))
         environment_factory = partial(
-            NativeBrowserEnvironment,
+            _authorized_native_browser_environment,
+            context,
             target_pid=target["pid"],
             target_window_id=target["window_id"],
-            browser_app_name=get_native_browser_app_name(),
+            browser_app_name=browser_app_name,
             perception_mode=perception_mode,
         )
         tool = ComputerTool(
@@ -115,10 +137,20 @@ class LocalBrowserTaskRuntimeProvider:
     ) -> Mapping[str, Any] | None:
         if not _task_is_bound(context, self.extension_name):
             return None
+        enabled = get_native_browser_enabled()
+        authorized = enabled and _task_owner_is_admin(context)
+        if not authorized:
+            return {
+                "kind": "local_browser",
+                "enabled": False,
+                "reason": "disabled" if not enabled else "authorization_revoked",
+                "perception_mode": ComputerPerceptionMode.AUTO.value,
+                "control_transport": "native_accessibility",
+            }
         target = _task_target(context)
         metadata: dict[str, Any] = {
             "kind": "local_browser",
-            "enabled": get_native_browser_enabled(),
+            "enabled": True,
             "perception_mode": (
                 target.get("perception_mode", ComputerPerceptionMode.AUTO.value)
                 if target
@@ -150,6 +182,51 @@ def unregister_local_browser_runtime() -> None:
     """Remove the built-in provider at the end of the web-app lifespan."""
 
     unregister_task_extension(LOCAL_BROWSER_TASK_EXTENSION)
+
+
+def _authorized_native_browser_environment(
+    context: TaskRuntimeContext,
+    **kwargs: Any,
+) -> NativeBrowserEnvironment:
+    """Re-check host enablement and owner privilege at environment use time."""
+
+    if not get_native_browser_enabled():
+        raise RuntimeError("Local browser is disabled on this Xagent host.")
+    if not _task_owner_is_admin(context):
+        raise RuntimeError(
+            "Local browser authorization was revoked because the task owner is "
+            "no longer an Xagent administrator."
+        )
+    return NativeBrowserEnvironment(**kwargs)
+
+
+def _unavailable_runtime(
+    context: TaskRuntimeContext,
+    reason: str,
+) -> TaskRuntimeContribution:
+    """Keep a bound task fail-closed without falling back to Playwright."""
+
+    def unavailable_environment(**_kwargs: Any) -> NativeBrowserEnvironment:
+        raise RuntimeError(reason)
+
+    tool = ComputerTool(
+        task_id=str(context.task_id),
+        workspace=context.workspace,
+        environment_factory=unavailable_environment,
+        environment_label="the selected local browser window",
+        headless=False,
+        environment_instructions=(
+            f"Local browser is unavailable for this task: {reason} "
+            "Do not use another browser runtime as a substitute."
+        ),
+    )
+    return TaskRuntimeContribution(
+        tools=(tool,),
+        environment=(
+            f"Local browser is bound to this task but unavailable: {reason} "
+            "Do not substitute a different browser runtime."
+        ),
+    )
 
 
 def _task_is_bound(context: TaskRuntimeContext, extension_name: str) -> bool:
@@ -206,7 +283,10 @@ def _validate_target_configuration(
             "Local browser pid and window_id must be positive."
         )
     application = str(configuration.get("application") or "").strip()
-    browser_app_name = get_native_browser_app_name()
+    try:
+        browser_app_name = get_native_browser_app_name()
+    except ValueError as exc:
+        raise TaskRuntimeClientError(str(exc), status_code=403) from exc
     if application.casefold() != browser_app_name.casefold():
         raise TaskRuntimeClientError(
             f"Local browser only accepts {browser_app_name} windows."

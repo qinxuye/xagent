@@ -205,6 +205,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         self._driver = driver
         self._driver_factory = driver_factory or CuaDriverMCPClient
         self._target: NativeBrowserWindow | None = None
+        self._on_screen_windows: list[NativeBrowserWindow] = []
         self._visible_windows: list[NativeBrowserWindow] = []
         self._session_started = False
         self._last_action_result: dict[str, Any] | None = None
@@ -216,7 +217,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
 
     async def _close(self) -> None:
         driver = self._driver
-        self._driver = None
         if driver is None:
             return
         if self._session_started:
@@ -226,6 +226,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
                 # Closing stdin still tears down process-owned driver state.
                 pass
         await driver.close()
+        self._driver = None
         self._session_started = False
 
     async def health_report(self) -> dict[str, Any]:
@@ -321,10 +322,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         )
         if (
             not isinstance(action_result, Mapping)
-            or (
-                action.type is not ComputerActionType.NAVIGATE
-                and action_result.get("effect") != "unverifiable"
-            )
+            or action_result.get("effect") != "unverifiable"
             or state_changed
         ):
             return observation
@@ -525,6 +523,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             for window in windows
             if window.is_on_screen and window.on_current_space is not False
         ]
+        self._on_screen_windows = visible
         browser_windows = [
             window
             for window in visible
@@ -572,6 +571,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             and parsed.is_on_screen
             and parsed.on_current_space is not False
         ]
+        self._on_screen_windows = visible
         browser_windows = [
             window
             for window in visible
@@ -739,15 +739,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
                 "browser_debugging": False,
             },
             **computer_input_metadata(host_computer_input_platform()),
-            "available_windows": [
-                {
-                    "pid": window.pid,
-                    "window_id": window.window_id,
-                    "application": window.app_name,
-                    "title": window.title,
-                }
-                for window in self._visible_windows[:20]
-            ],
         }
         if result.structured.get("degraded") is True:
             metadata[ELEMENT_EXTRACTION_FAILED_KEY] = True
@@ -821,14 +812,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         target: NativeBrowserWindow,
     ) -> tuple[list[str], dict[str, str]]:
         keyboard_reason = self._pid_keyboard_refusal_reason(background_input)
-        if keyboard_reason is None and not isinstance(background_input, Mapping):
-            same_pid_windows = [
-                window
-                for window in self._visible_windows
-                if self._target is not None and window.pid == self._target.pid
-            ]
-            if len(same_pid_windows) > 1:
-                keyboard_reason = "same_pid_keyboard_ambiguity"
 
         unsupported_reasons: dict[str, str] = {}
         supported: list[str] = []
@@ -855,7 +838,7 @@ class NativeBrowserEnvironment(ComputerEnvironment):
     @staticmethod
     def _pid_keyboard_refusal_reason(background_input: Any) -> str | None:
         if not isinstance(background_input, Mapping):
-            return None
+            return "pid_keyboard_capability_unknown"
         routes = background_input.get("routes")
         if not isinstance(routes, list):
             return "pid_keyboard_capability_unknown"
@@ -1449,24 +1432,25 @@ class NativeBrowserEnvironment(ComputerEnvironment):
     def _validate_unambiguous_pixel_target(self, action: ComputerAction) -> None:
         target_window = self._require_target()
         points = self._pixel_action_points(action)
-        siblings = [
+        occluding_windows = [
             window
-            for window in self._visible_windows
-            if window.pid == target_window.pid
-            and window.window_id != target_window.window_id
+            for window in self._on_screen_windows
+            if (window.pid, window.window_id)
+            != (target_window.pid, target_window.window_id)
+            and window.z_index > target_window.z_index
         ]
         for point in points:
             screen_x = target_window.x + point.x * target_window.width
             screen_y = target_window.y + point.y * target_window.height
             if any(
-                sibling.x <= screen_x <= sibling.x + sibling.width
-                and sibling.y <= screen_y <= sibling.y + sibling.height
-                for sibling in siblings
+                window.x <= screen_x <= window.x + window.width
+                and window.y <= screen_y <= window.y + window.height
+                for window in occluding_windows
             ):
                 raise ComputerTargetNotFoundError(
-                    "Pixel action is ambiguous because another window from "
-                    "the same application overlaps the selected window at "
-                    "that point. Use an accessibility element target or "
+                    "Pixel action is ambiguous because another on-screen window "
+                    "occludes the selected window at that point. Use an "
+                    "accessibility element target or "
                     "select a non-overlapping window; do not retry the pixel "
                     "coordinate."
                 )

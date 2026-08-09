@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Check,
   ChevronRight,
@@ -57,27 +57,52 @@ export function LocalBrowserMenu({
   const [showWindowPicker, setShowWindowPicker] = useState(false);
   const [loading, setLoading] = useState(false);
   const [readiness, setReadiness] = useState<LocalBrowserReadiness | null>(null);
+  const readinessRequestRef = useRef<AbortController | null>(null);
+
+  const cancelReadiness = useCallback(() => {
+    const request = readinessRequestRef.current;
+    readinessRequestRef.current = null;
+    request?.abort();
+    setLoading(false);
+  }, []);
+
+  useEffect(() => () => {
+    const request = readinessRequestRef.current;
+    readinessRequestRef.current = null;
+    request?.abort();
+  }, []);
 
   const refreshReadiness = useCallback(async () => {
     if (!showLocalBrowser) return;
+    readinessRequestRef.current?.abort();
+    const request = new AbortController();
+    readinessRequestRef.current = request;
     setLoading(true);
     try {
       const response = await apiRequest(
         `${getApiUrl()}/api/computer/local-browser/readiness`,
-        { cache: "no-store" },
+        { cache: "no-store", signal: request.signal },
       );
       if (!response.ok) throw new Error("readiness request failed");
-      setReadiness(await response.json());
+      const nextReadiness = await response.json();
+      if (readinessRequestRef.current === request) {
+        setReadiness(nextReadiness);
+      }
     } catch {
-      setReadiness({
-        ready: false,
-        application: "Local browser",
-        windows: [],
-        issues: [],
-        message: t("chatPage.input.localBrowser.unavailable"),
-      });
+      if (!request.signal.aborted && readinessRequestRef.current === request) {
+        setReadiness({
+          ready: false,
+          application: "Local browser",
+          windows: [],
+          issues: [],
+          message: t("chatPage.input.localBrowser.unavailable"),
+        });
+      }
     } finally {
-      setLoading(false);
+      if (readinessRequestRef.current === request) {
+        readinessRequestRef.current = null;
+        setLoading(false);
+      }
     }
   }, [showLocalBrowser, t]);
 
@@ -97,7 +122,10 @@ export function LocalBrowserMenu({
         open={open}
         onOpenChange={(nextOpen) => {
           setOpen(nextOpen);
-          if (!nextOpen) setShowWindowPicker(false);
+          if (!nextOpen) {
+            setShowWindowPicker(false);
+            cancelReadiness();
+          }
         }}
       >
         <PopoverTrigger
@@ -129,6 +157,7 @@ export function LocalBrowserMenu({
               onOpenChange={(nextOpen) => {
                 setShowWindowPicker(nextOpen);
                 if (nextOpen) void refreshReadiness();
+                else cancelReadiness();
               }}
             >
               <PopoverTrigger asChild>

@@ -7,6 +7,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ...config import SUPPORTED_NATIVE_BROWSER_APP_NAMES
+
 
 class NativeBrowserWindowTarget(Protocol):
     @property
@@ -58,14 +60,7 @@ class NativeBrowserNavigator(Protocol):
 JXARunner = Callable[[str, list[str]], Awaitable[Mapping[str, Any]]]
 
 _CHROMIUM_APP_NAMES = frozenset(
-    {
-        "brave browser",
-        "google chrome",
-        "google chrome canary",
-        "chromium",
-        "microsoft edge",
-        "vivaldi",
-    }
+    name.casefold() for name in SUPPORTED_NATIVE_BROWSER_APP_NAMES
 )
 _CHROMIUM_BUNDLE_IDS = frozenset(
     {

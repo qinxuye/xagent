@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -230,11 +231,13 @@ async def test_local_browser_binds_frontmost_window_and_redacts_password() -> No
         "scope": "window",
         "browser_debugging": False,
     }
-    assert (
-        observation.metadata["available_windows"][0]["application"] == "Google Chrome"
-    )
+    assert "available_windows" not in observation.metadata
+    assert "Background" not in observation.model_dump_json()
     assert "move" not in observation.metadata["supported_actions"]
-    assert "navigate" in observation.metadata["supported_actions"]
+    assert "navigate" not in observation.metadata["supported_actions"]
+    assert observation.metadata["unsupported_actions"]["navigate"] == (
+        "pid_keyboard_capability_unknown"
+    )
     assert observation.elements[0].element_id == "snapshot-1:4"
     assert observation.elements[1].label == "Sensitive input"
     assert observation.elements[1].text is None
@@ -433,6 +436,18 @@ async def test_local_browser_refuses_ambiguous_pid_keyboard_actions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_local_browser_refuses_keyboard_when_driver_capability_is_absent() -> (
+    None
+):
+    observation = await make_environment(FakeCuaDriver()).observe()
+
+    assert "type" not in observation.metadata["supported_actions"]
+    assert observation.metadata["unsupported_actions"]["type"] == (
+        "pid_keyboard_capability_unknown"
+    )
+
+
+@pytest.mark.asyncio
 async def test_native_browser_requires_driver_proof_for_foreground_delivery() -> None:
     driver = FakeCuaDriver()
     environment = make_environment(driver)
@@ -517,23 +532,52 @@ async def test_local_browser_rejects_pixel_action_after_window_geometry_changes(
 
 
 @pytest.mark.asyncio
-async def test_local_browser_rejects_pixel_action_under_overlapping_same_pid_window() -> (
+async def test_local_browser_rejects_actions_after_bound_window_disappears() -> None:
+    driver = FakeCuaDriver()
+    environment = make_environment(driver)
+    first = await environment.observe()
+    driver.windows = [window for window in driver.windows if window["window_id"] != 20]
+
+    with pytest.raises(ComputerTargetNotFoundError, match="disappeared"):
+        await environment.execute(
+            batch(
+                first.frame_id,
+                ComputerAction(
+                    type=ComputerActionType.CLICK,
+                    target=ComputerTarget(element_id="snapshot-1:4"),
+                ),
+            )
+        )
+
+    assert all(name != "click" for name, _payload in driver.calls)
+
+
+@pytest.mark.asyncio
+async def test_local_browser_rejects_pixel_action_under_cross_app_occluding_window() -> (
     None
 ):
     driver = FakeCuaDriver()
     driver.windows.append(
         {
-            "window_id": 21,
-            "pid": 200,
-            "app_name": "Google Chrome",
-            "title": "Another tab window",
+            "window_id": 31,
+            "pid": 300,
+            "app_name": "Terminal",
+            "title": "Unrelated foreground window",
             "bounds": {"x": 100, "y": 200, "width": 1000, "height": 800},
-            "z_index": 8,
+            "z_index": 10,
             "is_on_screen": True,
             "on_current_space": True,
         }
     )
-    environment = make_environment(driver)
+    environment = NativeBrowserEnvironment(
+        session_id="task-1",
+        workspace=object(),
+        driver=driver,
+        observation_store=FakeObservationStore(),  # type: ignore[arg-type]
+        target_pid=200,
+        target_window_id=20,
+        native_browser_navigator=FakeNativeBrowserNavigator(supported=False),
+    )
     first = await environment.observe()
 
     with pytest.raises(ComputerTargetNotFoundError, match="Pixel action is ambiguous"):
@@ -908,6 +952,7 @@ async def test_local_browser_navigates_with_native_browser_adapter() -> None:
         == "https://example.com/account"
     )
     assert all(name not in {"set_value", "press_key"} for name, _ in driver.calls)
+    assert [name for name, _payload in driver.calls].count("get_window_state") == 2
     await environment.close()
     assert ("end_session", {"session": "task-1"}) in driver.calls
     assert driver.closed is True
@@ -915,10 +960,37 @@ async def test_local_browser_navigates_with_native_browser_adapter() -> None:
 
 
 @pytest.mark.asyncio
+async def test_local_browser_close_can_retry_after_cancellation() -> None:
+    class CancelOnceDriver(FakeCuaDriver):
+        close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise asyncio.CancelledError
+            self.closed = True
+
+    driver = CancelOnceDriver()
+    environment = make_environment(driver)
+    await environment.observe()
+
+    with pytest.raises(asyncio.CancelledError):
+        await environment.close()
+    await environment.close()
+
+    assert driver.close_calls == 2
+    assert driver.closed is True
+
+
+@pytest.mark.asyncio
 async def test_local_browser_falls_back_to_address_field_when_keyboard_is_safe() -> (
     None
 ):
-    driver = FakeCuaDriver()
+    driver = FakeCuaDriver(
+        background_input={
+            "routes": [{"route": "pid_keyboard", "status": "available"}],
+        }
+    )
     environment = NativeBrowserEnvironment(
         session_id="task-1",
         workspace=object(),

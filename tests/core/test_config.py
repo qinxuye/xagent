@@ -1742,6 +1742,12 @@ class TestLocalBrowserConfig:
         assert get_browser_cua_driver_timeout_seconds() == 30
         assert get_browser_cua_driver_max_elements() == 2_000
 
+    def test_rejects_non_browser_native_application(self, monkeypatch):
+        monkeypatch.setenv(NATIVE_BROWSER_APP_NAME, "Terminal")
+
+        with pytest.raises(ValueError, match="must name a supported browser"):
+            get_native_browser_app_name()
+
 
 class TestCheckpointStorageConfig:
     """Config for checkpoint trace-event storage encoding and retention."""
