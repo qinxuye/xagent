@@ -19,7 +19,7 @@ from ...core.tools.adapters.vibe.computer import ComputerTool
 from ..models.task import Task
 from ..models.user import User
 from .task_runtime import (
-    register_task_extension,
+    _register_task_extension_idempotently,
     task_extension_bindings_from_agent_config,
     unregister_task_extension,
 )
@@ -170,12 +170,18 @@ class LocalBrowserTaskRuntimeProvider:
         del context
 
 
+_LOCAL_BROWSER_RUNTIME_PROVIDER = LocalBrowserTaskRuntimeProvider()
+
+
 def register_local_browser_runtime() -> None:
     """Register the built-in provider for this application lifespan."""
 
-    register_task_extension(
+    # Embedded apps and tests can enter the same FastAPI lifespan more than
+    # once in one process. Re-entering our own stateless provider is safe; a
+    # different provider using the same name remains a hard collision.
+    _register_task_extension_idempotently(
         LOCAL_BROWSER_TASK_EXTENSION,
-        LocalBrowserTaskRuntimeProvider(),
+        _LOCAL_BROWSER_RUNTIME_PROVIDER,
     )
 
 

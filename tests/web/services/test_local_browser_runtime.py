@@ -27,6 +27,7 @@ from xagent.web.services.local_browser_runtime import (
 )
 from xagent.web.services.task_runtime import (
     agent_config_with_task_extension_bindings,
+    register_task_extension,
     registered_task_extensions,
     unregister_task_extension,
 )
@@ -96,12 +97,25 @@ def test_local_browser_registration_is_explicit_and_lifespan_scoped() -> None:
     unregister_task_extension(LOCAL_BROWSER_TASK_EXTENSION)
     try:
         register_local_browser_runtime()
-        with pytest.raises(ValueError, match="already registered"):
-            register_local_browser_runtime()
+        register_local_browser_runtime()
         assert registered_task_extensions().count(LOCAL_BROWSER_TASK_EXTENSION) == 1
 
         unregister_local_browser_runtime()
         assert LOCAL_BROWSER_TASK_EXTENSION not in registered_task_extensions()
+    finally:
+        unregister_task_extension(LOCAL_BROWSER_TASK_EXTENSION)
+
+
+def test_local_browser_registration_rejects_a_foreign_provider_collision() -> None:
+    unregister_task_extension(LOCAL_BROWSER_TASK_EXTENSION)
+    try:
+        register_task_extension(
+            LOCAL_BROWSER_TASK_EXTENSION,
+            LocalBrowserTaskRuntimeProvider(),
+        )
+
+        with pytest.raises(ValueError, match="already registered"):
+            register_local_browser_runtime()
     finally:
         unregister_task_extension(LOCAL_BROWSER_TASK_EXTENSION)
 
