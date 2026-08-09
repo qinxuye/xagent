@@ -186,15 +186,21 @@ class CuaDriverMCPClient:
                 asyncio.shield(ready),
                 timeout=self.timeout_seconds,
             )
-        except TimeoutError as exc:
-            raise CuaDriverError(
-                "cua-driver MCP initialization timed out after "
-                f"{self.timeout_seconds:g} seconds"
-            ) from exc
-        except Exception as exc:
-            if isinstance(exc, CuaDriverError):
-                raise
-            raise CuaDriverError(f"could not initialize cua-driver MCP: {exc}") from exc
+        except BaseException as exc:
+            # Initialization owns a partially started worker/subprocess. Reset
+            # it before propagating timeouts, transport failures, or caller
+            # cancellation so a later call can create a fresh worker.
+            await self.close()
+            if isinstance(exc, TimeoutError):
+                raise CuaDriverError(
+                    "cua-driver MCP initialization timed out after "
+                    f"{self.timeout_seconds:g} seconds"
+                ) from exc
+            if isinstance(exc, Exception) and not isinstance(exc, CuaDriverError):
+                raise CuaDriverError(
+                    f"could not initialize cua-driver MCP: {exc}"
+                ) from exc
+            raise
         return queue
 
     async def _run_worker(

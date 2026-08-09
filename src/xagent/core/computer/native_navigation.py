@@ -339,6 +339,13 @@ async def _run_jxa(script: str, arguments: list[str]) -> Mapping[str, Any]:
         raise NativeBrowserNavigationError(
             "native browser navigation timed out"
         ) from exc
+    except BaseException:
+        # The subprocess outlives a cancelled coroutine unless it is explicitly
+        # terminated and reaped. Always clean up, then preserve cancellation or
+        # another process-control exception unchanged.
+        process.kill()
+        await process.wait()
+        raise
     if process.returncode != 0:
         detail = stderr.decode("utf-8", errors="replace").strip()
         raise NativeBrowserNavigationError(

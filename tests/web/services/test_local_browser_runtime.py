@@ -157,6 +157,45 @@ def test_local_browser_create_requires_enablement_admin_and_valid_target(
         )
 
 
+@pytest.mark.parametrize(
+    ("configuration", "message"),
+    [
+        ({"window_id": 20, "application": "Google Chrome"}, "requires pid"),
+        (
+            {"pid": None, "window_id": 20, "application": "Google Chrome"},
+            "requires pid and window_id",
+        ),
+        (
+            {"pid": 100, "application": "Google Chrome"},
+            "requires pid and window_id",
+        ),
+        (
+            {"pid": True, "window_id": 20, "application": "Google Chrome"},
+            "must be integers",
+        ),
+        (
+            {"pid": "100", "window_id": 20, "application": "Google Chrome"},
+            "must be integers",
+        ),
+        (
+            {"pid": 100, "window_id": 20.0, "application": "Google Chrome"},
+            "must be integers",
+        ),
+    ],
+)
+def test_local_browser_rejects_missing_or_non_integer_window_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    configuration: dict[str, Any],
+    message: str,
+) -> None:
+    monkeypatch.setenv("XAGENT_NATIVE_BROWSER_ENABLED", "true")
+    provider = LocalBrowserTaskRuntimeProvider()
+    context, _ = make_context(bound=True, admin=True)
+
+    with pytest.raises(TaskRuntimeClientError, match=message):
+        provider.on_task_created(context, configuration)
+
+
 def test_local_browser_contributes_standard_computer_tool_only_when_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

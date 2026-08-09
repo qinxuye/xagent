@@ -72,6 +72,16 @@ class BlockingSession(FakeSession):
         )
 
 
+class BlockingInitializeSession(FakeSession):
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        super().__init__(*_args, **_kwargs)
+        self.initialize_started = asyncio.Event()
+
+    async def initialize(self) -> None:
+        self.initialize_started.set()
+        await asyncio.Event().wait()
+
+
 @pytest.mark.asyncio
 async def test_cua_driver_client_serializes_calls_on_owned_worker(
     monkeypatch: pytest.MonkeyPatch,
@@ -126,6 +136,56 @@ async def test_cua_driver_client_surfaces_mcp_tool_error(
         await client.call_tool("failure")
 
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_cua_driver_client_cleans_up_timed_out_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = BlockingInitializeSession()
+
+    @asynccontextmanager
+    async def fake_stdio(*_args: Any, **_kwargs: Any):
+        yield object(), object()
+
+    monkeypatch.setattr(cua_driver, "stdio_client", fake_stdio)
+    monkeypatch.setattr(cua_driver, "ClientSession", lambda *_args, **_kwargs: session)
+    client = CuaDriverMCPClient(command="fake-driver", timeout_seconds=0.01)
+
+    with pytest.raises(CuaDriverError, match="initialization timed out"):
+        await client.call_tool("one")
+
+    assert session.initialize_started.is_set()
+    assert session.closed is True
+    assert client._worker is None
+    assert client._queue is None
+    assert client._ready is None
+
+
+@pytest.mark.asyncio
+async def test_cua_driver_client_cleans_up_cancelled_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = BlockingInitializeSession()
+
+    @asynccontextmanager
+    async def fake_stdio(*_args: Any, **_kwargs: Any):
+        yield object(), object()
+
+    monkeypatch.setattr(cua_driver, "stdio_client", fake_stdio)
+    monkeypatch.setattr(cua_driver, "ClientSession", lambda *_args, **_kwargs: session)
+    client = CuaDriverMCPClient(command="fake-driver", timeout_seconds=0.01)
+    call = asyncio.create_task(client.call_tool("one"))
+    await session.initialize_started.wait()
+
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    assert session.closed is True
+    assert client._worker is None
+    assert client._queue is None
+    assert client._ready is None
 
 
 @pytest.mark.asyncio

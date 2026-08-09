@@ -188,13 +188,19 @@ def _validate_target_configuration(
             "Local browser configuration contains unsupported fields: "
             + ", ".join(sorted(unexpected))
         )
-    try:
-        pid = int(configuration["pid"])
-        window_id = int(configuration["window_id"])
-    except (KeyError, TypeError, ValueError) as exc:
+    pid = configuration.get("pid")
+    window_id = configuration.get("window_id")
+    if pid is None or window_id is None:
+        raise TaskRuntimeClientError("Local browser requires pid and window_id values.")
+    if (
+        not isinstance(pid, int)
+        or isinstance(pid, bool)
+        or not isinstance(window_id, int)
+        or isinstance(window_id, bool)
+    ):
         raise TaskRuntimeClientError(
-            "Local browser requires integer pid and window_id values."
-        ) from exc
+            "Local browser pid and window_id must be integers."
+        )
     if pid <= 0 or window_id <= 0:
         raise TaskRuntimeClientError(
             "Local browser pid and window_id must be positive."

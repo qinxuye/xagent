@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from typing import Any
 
 import pytest
 
+from xagent.core.computer import native_navigation
 from xagent.core.computer.native_browser import NativeBrowserWindow
 from xagent.core.computer.native_navigation import (
     MacOSChromiumNavigator,
@@ -119,3 +121,48 @@ def test_macos_chromium_navigate_rejects_other_platforms_and_apps() -> None:
     )
     macos = MacOSChromiumNavigator(platform="darwin")
     assert macos.supports(non_browser) is False
+
+
+@pytest.mark.asyncio
+async def test_run_jxa_kills_and_reaps_subprocess_on_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.communicate_started = asyncio.Event()
+            self.killed = False
+            self.waited = False
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            self.communicate_started.set()
+            await asyncio.Event().wait()
+            return b"", b""
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            self.waited = True
+            return self.returncode or 0
+
+    process = FakeProcess()
+
+    async def create_subprocess(*_args: Any, **_kwargs: Any) -> FakeProcess:
+        return process
+
+    monkeypatch.setattr(
+        native_navigation.asyncio,
+        "create_subprocess_exec",
+        create_subprocess,
+    )
+    task = asyncio.create_task(native_navigation._run_jxa("script", []))
+    await process.communicate_started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.killed is True
+    assert process.waited is True
