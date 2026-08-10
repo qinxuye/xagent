@@ -1,3 +1,5 @@
+"use client";
+
 import type { ComponentType } from "react";
 
 export type TaskRuntimeExtensionConfiguration = Record<
@@ -35,8 +37,14 @@ export interface TaskRuntimeMessageMetadataExtensionProps {
  * task-scoped runtimes. The OSS implementation is deliberately inert. A
  * composed distribution may replace this module without overriding the
  * composer, Settings page, or conversation panel themselves.
+ *
+ * Replacements must preserve every export in this module, accept a null
+ * composer selection, and render safely when metadata collections are empty.
+ * `hasTaskRuntimeComposerExtension` controls whether the composer menu and
+ * selected-state slots are mounted; the Settings and message slots are
+ * mounted independently at their respective integration points.
  */
-export const hasTaskRuntimeComposerExtension = false;
+export const hasTaskRuntimeComposerExtension: boolean = false;
 
 export const TaskRuntimeComposerMenuExtension: ComponentType<
   TaskRuntimeComposerMenuExtensionProps

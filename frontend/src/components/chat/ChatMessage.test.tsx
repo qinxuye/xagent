@@ -39,8 +39,12 @@ vi.mock("@/lib/api-wrapper", () => ({
 }))
 
 vi.mock("@/lib/task-runtime-ui-extension", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/lib/task-runtime-ui-extension")
+  >("@/lib/task-runtime-ui-extension")
   const ReactModule = await vi.importActual<typeof import("react")>("react")
   return {
+    ...actual,
     TaskRuntimeMessageMetadataExtension: ({ bindings }: { bindings: string[] }) => (
       bindings.includes("browser_relay")
         ? ReactModule.createElement(

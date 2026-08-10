@@ -699,10 +699,12 @@ export function ChatInput({
       const trimmed = message.trim();
       const messageToSend = trimmed;
       const executionMode = taskConfig?.executionMode;
+      const extraRuntimeExtensions = activeLocalBrowserTarget
+        ? { local_browser: { ...activeLocalBrowserTarget } }
+        : activeTaskRuntimeSelection?.runtimeExtensions;
       const deliveryKey = JSON.stringify([
         messageToSend,
-        activeLocalBrowserTarget,
-        activeTaskRuntimeSelection?.runtimeExtensions || null,
+        extraRuntimeExtensions || null,
         enabledFiles.map((file) => [
           file.name,
           file.size,
@@ -718,13 +720,11 @@ export function ChatInput({
       const configToSend = {
         ...agentConfig,
         clientMessageId,
-        ...(activeLocalBrowserTarget || activeTaskRuntimeSelection
+        ...(extraRuntimeExtensions
           ? {
               runtimeExtensions: {
                 ...(agentConfig.runtimeExtensions || {}),
-                ...(activeLocalBrowserTarget
-                  ? { local_browser: { ...activeLocalBrowserTarget } }
-                  : activeTaskRuntimeSelection?.runtimeExtensions || {}),
+                ...extraRuntimeExtensions,
               },
             }
           : {}),

@@ -62,8 +62,12 @@ vi.mock("sonner", () => ({
 }));
 
 vi.mock("@/lib/task-runtime-ui-extension", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/lib/task-runtime-ui-extension")
+  >("@/lib/task-runtime-ui-extension");
   const ReactModule = await vi.importActual<typeof import("react")>("react");
   return {
+    ...actual,
     hasTaskRuntimeComposerExtension: true,
     TaskRuntimeComposerMenuExtension: ({
       disabled,
@@ -96,6 +100,31 @@ vi.mock("@/lib/task-runtime-ui-extension", async () => {
 });
 
 import { ChatInput } from "./ChatInput";
+
+function enableLocalBrowserWindow() {
+  authUserMock.current = { id: "2", is_admin: true };
+  apiRequestMock.mockImplementation((url: string) => Promise.resolve(
+    new Response(JSON.stringify(
+      url === "http://api.local/api/computer/local-browser/readiness"
+        ? {
+            ready: true,
+            application: "Google Chrome",
+            windows: [{
+              pid: 100,
+              window_id: 20,
+              application: "Google Chrome",
+              title: "GitHub",
+            }],
+            issues: [],
+            message: "",
+          }
+        : [],
+    ), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  ));
+}
 
 describe("ChatInput task runtime UI extension", () => {
   beforeEach(() => {
@@ -144,28 +173,7 @@ describe("ChatInput task runtime UI extension", () => {
   });
 
   it("replaces a local-browser target when the selection slot chooses a runtime", async () => {
-    authUserMock.current = { id: "2", is_admin: true };
-    apiRequestMock.mockImplementation((url: string) => Promise.resolve(
-      new Response(JSON.stringify(
-        url === "http://api.local/api/computer/local-browser/readiness"
-          ? {
-              ready: true,
-              application: "Google Chrome",
-              windows: [{
-                pid: 100,
-                window_id: 20,
-                application: "Google Chrome",
-                title: "GitHub",
-              }],
-              issues: [],
-              message: "",
-            }
-          : [],
-      ), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    ));
+    enableLocalBrowserWindow();
     const onSend = vi.fn();
     const { container } = render(
       <ChatInput
@@ -184,6 +192,84 @@ describe("ChatInput task runtime UI extension", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Select My browser" }));
     expect(screen.queryByLabelText("Google Chrome · GitHub")).not.toBeInTheDocument();
+    fireEvent.submit(container.querySelector("form") as HTMLFormElement);
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith(
+      "inspect my signed-in tab",
+      expect.objectContaining({
+        runtimeExtensions: {
+          browser_relay: { target: "approved_tab" },
+        },
+      }),
+    ));
+  });
+
+  it("clears an extension selection when a local-browser window is picked", async () => {
+    enableLocalBrowserWindow();
+    const onSend = vi.fn();
+    const { container } = render(
+      <ChatInput
+        hideFileUpload
+        inputValue="inspect the selected window"
+        onInputChange={vi.fn()}
+        onSend={onSend}
+        taskConfig={{ model: "model-1" }}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("chatPage.input.actions.add"));
+    fireEvent.click(screen.getByRole("button", { name: "My browser" }));
+    expect(screen.getByRole("button", { name: "My browser selected" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "My browser" })).not.toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByLabelText("chatPage.input.actions.add"));
+    fireEvent.click(screen.getByText("chatPage.input.localBrowser.label"));
+    fireEvent.click(await screen.findByText("GitHub"));
+    expect(screen.getByLabelText("Google Chrome · GitHub")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Select My browser" })).toBeInTheDocument();
+
+    fireEvent.submit(container.querySelector("form") as HTMLFormElement);
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith(
+      "inspect the selected window",
+      expect.objectContaining({
+        runtimeExtensions: {
+          local_browser: {
+            pid: 100,
+            window_id: 20,
+            application: "Google Chrome",
+            title: "GitHub",
+          },
+        },
+      }),
+    ));
+  });
+
+  it("clears a local-browser target when the menu chooses a runtime", async () => {
+    enableLocalBrowserWindow();
+    const onSend = vi.fn();
+    const { container } = render(
+      <ChatInput
+        hideFileUpload
+        inputValue="inspect my signed-in tab"
+        onInputChange={vi.fn()}
+        onSend={onSend}
+        taskConfig={{ model: "model-1" }}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("chatPage.input.actions.add"));
+    fireEvent.click(screen.getByText("chatPage.input.localBrowser.label"));
+    fireEvent.click(await screen.findByText("GitHub"));
+    expect(screen.getByLabelText("Google Chrome · GitHub")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("chatPage.input.actions.add"));
+    fireEvent.click(screen.getByRole("button", { name: "My browser" }));
+    expect(screen.queryByLabelText("Google Chrome · GitHub")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "My browser selected" })).toBeInTheDocument();
+
     fireEvent.submit(container.querySelector("form") as HTMLFormElement);
 
     await waitFor(() => expect(onSend).toHaveBeenCalledWith(

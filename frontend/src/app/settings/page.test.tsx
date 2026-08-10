@@ -18,8 +18,12 @@ vi.mock("@/contexts/i18n-context", () => ({
 }))
 vi.mock("@/lib/api-wrapper", () => ({ apiRequest }))
 vi.mock("@/lib/task-runtime-ui-extension", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/lib/task-runtime-ui-extension")
+  >("@/lib/task-runtime-ui-extension")
   const ReactModule = await vi.importActual<typeof import("react")>("react")
   return {
+    ...actual,
     TaskRuntimeSettingsExtension: () => ReactModule.createElement(
       "section",
       { "data-testid": "task-runtime-settings-extension" },
