@@ -18,22 +18,40 @@ const composerProps = {
 };
 
 describe("default task runtime UI extension", () => {
-  it("keeps every optional UI slot inert in the OSS build", () => {
+  it("disables the composer extension in the OSS build", () => {
     expect(hasTaskRuntimeComposerExtension).toBe(false);
+  });
 
+  it("keeps the composer menu slot inert", () => {
     const { container } = render(
-      <>
-        <TaskRuntimeComposerMenuExtension {...composerProps} />
-        <TaskRuntimeComposerSelectionExtension {...composerProps} />
-        <TaskRuntimeSettingsExtension />
-        <TaskRuntimeMessageMetadataExtension
-          bindings={["local_browser"]}
-          publicMetadata={{ local_browser: { kind: "local_browser" } }}
-        />
-      </>,
+      <TaskRuntimeComposerMenuExtension {...composerProps} />,
     );
-
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("keeps the composer selection slot inert", () => {
+    const { container } = render(
+      <TaskRuntimeComposerSelectionExtension
+        disabled={composerProps.disabled}
+        selection={composerProps.selection}
+        onSelectionChange={composerProps.onSelectionChange}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("keeps the settings slot inert", () => {
+    const { container } = render(<TaskRuntimeSettingsExtension />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("keeps the message metadata slot inert", () => {
+    const { container } = render(
+      <TaskRuntimeMessageMetadataExtension
+        bindings={["local_browser"]}
+        publicMetadata={{ local_browser: { kind: "local_browser" } }}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
 });

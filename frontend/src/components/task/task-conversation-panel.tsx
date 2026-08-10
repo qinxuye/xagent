@@ -772,7 +772,10 @@ export function TaskConversationPanel({
                         showEmptyStatus={item.showEmptyStatus}
                         contextBadges={item.role === "user" ? userMessageContextBadges : undefined}
                         taskRuntimeExtensionMetadata={item.role === "user" ? {
-                          bindings: state.currentTask?.runtimeExtensionBindings || [],
+                          bindings:
+                            state.currentTask?.id === String(state.taskId)
+                              ? state.currentTask.runtimeExtensionBindings || []
+                              : [],
                           publicMetadata: state.taskRuntimeExtensions || {},
                         } : undefined}
                         onOpenExecutionPlan={showDagPreview ? openDagPreview : undefined}

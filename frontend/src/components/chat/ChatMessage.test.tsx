@@ -181,6 +181,26 @@ describe("ChatMessage Session file capability", () => {
     ).toBeInTheDocument()
   })
 
+  it("does not render distribution message metadata on assistant messages", () => {
+    render(
+      <ChatMessage
+        role="assistant"
+        content="I inspected your browser"
+        taskRuntimeExtensionMetadata={{
+          bindings: ["browser_relay"],
+          publicMetadata: {
+            browser_relay: { kind: "browser_relay", connected: true },
+          },
+        }}
+      />,
+    )
+
+    expect(screen.getByText("I inspected your browser")).toBeInTheDocument()
+    expect(
+      screen.queryByRole("note", { name: "Computer use · My browser" }),
+    ).not.toBeInTheDocument()
+  })
+
   it("uses the same safe projection for normal assistant DOM and copied content", () => {
     appContextMock.filesDisabled = true
     const { container } = render(

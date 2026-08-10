@@ -1,8 +1,11 @@
 import React from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiRequestMock = vi.hoisted(() => vi.fn());
+const authUserMock = vi.hoisted(() => ({
+  current: { id: "2", is_admin: false },
+}));
 
 vi.mock("@/lib/api-wrapper", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api-wrapper")>(
@@ -28,7 +31,7 @@ vi.mock("@/contexts/app-context-chat", () => ({
 }));
 
 vi.mock("@/contexts/auth-context", () => ({
-  useAuth: () => ({ user: { id: "2", is_admin: false } }),
+  useAuth: () => ({ user: authUserMock.current }),
 }));
 
 vi.mock("@/components/config-dialog", () => ({
@@ -80,11 +83,15 @@ vi.mock("@/lib/task-runtime-ui-extension", async () => {
         onRequestClose();
       },
     }, "My browser"),
-    TaskRuntimeComposerSelectionExtension: ({ selection }: {
+    TaskRuntimeComposerSelectionExtension: ({ selection, onSelectionChange }: {
       selection: unknown;
-    }) => selection
-      ? ReactModule.createElement("span", null, "My browser selected")
-      : null,
+      onSelectionChange: (selection: unknown) => void;
+    }) => ReactModule.createElement("button", {
+      type: "button",
+      onClick: () => onSelectionChange({
+        runtimeExtensions: { browser_relay: { target: "approved_tab" } },
+      }),
+    }, selection ? "My browser selected" : "Select My browser"),
   };
 });
 
@@ -92,6 +99,7 @@ import { ChatInput } from "./ChatInput";
 
 describe("ChatInput task runtime UI extension", () => {
   beforeEach(() => {
+    authUserMock.current = { id: "2", is_admin: false };
     apiRequestMock.mockReset();
     apiRequestMock.mockImplementation(() => Promise.resolve(
       new Response(JSON.stringify([]), {
@@ -100,6 +108,8 @@ describe("ChatInput task runtime UI extension", () => {
       }),
     ));
   });
+
+  afterEach(() => cleanup());
 
   it("submits a distribution-provided runtime without exposing local browser", async () => {
     const onSend = vi.fn();
@@ -118,6 +128,62 @@ describe("ChatInput task runtime UI extension", () => {
     fireEvent.click(screen.getByRole("button", { name: "My browser" }));
     expect(screen.getByText("My browser selected")).toBeInTheDocument();
 
+    fireEvent.submit(container.querySelector("form") as HTMLFormElement);
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith(
+      "inspect my signed-in tab",
+      expect.objectContaining({
+        runtimeExtensions: {
+          browser_relay: { target: "approved_tab" },
+        },
+      }),
+    ));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Select My browser" })).toBeInTheDocument();
+    });
+  });
+
+  it("replaces a local-browser target when the selection slot chooses a runtime", async () => {
+    authUserMock.current = { id: "2", is_admin: true };
+    apiRequestMock.mockImplementation((url: string) => Promise.resolve(
+      new Response(JSON.stringify(
+        url === "http://api.local/api/computer/local-browser/readiness"
+          ? {
+              ready: true,
+              application: "Google Chrome",
+              windows: [{
+                pid: 100,
+                window_id: 20,
+                application: "Google Chrome",
+                title: "GitHub",
+              }],
+              issues: [],
+              message: "",
+            }
+          : [],
+      ), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ));
+    const onSend = vi.fn();
+    const { container } = render(
+      <ChatInput
+        hideFileUpload
+        inputValue="inspect my signed-in tab"
+        onInputChange={vi.fn()}
+        onSend={onSend}
+        taskConfig={{ model: "model-1" }}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("chatPage.input.actions.add"));
+    fireEvent.click(screen.getByText("chatPage.input.localBrowser.label"));
+    fireEvent.click(await screen.findByText("GitHub"));
+    expect(screen.getByLabelText("Google Chrome · GitHub")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Select My browser" }));
+    expect(screen.queryByLabelText("Google Chrome · GitHub")).not.toBeInTheDocument();
     fireEvent.submit(container.querySelector("form") as HTMLFormElement);
 
     await waitFor(() => expect(onSend).toHaveBeenCalledWith(

@@ -9,14 +9,21 @@ export interface TaskRuntimeComposerSelection {
   runtimeExtensions: TaskRuntimeExtensionConfiguration;
 }
 
-export interface TaskRuntimeComposerExtensionProps {
+interface TaskRuntimeComposerBaseProps {
   disabled: boolean;
   selection: TaskRuntimeComposerSelection | null;
   onSelectionChange: (
     selection: TaskRuntimeComposerSelection | null,
   ) => void;
+}
+
+export interface TaskRuntimeComposerMenuExtensionProps
+  extends TaskRuntimeComposerBaseProps {
   onRequestClose: () => void;
 }
+
+export type TaskRuntimeComposerSelectionExtensionProps =
+  TaskRuntimeComposerBaseProps;
 
 export interface TaskRuntimeMessageMetadataExtensionProps {
   bindings: readonly string[];
@@ -32,11 +39,11 @@ export interface TaskRuntimeMessageMetadataExtensionProps {
 export const hasTaskRuntimeComposerExtension = false;
 
 export const TaskRuntimeComposerMenuExtension: ComponentType<
-  TaskRuntimeComposerExtensionProps
+  TaskRuntimeComposerMenuExtensionProps
 > = () => null;
 
 export const TaskRuntimeComposerSelectionExtension: ComponentType<
-  TaskRuntimeComposerExtensionProps
+  TaskRuntimeComposerSelectionExtensionProps
 > = () => null;
 
 export const TaskRuntimeSettingsExtension: ComponentType = () => null;

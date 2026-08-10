@@ -365,6 +365,10 @@ describe("TaskConversationPanel", () => {
       "data-context-badges",
       JSON.stringify([]),
     )
+    expect(screen.getByTestId("chat-message")).toHaveAttribute(
+      "data-runtime-extension-metadata",
+      JSON.stringify({ bindings: [], publicMetadata: {} }),
+    )
   })
 
   it("disables every file surface and drops staged files when the capability is disabled", async () => {

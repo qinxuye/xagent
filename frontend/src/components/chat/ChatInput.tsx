@@ -591,6 +591,9 @@ export function ChatInput({
   const showTaskRuntimeExtension =
     hasTaskRuntimeComposerExtension && !readOnlyConfig && !hideConfig;
   const activeLocalBrowserTarget = showLocalBrowser ? localBrowserTarget : null;
+  const activeTaskRuntimeSelection = showTaskRuntimeExtension
+    ? taskRuntimeSelection
+    : null;
   useEffect(() => {
     if (!showLocalBrowser) setLocalBrowserTarget(null);
   }, [showLocalBrowser]);
@@ -699,7 +702,7 @@ export function ChatInput({
       const deliveryKey = JSON.stringify([
         messageToSend,
         activeLocalBrowserTarget,
-        taskRuntimeSelection?.runtimeExtensions || null,
+        activeTaskRuntimeSelection?.runtimeExtensions || null,
         enabledFiles.map((file) => [
           file.name,
           file.size,
@@ -715,13 +718,13 @@ export function ChatInput({
       const configToSend = {
         ...agentConfig,
         clientMessageId,
-        ...(activeLocalBrowserTarget || taskRuntimeSelection
+        ...(activeLocalBrowserTarget || activeTaskRuntimeSelection
           ? {
               runtimeExtensions: {
                 ...(agentConfig.runtimeExtensions || {}),
                 ...(activeLocalBrowserTarget
                   ? { local_browser: { ...activeLocalBrowserTarget } }
-                  : taskRuntimeSelection?.runtimeExtensions || {}),
+                  : activeTaskRuntimeSelection?.runtimeExtensions || {}),
               },
             }
           : {}),

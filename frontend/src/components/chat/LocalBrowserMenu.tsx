@@ -334,8 +334,10 @@ export function LocalBrowserMenu({
         <TaskRuntimeComposerSelectionExtension
           disabled={disabled}
           selection={extensionSelection}
-          onSelectionChange={onExtensionSelectionChange}
-          onRequestClose={() => setOpen(false)}
+          onSelectionChange={(selection) => {
+            onExtensionSelectionChange(selection);
+            if (selection) onTargetChange(null);
+          }}
         />
       )}
     </div>
