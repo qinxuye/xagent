@@ -249,6 +249,7 @@ describe("TaskConversationPanel", () => {
     appState.traceEvents = []
     appState.currentTask = null
     appState.taskRuntimeExtensions = {}
+    appState.taskId = 42
     appState.isProcessing = false
     appState.isHistoryLoading = false
     appState.filePreview = { isOpen: false, fileId: "", fileName: "", viewMode: "preview" }
@@ -293,6 +294,7 @@ describe("TaskConversationPanel", () => {
       updatedAt: "2026-08-07T07:01:00Z",
       runtimeExtensionBindings: ["local_browser"],
     }
+    appState.taskId = 823
 
     render(<TaskConversationPanel mode="page" />)
 
@@ -303,6 +305,32 @@ describe("TaskConversationPanel", () => {
         label: "chatPage.input.localBrowser.chipLabel",
         detail: "chatPage.input.localBrowser.label",
       }]),
+    )
+  })
+
+  it("does not reuse the previous task's Computer use badge", () => {
+    appState.messages = [{
+      id: "user-1",
+      role: "user",
+      content: "Inspect this window",
+      timestamp: "2026-08-07T07:00:00Z",
+    }]
+    appState.taskId = 824
+    appState.currentTask = {
+      id: "823",
+      title: "Previous local browser task",
+      description: "Inspect another window",
+      status: "completed",
+      createdAt: "2026-08-07T07:00:00Z",
+      updatedAt: "2026-08-07T07:01:00Z",
+      runtimeExtensionBindings: ["local_browser"],
+    }
+
+    render(<TaskConversationPanel mode="page" />)
+
+    expect(screen.getByTestId("chat-message")).toHaveAttribute(
+      "data-context-badges",
+      JSON.stringify([]),
     )
   })
 

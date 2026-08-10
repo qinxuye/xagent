@@ -1424,7 +1424,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
         target = action.target
         uses_pixels = action.type in {
             ComputerActionType.DRAG,
-            ComputerActionType.REPLACE_TEXT,
         } or (
             action.type
             in {
@@ -1507,14 +1506,6 @@ class NativeBrowserEnvironment(ComputerEnvironment):
             return []
         if target.point is not None:
             return [target.point]
-        if action.type is ComputerActionType.REPLACE_TEXT:
-            element = self._find_element(target.element_id or "")
-            return [
-                NormalizedPoint(
-                    x=element.bounds.x + element.bounds.width / 2,
-                    y=element.bounds.y + element.bounds.height / 2,
-                )
-            ]
         return []
 
     def _validate_current_coordinate_frame(self) -> None:

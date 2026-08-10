@@ -233,6 +233,58 @@ describe("ChatInput", () => {
     expect(onSend.mock.calls[0][1]).not.toHaveProperty("runtimeExtensions")
   })
 
+  it("clears a selected target that disappears from refreshed readiness", async () => {
+    let readinessCalls = 0
+    apiRequestMock.mockImplementation((url: string) => {
+      if (url === "http://api.local/api/computer/local-browser/readiness") {
+        readinessCalls += 1
+        return Promise.resolve(
+          new Response(JSON.stringify({
+            ready: true,
+            application: "Google Chrome",
+            windows: readinessCalls === 1 ? [{
+              pid: 100,
+              window_id: 20,
+              application: "Google Chrome",
+              title: "GitHub",
+            }] : [{
+              pid: 100,
+              window_id: 21,
+              application: "Google Chrome",
+              title: "Xagent",
+            }],
+            issues: [],
+            message: "",
+          }), { status: 200, headers: { "Content-Type": "application/json" } }),
+        )
+      }
+      return Promise.resolve(emptyJsonResponse())
+    })
+    render(
+      <ChatInput
+        hideFileUpload
+        inputValue="inspect this page"
+        onInputChange={vi.fn()}
+        onSend={vi.fn()}
+        taskConfig={{ model: "model-1" }}
+      />,
+    )
+
+    fireEvent.click(screen.getByLabelText("chatPage.input.actions.add"))
+    fireEvent.click(screen.getByText("chatPage.input.localBrowser.label"))
+    fireEvent.click(await screen.findByText("GitHub"))
+    expect(screen.getByLabelText("Google Chrome · GitHub")).toBeInTheDocument()
+
+    fireEvent.click(screen.getByLabelText("chatPage.input.actions.add"))
+    fireEvent.click(
+      screen.getAllByText("chatPage.input.localBrowser.label").at(-1) as HTMLElement,
+    )
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Google Chrome · GitHub")).not.toBeInTheDocument()
+    })
+  })
+
   it("disambiguates browser windows with the same application and title", async () => {
     apiRequestMock.mockImplementation((url: string) => {
       if (url === "http://api.local/api/computer/local-browser/readiness") {

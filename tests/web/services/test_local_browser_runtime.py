@@ -293,6 +293,31 @@ async def test_bound_local_browser_fails_closed_after_admin_demotion(
 
 
 @pytest.mark.asyncio
+async def test_local_browser_rechecks_admin_before_environment_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XAGENT_NATIVE_BROWSER_ENABLED", "true")
+    provider = LocalBrowserTaskRuntimeProvider()
+    context, sessions = make_context(bound=True, admin=True)
+    provider.on_task_created(
+        context,
+        {
+            "pid": 100,
+            "window_id": 20,
+            "application": "Google Chrome",
+        },
+    )
+    contribution = provider.build_runtime(context)
+    assert isinstance(contribution, TaskRuntimeContribution)
+
+    sessions[-1].user.is_admin = False
+    result = await contribution.tools[0].run_json_async({})
+
+    assert result["success"] is False
+    assert "no longer an Xagent administrator" in result["error"]
+
+
+@pytest.mark.asyncio
 async def test_local_browser_binding_suppresses_colliding_playwright_family() -> None:
     contribution = merge_task_runtime_contributions(
         {

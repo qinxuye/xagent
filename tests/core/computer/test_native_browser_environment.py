@@ -538,6 +538,66 @@ async def test_local_browser_limits_keyboard_input_to_document_text_targets() ->
 
 
 @pytest.mark.asyncio
+async def test_local_browser_replace_text_does_not_use_pixel_occlusion() -> None:
+    elements = [
+        {
+            "element_index": 0,
+            "element_token": "snapshot-1:0",
+            "role": "AXWindow",
+            "depth": 0,
+            "frame": {"x": 100, "y": 200, "w": 1000, "h": 800},
+        },
+        {
+            "element_index": 1,
+            "element_token": "snapshot-1:1",
+            "role": "AXWebArea",
+            "depth": 1,
+            "parent_index": 0,
+            "frame": {"x": 100, "y": 280, "w": 1000, "h": 720},
+        },
+        {
+            "element_index": 2,
+            "element_token": "snapshot-1:2",
+            "role": "AXTextField",
+            "label": "Search",
+            "depth": 2,
+            "parent_index": 1,
+            "frame": {"x": 300, "y": 350, "w": 400, "h": 40},
+        },
+    ]
+    driver = FakeCuaDriver(elements=elements)
+    driver.windows.append(
+        {
+            "window_id": 31,
+            "pid": 300,
+            "app_name": "Terminal",
+            "title": "Overlapping window",
+            "bounds": {"x": 100, "y": 200, "width": 1000, "height": 800},
+            "z_index": 10,
+            "is_on_screen": True,
+            "on_current_space": True,
+        }
+    )
+    environment = make_environment(driver)
+    observation = await environment.observe()
+
+    await environment.execute(
+        batch(
+            observation.frame_id,
+            ComputerAction(
+                type=ComputerActionType.REPLACE_TEXT,
+                target=ComputerTarget(element_id="snapshot-1:2"),
+                text="semantic input",
+            ),
+        )
+    )
+
+    set_value = next(payload for name, payload in driver.calls if name == "set_value")
+    assert set_value["element_token"] == "snapshot-1:2"
+    assert set_value["value"] == "semantic input"
+
+
+@pytest.mark.asyncio
 async def test_local_browser_rejects_sensitive_document_text_targets() -> None:
     elements = [
         {

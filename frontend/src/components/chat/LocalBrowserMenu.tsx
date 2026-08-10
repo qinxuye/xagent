@@ -90,6 +90,16 @@ export function LocalBrowserMenu({
       const nextReadiness = await response.json();
       if (readinessRequestRef.current === request) {
         setReadiness(nextReadiness);
+        if (selectedTarget && (
+          nextReadiness.ready !== true
+          || !Array.isArray(nextReadiness.windows)
+          || !nextReadiness.windows.some((browserWindow: LocalBrowserTarget) => (
+            browserWindow.pid === selectedTarget.pid
+            && browserWindow.window_id === selectedTarget.window_id
+          ))
+        )) {
+          onTargetChange(null);
+        }
       }
     } catch {
       if (!request.signal.aborted && readinessRequestRef.current === request) {
@@ -107,7 +117,7 @@ export function LocalBrowserMenu({
         setLoading(false);
       }
     }
-  }, [showLocalBrowser, t]);
+  }, [onTargetChange, selectedTarget, showLocalBrowser, t]);
 
   const localBrowserDisabled = disabled || loading || readiness?.ready !== true;
   const selected = selectedTarget !== null;

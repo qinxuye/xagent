@@ -223,7 +223,10 @@ export function TaskConversationPanel({
   const containerRef = useRef<HTMLDivElement>(null)
   const userMessageContextBadges = useMemo(() => {
     const hasBoundLocalBrowser = (
-      state.currentTask?.runtimeExtensionBindings?.includes("local_browser")
+      (
+        state.currentTask?.id === String(state.taskId)
+        && state.currentTask.runtimeExtensionBindings?.includes("local_browser")
+      )
       || Object.values(state.taskRuntimeExtensions || {}).some(
         (metadata) => metadata.kind === "local_browser",
       )
@@ -236,7 +239,9 @@ export function TaskConversationPanel({
         }]
       : []
   }, [
+    state.currentTask?.id,
     state.currentTask?.runtimeExtensionBindings,
+    state.taskId,
     state.taskRuntimeExtensions,
     t,
   ])
