@@ -38,6 +38,21 @@ vi.mock("@/lib/api-wrapper", () => ({
   apiRequest: apiRequestMock,
 }))
 
+vi.mock("@/lib/task-runtime-ui-extension", async () => {
+  const ReactModule = await vi.importActual<typeof import("react")>("react")
+  return {
+    TaskRuntimeMessageMetadataExtension: ({ bindings }: { bindings: string[] }) => (
+      bindings.includes("browser_relay")
+        ? ReactModule.createElement(
+          "div",
+          { role: "note", "aria-label": "Computer use · My browser" },
+          "My browser",
+        )
+        : null
+    ),
+  }
+})
+
 vi.mock("@/components/file/docx-preview-renderer", () => ({
   DocxPreviewRenderer: ({ base64Content }: { base64Content: string }) => (
     <div data-testid="docx-preview">{base64Content}</div>
@@ -143,6 +158,26 @@ describe("ChatMessage Session file capability", () => {
 
     expect(
       screen.getByRole("note", { name: "Computer use · Local browser" }),
+    ).toBeInTheDocument()
+  })
+
+  it("renders distribution message metadata without replacing the message", () => {
+    render(
+      <ChatMessage
+        role="user"
+        content="Inspect my browser"
+        taskRuntimeExtensionMetadata={{
+          bindings: ["browser_relay"],
+          publicMetadata: {
+            browser_relay: { kind: "browser_relay", connected: true },
+          },
+        }}
+      />,
+    )
+
+    expect(screen.getByText("Inspect my browser")).toBeInTheDocument()
+    expect(
+      screen.getByRole("note", { name: "Computer use · My browser" }),
     ).toBeInTheDocument()
   })
 

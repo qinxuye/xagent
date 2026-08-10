@@ -771,6 +771,10 @@ export function TaskConversationPanel({
                         interactionsActive={item.id === activeWaitingMessageId}
                         showEmptyStatus={item.showEmptyStatus}
                         contextBadges={item.role === "user" ? userMessageContextBadges : undefined}
+                        taskRuntimeExtensionMetadata={item.role === "user" ? {
+                          bindings: state.currentTask?.runtimeExtensionBindings || [],
+                          publicMetadata: state.taskRuntimeExtensions || {},
+                        } : undefined}
                         onOpenExecutionPlan={showDagPreview ? openDagPreview : undefined}
                         onAgentExecutionClick={onAgentExecutionClick}
                       />
