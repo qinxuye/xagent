@@ -1,7 +1,7 @@
 """Xinference LLM provider implementation."""
 
+import asyncio
 import logging
-import time
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from xinference_client import RESTfulClient as XinferenceClient
@@ -13,6 +13,31 @@ from ..types import ChunkType, StreamChunk
 from .base import BaseLLM
 
 logger = logging.getLogger(__name__)
+
+
+def _create_async_client(base_url: str, api_key: Optional[str]) -> Any:
+    try:
+        from xinference.client.restful.async_restful_client import AsyncClient
+    except ImportError:
+        from xinference_client.client.restful.async_restful_client import (  # type: ignore
+            AsyncClient,
+        )
+
+    class NonBlockingAuthProbeAsyncClient(AsyncClient):  # type: ignore[valid-type,misc]
+        """Avoid the SDK's synchronous auth probe during construction."""
+
+        def __init__(self, client_base_url: str, client_api_key: Optional[str]) -> None:
+            self._api_key_configured = client_api_key is not None
+            super().__init__(client_base_url, api_key=client_api_key)
+
+        def _check_cluster_authenticated(self) -> None:
+            # The stock AsyncClient performs this probe with requests.get(),
+            # which blocks the event loop. Sending the Authorization header
+            # whenever an API key is configured works for both authenticated
+            # clusters and clusters that ignore authentication.
+            self._cluster_authed = self._api_key_configured
+
+    return NonBlockingAuthProbeAsyncClient(base_url, api_key)
 
 
 def _normalize_model_list_response(
@@ -90,8 +115,9 @@ class XinferenceLLM(BaseLLM):
             self._abilities = ["chat", "tool_calling"]
 
         # Initialize the Xinference client (lazy initialization)
-        self._client: Optional[XinferenceClient] = None
+        self._client: Optional[Any] = None
         self._model_handle: Optional[Any] = None
+        self._client_lock = asyncio.Lock()
 
     @property
     def model_name(self) -> str:
@@ -103,20 +129,21 @@ class XinferenceLLM(BaseLLM):
         """Get the list of abilities supported by this LLM implementation."""
         return self._abilities
 
-    def _ensure_client(self) -> None:
+    async def _ensure_client(self) -> Any:
         """Ensure the Xinference client and model handle are initialized."""
-        if self._client is None:
-            self._client = XinferenceClient(
-                base_url=self.base_url, api_key=self.api_key
-            )
+        async with self._client_lock:
+            if self._client is None:
+                self._client = _create_async_client(self.base_url, self.api_key)
 
-        client = self._client
-        if client is None:
-            raise RuntimeError("Failed to initialize Xinference client")
+            client = self._client
+            if client is None:
+                raise RuntimeError("Failed to initialize Xinference client")
 
-        if self._model_handle is None:
-            # Get the model handle (assumes model is already launched on the server)
-            self._model_handle = client.get_model(self._model_uid)
+            if self._model_handle is None:
+                # Get the model handle (assumes model is already launched on the server)
+                self._model_handle = await client.get_model(self._model_uid)
+
+            return self._model_handle
 
     def _build_generate_config(
         self,
@@ -185,9 +212,6 @@ class XinferenceLLM(BaseLLM):
         Raises:
             RuntimeError: If the API call fails
         """
-        self._ensure_client()
-        assert self._model_handle is not None
-
         # Sanitize messages
         sanitized_messages = self._sanitize_unicode_content(messages)
 
@@ -213,12 +237,15 @@ class XinferenceLLM(BaseLLM):
             enable_thinking = True
 
         try:
-            # Make the chat call
-            response = self._model_handle.chat(
-                messages=sanitized_messages,
-                tools=tools,
-                enable_thinking=enable_thinking,
-                generate_config=generate_config,
+            model_handle = await self._ensure_client()
+            response = await asyncio.wait_for(
+                model_handle.chat(
+                    messages=sanitized_messages,
+                    tools=tools,
+                    enable_thinking=enable_thinking,
+                    generate_config=generate_config,
+                ),
+                timeout=self.timeout,
             )
 
             return self._process_chat_response(response)
@@ -405,9 +432,6 @@ class XinferenceLLM(BaseLLM):
             RuntimeError: If API call fails
             LLMTimeoutError: If timeout occurs
         """
-        self._ensure_client()
-        assert self._model_handle is not None
-
         # Sanitize messages
         sanitized_messages = self._sanitize_unicode_content(messages)
 
@@ -432,51 +456,58 @@ class XinferenceLLM(BaseLLM):
             enable_thinking = True
 
         try:
-            # Make the streaming chat call
-            stream = self._model_handle.chat(
+            model_handle = await self._ensure_client()
+            stream = await model_handle.chat(
                 messages=sanitized_messages,
                 tools=tools,
                 enable_thinking=enable_thinking,
                 generate_config=generate_config,
             )
+            if not hasattr(stream, "__aiter__"):
+                raise RuntimeError(
+                    "Xinference streaming response is not an async iterator"
+                )
 
-            # Timeout control
+            iterator = stream.__aiter__()
             first_token = True
-            last_token_time = None
-            start_time = time.time()
 
             # Accumulated tool calls across chunks
             accumulated_tool_calls: Dict[str, Dict] = {}
 
-            for chunk in stream:
-                current_time = time.time()
-
-                # First token timeout check
-                if first_token:
-                    elapsed = current_time - start_time
-                    if elapsed > self.timeout_config.first_token_timeout:
-                        logger.error(f"First token timeout after {elapsed}s")
-                        raise LLMTimeoutError(
-                            f"First token timeout: {elapsed}s > {self.timeout_config.first_token_timeout}s"
+            try:
+                while True:
+                    timeout = (
+                        self.timeout_config.first_token_timeout
+                        if first_token
+                        else self.timeout_config.token_interval_timeout
+                    )
+                    try:
+                        item = await asyncio.wait_for(
+                            iterator.__anext__(), timeout=timeout
                         )
-                    first_token = False
-                    logger.debug(f"First token received after {elapsed:.2f}s")
-
-                # Token interval timeout check
-                if last_token_time is not None:
-                    interval = current_time - last_token_time
-                    if interval > self.timeout_config.token_interval_timeout:
-                        logger.error(f"Token interval timeout: {interval}s")
-                        raise LLMTimeoutError(
-                            f"Token interval timeout: {interval}s > {self.timeout_config.token_interval_timeout}s"
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError as exc:
+                        timeout_name = (
+                            "First token" if first_token else "Token interval"
                         )
+                        logger.error("%s timeout after %ss", timeout_name, timeout)
+                        raise LLMTimeoutError(
+                            f"{timeout_name} timeout: exceeded {timeout}s"
+                        ) from exc
 
-                last_token_time = current_time
+                    if first_token:
+                        first_token = False
 
-                # Parse and yield the chunk
-                parsed_chunk = self._parse_stream_chunk(chunk, accumulated_tool_calls)
-                if parsed_chunk:
-                    yield parsed_chunk
+                    parsed_chunk = self._parse_stream_chunk(
+                        item, accumulated_tool_calls
+                    )
+                    if parsed_chunk:
+                        yield parsed_chunk
+            finally:
+                close_stream = getattr(iterator, "aclose", None)
+                if callable(close_stream):
+                    await close_stream()
 
         except LLMTimeoutError:
             raise
@@ -622,19 +653,20 @@ class XinferenceLLM(BaseLLM):
 
     async def close(self) -> None:
         """Close the Xinference client and cleanup resources."""
-        if self._model_handle is not None:
-            try:
-                self._model_handle.close()
-            except Exception:
-                pass
-            self._model_handle = None
+        async with self._client_lock:
+            if self._model_handle is not None:
+                try:
+                    await self._model_handle.close()
+                except Exception:
+                    pass
+                self._model_handle = None
 
-        if self._client is not None:
-            try:
-                self._client.close()
-            except Exception:
-                pass
-            self._client = None
+            if self._client is not None:
+                try:
+                    await self._client.close()
+                except Exception:
+                    pass
+                self._client = None
 
     async def __aenter__(self) -> "XinferenceLLM":
         """Async context manager entry."""
@@ -662,8 +694,6 @@ class XinferenceLLM(BaseLLM):
             ...     base_url="http://localhost:9997"
             ... )
         """
-        import time
-
         # Ensure base_url doesn't have trailing slash
         base_url = base_url.rstrip("/")
 
@@ -685,15 +715,23 @@ class XinferenceLLM(BaseLLM):
 
         for attempt in range(max_retries):
             try:
-                # Use xinference-client SDK to list models
-                client = XinferenceClient(base_url=base_url, api_key=api_key)
-
                 logger.debug(
                     f"Fetching models from Xinference: {base_url} (attempt {attempt + 1}/{max_retries})"
                 )
 
-                # Use SDK's list_models method
-                model_list = client.list_models()
+                def fetch_models() -> Any:
+                    client = XinferenceClient(base_url=base_url, api_key=api_key)
+                    try:
+                        return client.list_models()
+                    finally:
+                        try:
+                            client.close()
+                        except Exception:
+                            pass
+
+                # The SDK is synchronous; model discovery must not block other
+                # API requests while Xinference is slow or unavailable.
+                model_list = await asyncio.to_thread(fetch_models)
                 normalized_models = _normalize_model_list_response(model_list)
 
                 result = []
@@ -741,7 +779,7 @@ class XinferenceLLM(BaseLLM):
                     logger.warning(
                         f"Error connecting to Xinference, retrying in {retry_delay}s: {e}"
                     )
-                    time.sleep(retry_delay)
+                    await asyncio.sleep(retry_delay)
                     continue
                 else:
                     logger.error(

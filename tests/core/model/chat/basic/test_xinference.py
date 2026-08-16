@@ -1,12 +1,112 @@
+import asyncio
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from xagent.core.model.chat.basic.xinference import XinferenceLLM
+from xagent.core.model.chat.exceptions import LLMTimeoutError
+from xagent.core.model.chat.timeout_config import TimeoutConfig
 from xagent.core.model.chat.types import ChunkType
 
 
 class TestXinferenceLLM:
+    @pytest.mark.asyncio
+    async def test_stream_chat_does_not_block_event_loop_before_first_token(
+        self,
+    ) -> None:
+        release_stream = asyncio.Event()
+
+        class BlockingModelHandle:
+            async def chat(self, **kwargs: object):
+                async def generate():
+                    await release_stream.wait()
+                    yield {
+                        "choices": [
+                            {
+                                "delta": {"content": "ok"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+
+                return generate()
+
+        llm = XinferenceLLM(model_name="qwen3.8")
+        llm._client = MagicMock()
+        llm._model_handle = BlockingModelHandle()
+
+        started_at = time.monotonic()
+
+        async def heartbeat() -> float:
+            await asyncio.sleep(0)
+            return time.monotonic() - started_at
+
+        heartbeat_task = asyncio.create_task(heartbeat())
+
+        async def release_later() -> None:
+            await asyncio.sleep(0.2)
+            release_stream.set()
+
+        release_task = asyncio.create_task(release_later())
+        try:
+            chunks = [
+                chunk
+                async for chunk in llm.stream_chat(
+                    messages=[{"role": "user", "content": "hello"}]
+                )
+            ]
+        finally:
+            release_stream.set()
+            await release_task
+
+        heartbeat_delay = await heartbeat_task
+        assert heartbeat_delay < 0.1
+        assert [chunk.delta for chunk in chunks] == ["ok"]
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_enforces_timeout_while_waiting_for_first_token(
+        self,
+    ) -> None:
+        release_stream = asyncio.Event()
+
+        class BlockingModelHandle:
+            async def chat(self, **kwargs: object):
+                async def generate():
+                    await release_stream.wait()
+                    yield {
+                        "choices": [
+                            {
+                                "delta": {"content": "late"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+
+                return generate()
+
+        llm = XinferenceLLM(
+            model_name="qwen3.8",
+            timeout_config=TimeoutConfig(
+                first_token_timeout=0.02,
+                token_interval_timeout=0.02,
+            ),
+        )
+        llm._client = MagicMock()
+        llm._model_handle = BlockingModelHandle()
+
+        started_at = time.monotonic()
+        try:
+            with pytest.raises(LLMTimeoutError, match="First token timeout"):
+                async for _ in llm.stream_chat(
+                    messages=[{"role": "user", "content": "hello"}]
+                ):
+                    pass
+        finally:
+            release_stream.set()
+
+        assert time.monotonic() - started_at < 0.15
+
     def test_parse_stream_chunk_accumulates_tool_arguments_by_index(self) -> None:
         llm = XinferenceLLM(model_name="qwen3.5")
         accumulated_tool_calls: dict[str, dict] = {}
