@@ -211,6 +211,7 @@ class XinferenceLLM(BaseLLM):
 
         Raises:
             RuntimeError: If the API call fails
+            LLMTimeoutError: If the request times out
         """
         # Sanitize messages
         sanitized_messages = self._sanitize_unicode_content(messages)
@@ -236,19 +237,25 @@ class XinferenceLLM(BaseLLM):
             # Auto-enable thinking mode for models that support it
             enable_thinking = True
 
-        try:
+        async def call_model() -> Any:
             model_handle = await self._ensure_client()
-            response = await asyncio.wait_for(
-                model_handle.chat(
-                    messages=sanitized_messages,
-                    tools=tools,
-                    enable_thinking=enable_thinking,
-                    generate_config=generate_config,
-                ),
-                timeout=self.timeout,
+            return await model_handle.chat(
+                messages=sanitized_messages,
+                tools=tools,
+                enable_thinking=enable_thinking,
+                generate_config=generate_config,
             )
 
+        try:
+            response = await asyncio.wait_for(call_model(), timeout=self.timeout)
+
             return self._process_chat_response(response)
+
+        except asyncio.TimeoutError as exc:
+            logger.error("Xinference chat timeout after %ss", self.timeout)
+            raise LLMTimeoutError(
+                f"Xinference chat timeout: exceeded {self.timeout}s"
+            ) from exc
 
         except Exception as e:
             logger.error(f"Xinference chat failed: {e}")
@@ -455,66 +462,65 @@ class XinferenceLLM(BaseLLM):
         elif self.supports_thinking_mode:
             enable_thinking = True
 
+        iterator: Optional[AsyncIterator[Any]] = None
         try:
-            model_handle = await self._ensure_client()
-            stream = await model_handle.chat(
-                messages=sanitized_messages,
-                tools=tools,
-                enable_thinking=enable_thinking,
-                generate_config=generate_config,
-            )
-            if not hasattr(stream, "__aiter__"):
-                raise RuntimeError(
-                    "Xinference streaming response is not an async iterator"
-                )
-
-            iterator = stream.__aiter__()
-            first_token = True
+            try:
+                async with asyncio.timeout(self.timeout_config.first_token_timeout):
+                    model_handle = await self._ensure_client()
+                    stream = await model_handle.chat(
+                        messages=sanitized_messages,
+                        tools=tools,
+                        enable_thinking=enable_thinking,
+                        generate_config=generate_config,
+                    )
+                    if not hasattr(stream, "__aiter__"):
+                        raise RuntimeError(
+                            "Xinference streaming response is not an async iterator"
+                        )
+                    iterator = stream.__aiter__()
+                    first_item = await iterator.__anext__()
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError as exc:
+                timeout = self.timeout_config.first_token_timeout
+                logger.error("First token timeout after %ss", timeout)
+                raise LLMTimeoutError(
+                    f"First token timeout: exceeded {timeout}s"
+                ) from exc
 
             # Accumulated tool calls across chunks
             accumulated_tool_calls: Dict[str, Dict] = {}
+            parsed_chunk = self._parse_stream_chunk(first_item, accumulated_tool_calls)
+            if parsed_chunk:
+                yield parsed_chunk
 
-            try:
-                while True:
-                    timeout = (
-                        self.timeout_config.first_token_timeout
-                        if first_token
-                        else self.timeout_config.token_interval_timeout
-                    )
-                    try:
-                        item = await asyncio.wait_for(
-                            iterator.__anext__(), timeout=timeout
-                        )
-                    except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError as exc:
-                        timeout_name = (
-                            "First token" if first_token else "Token interval"
-                        )
-                        logger.error("%s timeout after %ss", timeout_name, timeout)
-                        raise LLMTimeoutError(
-                            f"{timeout_name} timeout: exceeded {timeout}s"
-                        ) from exc
+            while True:
+                timeout = self.timeout_config.token_interval_timeout
+                try:
+                    item = await asyncio.wait_for(iterator.__anext__(), timeout=timeout)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError as exc:
+                    logger.error("Token interval timeout after %ss", timeout)
+                    raise LLMTimeoutError(
+                        f"Token interval timeout: exceeded {timeout}s"
+                    ) from exc
 
-                    if first_token:
-                        first_token = False
-
-                    parsed_chunk = self._parse_stream_chunk(
-                        item, accumulated_tool_calls
-                    )
-                    if parsed_chunk:
-                        yield parsed_chunk
-            finally:
-                close_stream = getattr(iterator, "aclose", None)
-                if callable(close_stream):
-                    await close_stream()
-
+                parsed_chunk = self._parse_stream_chunk(item, accumulated_tool_calls)
+                if parsed_chunk:
+                    yield parsed_chunk
         except LLMTimeoutError:
             raise
 
         except Exception as e:
             logger.error(f"Xinference stream chat failed: {e}")
             raise RuntimeError(f"Xinference stream chat failed: {str(e)}") from e
+
+        finally:
+            if iterator is not None:
+                close_stream = getattr(iterator, "aclose", None)
+                if callable(close_stream):
+                    await close_stream()
 
     def _parse_stream_chunk(
         self, raw_chunk: Any, accumulated_tool_calls: Dict

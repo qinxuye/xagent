@@ -4,7 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from xagent.core.model.chat.basic.xinference import XinferenceLLM
+from xagent.core.model.chat.basic.xinference import XinferenceLLM, _create_async_client
+from xagent.core.model.chat.error import retry_on
 from xagent.core.model.chat.exceptions import LLMTimeoutError
 from xagent.core.model.chat.timeout_config import TimeoutConfig
 from xagent.core.model.chat.types import ChunkType
@@ -32,20 +33,26 @@ class TestXinferenceLLM:
 
                 return generate()
 
-        llm = XinferenceLLM(model_name="qwen3.8")
+        llm = XinferenceLLM(
+            model_name="qwen3.8",
+            timeout_config=TimeoutConfig(
+                first_token_timeout=1,
+                token_interval_timeout=1,
+            ),
+        )
         llm._client = MagicMock()
         llm._model_handle = BlockingModelHandle()
 
-        started_at = time.monotonic()
+        heartbeat_completed = asyncio.Event()
 
-        async def heartbeat() -> float:
+        async def heartbeat() -> None:
             await asyncio.sleep(0)
-            return time.monotonic() - started_at
+            heartbeat_completed.set()
 
         heartbeat_task = asyncio.create_task(heartbeat())
 
         async def release_later() -> None:
-            await asyncio.sleep(0.2)
+            await asyncio.wait_for(heartbeat_completed.wait(), timeout=0.5)
             release_stream.set()
 
         release_task = asyncio.create_task(release_later())
@@ -60,8 +67,8 @@ class TestXinferenceLLM:
             release_stream.set()
             await release_task
 
-        heartbeat_delay = await heartbeat_task
-        assert heartbeat_delay < 0.1
+        await heartbeat_task
+        assert heartbeat_completed.is_set()
         assert [chunk.delta for chunk in chunks] == ["ok"]
 
     @pytest.mark.asyncio
@@ -106,6 +113,126 @@ class TestXinferenceLLM:
             release_stream.set()
 
         assert time.monotonic() - started_at < 0.15
+
+    @pytest.mark.asyncio
+    async def test_chat_timeout_is_retryable(self) -> None:
+        class BlockingModelHandle:
+            async def chat(self, **kwargs: object):
+                await asyncio.Event().wait()
+
+        llm = XinferenceLLM(model_name="qwen3.8", timeout=0.02)
+        llm._client = MagicMock()
+        llm._model_handle = BlockingModelHandle()
+
+        with pytest.raises(LLMTimeoutError, match="Xinference chat timeout") as exc:
+            await llm.chat(messages=[{"role": "user", "content": "hello"}])
+
+        assert retry_on(exc.value)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("blocking_phase", ["get_model", "chat"])
+    async def test_stream_first_token_timeout_bounds_request_initiation(
+        self, blocking_phase: str
+    ) -> None:
+        class BlockingClient:
+            async def get_model(self, model_uid: str):
+                await asyncio.Event().wait()
+
+        class BlockingModelHandle:
+            async def chat(self, **kwargs: object):
+                await asyncio.Event().wait()
+
+        llm = XinferenceLLM(
+            model_name="qwen3.8",
+            timeout_config=TimeoutConfig(
+                first_token_timeout=0.02,
+                token_interval_timeout=1,
+            ),
+        )
+        if blocking_phase == "get_model":
+            llm._client = BlockingClient()
+        else:
+            llm._client = MagicMock()
+            llm._model_handle = BlockingModelHandle()
+
+        with pytest.raises(LLMTimeoutError, match="First token timeout"):
+            async for _ in llm.stream_chat(
+                messages=[{"role": "user", "content": "hello"}]
+            ):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_enforces_token_interval_timeout_and_closes_stream(
+        self,
+    ) -> None:
+        class TrackingStream:
+            def __init__(self) -> None:
+                self._first = True
+                self.closed = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._first:
+                    self._first = False
+                    return {
+                        "choices": [
+                            {
+                                "delta": {"content": "first"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                await asyncio.Event().wait()
+
+            async def aclose(self) -> None:
+                self.closed = True
+
+        stream = TrackingStream()
+
+        class ModelHandle:
+            async def chat(self, **kwargs: object):
+                return stream
+
+        llm = XinferenceLLM(
+            model_name="qwen3.8",
+            timeout_config=TimeoutConfig(
+                first_token_timeout=1,
+                token_interval_timeout=0.02,
+            ),
+        )
+        llm._client = MagicMock()
+        llm._model_handle = ModelHandle()
+
+        chunks = []
+        with pytest.raises(LLMTimeoutError, match="Token interval timeout"):
+            async for chunk in llm.stream_chat(
+                messages=[{"role": "user", "content": "hello"}]
+            ):
+                chunks.append(chunk)
+
+        assert [chunk.delta for chunk in chunks] == ["first"]
+        assert stream.closed
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("api_key", "expected_authorization"),
+        [(None, None), ("secret", "Bearer secret")],
+    )
+    async def test_async_client_skips_sync_auth_probe(
+        self, api_key: str | None, expected_authorization: str | None
+    ) -> None:
+        with patch(
+            "requests.Session.get",
+            side_effect=AssertionError("synchronous auth probe must not run"),
+        ):
+            client = _create_async_client("http://localhost:9997", api_key)
+
+        try:
+            assert client._headers.get("Authorization") == expected_authorization
+        finally:
+            await client.close()
 
     def test_parse_stream_chunk_accumulates_tool_arguments_by_index(self) -> None:
         llm = XinferenceLLM(model_name="qwen3.5")
