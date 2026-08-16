@@ -443,10 +443,13 @@ class XinferenceLLM(BaseLLM):
         sanitized_messages = self._sanitize_unicode_content(messages)
 
         # Build generate config with streaming enabled
+        stream_options = dict(kwargs.pop("stream_options", {}) or {})
+        stream_options["include_usage"] = True
         generate_config = self._build_generate_config(
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
+            stream_options=stream_options,
             **kwargs,
         )
 
@@ -552,6 +555,12 @@ class XinferenceLLM(BaseLLM):
         # Check choices
         choices = chunk_dict.get("choices", [])
         if not choices:
+            if usage:
+                return StreamChunk(
+                    type=ChunkType.USAGE,
+                    usage=dict(usage),
+                    raw=chunk_dict,
+                )
             # No choices, might be a metadata chunk
             return None
 

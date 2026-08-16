@@ -72,6 +72,50 @@ class TestXinferenceLLM:
         assert [chunk.delta for chunk in chunks] == ["ok"]
 
     @pytest.mark.asyncio
+    async def test_stream_chat_requests_and_surfaces_usage(self) -> None:
+        captured_generate_config: dict[str, object] = {}
+
+        class ModelHandle:
+            async def chat(self, **kwargs: object):
+                generate_config = kwargs["generate_config"]
+                assert isinstance(generate_config, dict)
+                captured_generate_config.update(generate_config)
+
+                async def generate():
+                    yield {
+                        "choices": [],
+                        "usage": {
+                            "prompt_tokens": 100,
+                            "completion_tokens": 5,
+                            "total_tokens": 105,
+                            "prompt_tokens_details": {"cached_tokens": 60},
+                        },
+                    }
+
+                return generate()
+
+        llm = XinferenceLLM(model_name="qwen3.8")
+        llm._client = MagicMock()
+        llm._model_handle = ModelHandle()
+
+        chunks = [
+            chunk
+            async for chunk in llm.stream_chat(
+                messages=[{"role": "user", "content": "hello"}]
+            )
+        ]
+
+        assert captured_generate_config["stream_options"] == {"include_usage": True}
+        assert len(chunks) == 1
+        assert chunks[0].type == ChunkType.USAGE
+        assert chunks[0].usage == {
+            "prompt_tokens": 100,
+            "completion_tokens": 5,
+            "total_tokens": 105,
+            "prompt_tokens_details": {"cached_tokens": 60},
+        }
+
+    @pytest.mark.asyncio
     async def test_stream_chat_enforces_timeout_while_waiting_for_first_token(
         self,
     ) -> None:
