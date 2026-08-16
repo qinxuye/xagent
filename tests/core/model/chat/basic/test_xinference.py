@@ -72,8 +72,17 @@ class TestXinferenceLLM:
         assert [chunk.delta for chunk in chunks] == ["ok"]
 
     @pytest.mark.asyncio
-    async def test_stream_chat_requests_and_surfaces_usage(self) -> None:
+    @pytest.mark.parametrize("separate_usage_chunk", [False, True])
+    async def test_stream_chat_requests_and_surfaces_usage(
+        self, separate_usage_chunk: bool
+    ) -> None:
         captured_generate_config: dict[str, object] = {}
+        usage = {
+            "prompt_tokens": 100,
+            "completion_tokens": 5,
+            "total_tokens": 105,
+            "prompt_tokens_details": {"cached_tokens": 60},
+        }
 
         class ModelHandle:
             async def chat(self, **kwargs: object):
@@ -83,14 +92,19 @@ class TestXinferenceLLM:
 
                 async def generate():
                     yield {
-                        "choices": [],
-                        "usage": {
-                            "prompt_tokens": 100,
-                            "completion_tokens": 5,
-                            "total_tokens": 105,
-                            "prompt_tokens_details": {"cached_tokens": 60},
-                        },
+                        "choices": [
+                            {
+                                "delta": {"content": ""},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": usage,
                     }
+                    if separate_usage_chunk:
+                        yield {
+                            "choices": [],
+                            "usage": usage,
+                        }
 
                 return generate()
 
@@ -98,22 +112,27 @@ class TestXinferenceLLM:
         llm._client = MagicMock()
         llm._model_handle = ModelHandle()
 
-        chunks = [
-            chunk
-            async for chunk in llm.stream_chat(
-                messages=[{"role": "user", "content": "hello"}]
-            )
-        ]
+        with patch(
+            "xagent.core.model.chat.basic.xinference.add_token_usage"
+        ) as add_usage:
+            chunks = [
+                chunk
+                async for chunk in llm.stream_chat(
+                    messages=[{"role": "user", "content": "hello"}]
+                )
+            ]
 
         assert captured_generate_config["stream_options"] == {"include_usage": True}
-        assert len(chunks) == 1
-        assert chunks[0].type == ChunkType.USAGE
-        assert chunks[0].usage == {
-            "prompt_tokens": 100,
-            "completion_tokens": 5,
-            "total_tokens": 105,
-            "prompt_tokens_details": {"cached_tokens": 60},
-        }
+        assert [chunk.type for chunk in chunks] == [ChunkType.END, ChunkType.USAGE]
+        assert chunks[-1].usage == usage
+        add_usage.assert_called_once_with(
+            input_tokens=100,
+            output_tokens=5,
+            model="qwen3.8",
+            model_id="",
+            call_type="stream_chat",
+            cached_input_tokens=60,
+        )
 
     @pytest.mark.asyncio
     async def test_stream_chat_enforces_timeout_while_waiting_for_first_token(

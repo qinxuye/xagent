@@ -493,7 +493,21 @@ class XinferenceLLM(BaseLLM):
 
             # Accumulated tool calls across chunks
             accumulated_tool_calls: Dict[str, Dict] = {}
-            parsed_chunk = self._parse_stream_chunk(first_item, accumulated_tool_calls)
+            last_usage: Optional[Dict[str, Any]] = None
+            usage_emitted = False
+
+            def parse_item(item: Any) -> Optional[StreamChunk]:
+                nonlocal last_usage, usage_emitted
+                item_dict = dict(item) if not isinstance(item, dict) else item
+                usage = item_dict.get("usage")
+                if usage:
+                    last_usage = dict(usage)
+                chunk = self._parse_stream_chunk(item_dict, accumulated_tool_calls)
+                if chunk is not None and chunk.is_usage():
+                    usage_emitted = True
+                return chunk
+
+            parsed_chunk = parse_item(first_item)
             if parsed_chunk:
                 yield parsed_chunk
 
@@ -509,9 +523,17 @@ class XinferenceLLM(BaseLLM):
                         f"Token interval timeout: exceeded {timeout}s"
                     ) from exc
 
-                parsed_chunk = self._parse_stream_chunk(item, accumulated_tool_calls)
+                parsed_chunk = parse_item(item)
                 if parsed_chunk:
                     yield parsed_chunk
+
+            if last_usage and not usage_emitted:
+                self._record_stream_usage(last_usage)
+                yield StreamChunk(
+                    type=ChunkType.USAGE,
+                    usage=last_usage,
+                    raw={"choices": [], "usage": last_usage},
+                )
         except LLMTimeoutError:
             raise
 
@@ -542,20 +564,12 @@ class XinferenceLLM(BaseLLM):
 
         # Check for usage information
         usage = chunk_dict.get("usage")
-        if usage:
-            add_token_usage(
-                input_tokens=usage.get("prompt_tokens", 0),
-                output_tokens=usage.get("completion_tokens", 0),
-                model=self._model_name,
-                model_id=self.model_id,
-                call_type="stream_chat",
-                cached_input_tokens=extract_cached_input_tokens(usage),
-            )
 
         # Check choices
         choices = chunk_dict.get("choices", [])
         if not choices:
             if usage:
+                self._record_stream_usage(usage)
                 return StreamChunk(
                     type=ChunkType.USAGE,
                     usage=dict(usage),
@@ -655,6 +669,16 @@ class XinferenceLLM(BaseLLM):
             )
 
         return None
+
+    def _record_stream_usage(self, usage: Dict[str, Any]) -> None:
+        add_token_usage(
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0),
+            model=self._model_name,
+            model_id=self.model_id,
+            call_type="stream_chat",
+            cached_input_tokens=extract_cached_input_tokens(usage),
+        )
 
     @property
     def supports_thinking_mode(self) -> bool:
