@@ -4,8 +4,6 @@ import asyncio
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
-from xinference_client import RESTfulClient as XinferenceClient
-
 from ..exceptions import LLMTimeoutError
 from ..timeout_config import TimeoutConfig
 from ..token_context import add_token_usage, extract_cached_input_tokens
@@ -14,14 +12,51 @@ from .base import BaseLLM
 
 logger = logging.getLogger(__name__)
 
+_MODEL_DISCOVERY_TIMEOUT_SECONDS = 30.0
+
+
+async def _await_with_timeout(
+    awaitable: Any, *, timeout: float, timeout_message: str
+) -> Any:
+    if timeout <= 0:
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        logger.error(timeout_message)
+        raise LLMTimeoutError(timeout_message) from asyncio.TimeoutError()
+
+    async def preserve_transport_timeout() -> Any:
+        try:
+            return await awaitable
+        except asyncio.TimeoutError as exc:
+            logger.error("Xinference transport timeout: %s", exc)
+            raise LLMTimeoutError("Xinference transport timeout") from exc
+
+    try:
+        return await asyncio.wait_for(preserve_transport_timeout(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        logger.error(timeout_message)
+        raise LLMTimeoutError(timeout_message) from exc
+
+
+async def _await_before_deadline(
+    awaitable: Any, *, deadline: float, timeout_message: str
+) -> Any:
+    remaining = deadline - asyncio.get_running_loop().time()
+    return await _await_with_timeout(
+        awaitable,
+        timeout=remaining,
+        timeout_message=timeout_message,
+    )
+
 
 def _create_async_client(base_url: str, api_key: Optional[str]) -> Any:
     try:
-        from xinference.client.restful.async_restful_client import AsyncClient
-    except ImportError:
         from xinference_client.client.restful.async_restful_client import (  # type: ignore
             AsyncClient,
         )
+    except ImportError:
+        from xinference.client.restful.async_restful_client import AsyncClient
 
     class NonBlockingAuthProbeAsyncClient(AsyncClient):  # type: ignore[valid-type,misc]
         """Avoid the SDK's synchronous auth probe during construction."""
@@ -247,15 +282,16 @@ class XinferenceLLM(BaseLLM):
             )
 
         try:
-            response = await asyncio.wait_for(call_model(), timeout=self.timeout)
+            response = await _await_with_timeout(
+                call_model(),
+                timeout=self.timeout,
+                timeout_message=f"Xinference chat timeout: exceeded {self.timeout}s",
+            )
 
             return self._process_chat_response(response)
 
-        except asyncio.TimeoutError as exc:
-            logger.error("Xinference chat timeout after %ss", self.timeout)
-            raise LLMTimeoutError(
-                f"Xinference chat timeout: exceeded {self.timeout}s"
-            ) from exc
+        except LLMTimeoutError:
+            raise
 
         except Exception as e:
             logger.error(f"Xinference chat failed: {e}")
@@ -467,34 +503,37 @@ class XinferenceLLM(BaseLLM):
 
         iterator: Optional[AsyncIterator[Any]] = None
         try:
-            try:
-                async with asyncio.timeout(self.timeout_config.first_token_timeout):
-                    model_handle = await self._ensure_client()
-                    stream = await model_handle.chat(
-                        messages=sanitized_messages,
-                        tools=tools,
-                        enable_thinking=enable_thinking,
-                        generate_config=generate_config,
-                    )
-                    if not hasattr(stream, "__aiter__"):
-                        raise RuntimeError(
-                            "Xinference streaming response is not an async iterator"
-                        )
-                    iterator = stream.__aiter__()
-                    first_item = await iterator.__anext__()
-            except StopAsyncIteration:
-                return
-            except asyncio.TimeoutError as exc:
-                timeout = self.timeout_config.first_token_timeout
-                logger.error("First token timeout after %ss", timeout)
-                raise LLMTimeoutError(
-                    f"First token timeout: exceeded {timeout}s"
-                ) from exc
+            loop = asyncio.get_running_loop()
+            first_timeout = self.timeout_config.first_token_timeout
+            first_deadline = loop.time() + first_timeout
+            first_timeout_message = f"First token timeout: exceeded {first_timeout}s"
+            model_handle = await _await_before_deadline(
+                self._ensure_client(),
+                deadline=first_deadline,
+                timeout_message=first_timeout_message,
+            )
+            stream = await _await_before_deadline(
+                model_handle.chat(
+                    messages=sanitized_messages,
+                    tools=tools,
+                    enable_thinking=enable_thinking,
+                    generate_config=generate_config,
+                ),
+                deadline=first_deadline,
+                timeout_message=first_timeout_message,
+            )
+            if not hasattr(stream, "__aiter__"):
+                raise RuntimeError(
+                    "Xinference streaming response is not an async iterator"
+                )
+            iterator = stream.__aiter__()
 
             # Accumulated tool calls across chunks
             accumulated_tool_calls: Dict[str, Dict] = {}
             last_usage: Optional[Dict[str, Any]] = None
             usage_emitted = False
+            first_payload_seen = False
+            next_payload_deadline = first_deadline
 
             def parse_item(item: Any) -> Optional[StreamChunk]:
                 nonlocal last_usage, usage_emitted
@@ -507,24 +546,33 @@ class XinferenceLLM(BaseLLM):
                     usage_emitted = True
                 return chunk
 
-            parsed_chunk = parse_item(first_item)
-            if parsed_chunk:
-                yield parsed_chunk
-
             while True:
-                timeout = self.timeout_config.token_interval_timeout
+                if first_payload_seen:
+                    timeout = self.timeout_config.token_interval_timeout
+                    timeout_message = f"Token interval timeout: exceeded {timeout}s"
+                else:
+                    timeout = first_timeout
+                    timeout_message = first_timeout_message
                 try:
-                    item = await asyncio.wait_for(iterator.__anext__(), timeout=timeout)
+                    item = await _await_before_deadline(
+                        iterator.__anext__(),
+                        deadline=next_payload_deadline,
+                        timeout_message=timeout_message,
+                    )
                 except StopAsyncIteration:
                     break
-                except asyncio.TimeoutError as exc:
-                    logger.error("Token interval timeout after %ss", timeout)
-                    raise LLMTimeoutError(
-                        f"Token interval timeout: exceeded {timeout}s"
-                    ) from exc
 
                 parsed_chunk = parse_item(item)
                 if parsed_chunk:
+                    if parsed_chunk.type in {
+                        ChunkType.TOKEN,
+                        ChunkType.TOOL_CALL,
+                        ChunkType.END,
+                    }:
+                        first_payload_seen = True
+                        next_payload_deadline = (
+                            loop.time() + self.timeout_config.token_interval_timeout
+                        )
                     yield parsed_chunk
 
             if last_usage and not usage_emitted:
@@ -758,19 +806,21 @@ class XinferenceLLM(BaseLLM):
                     f"Fetching models from Xinference: {base_url} (attempt {attempt + 1}/{max_retries})"
                 )
 
-                def fetch_models() -> Any:
-                    client = XinferenceClient(base_url=base_url, api_key=api_key)
+                client = _create_async_client(base_url, api_key)
+                try:
+                    model_list = await _await_with_timeout(
+                        client.list_models(),
+                        timeout=_MODEL_DISCOVERY_TIMEOUT_SECONDS,
+                        timeout_message=(
+                            "Xinference model discovery timeout: exceeded "
+                            f"{_MODEL_DISCOVERY_TIMEOUT_SECONDS}s"
+                        ),
+                    )
+                finally:
                     try:
-                        return client.list_models()
-                    finally:
-                        try:
-                            client.close()
-                        except Exception:
-                            pass
-
-                # The SDK is synchronous; model discovery must not block other
-                # API requests while Xinference is slow or unavailable.
-                model_list = await asyncio.to_thread(fetch_models)
+                        await client.close()
+                    except Exception:
+                        pass
                 normalized_models = _normalize_model_list_response(model_list)
 
                 result = []

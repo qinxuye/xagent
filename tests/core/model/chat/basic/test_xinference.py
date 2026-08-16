@@ -1,6 +1,6 @@
 import asyncio
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -279,6 +279,139 @@ class TestXinferenceLLM:
         assert stream.closed
 
     @pytest.mark.asyncio
+    async def test_stream_chat_keeps_first_deadline_until_payload(self) -> None:
+        class DelayedPayloadStream:
+            def __init__(self) -> None:
+                self._index = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                self._index += 1
+                if self._index == 1:
+                    return {
+                        "choices": [
+                            {
+                                "delta": {"role": "assistant", "content": ""},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                if self._index == 2:
+                    await asyncio.sleep(0.05)
+                    return {
+                        "choices": [
+                            {
+                                "delta": {"content": "first payload"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                raise StopAsyncIteration
+
+            async def aclose(self) -> None:
+                pass
+
+        class ModelHandle:
+            async def chat(self, **kwargs: object):
+                return DelayedPayloadStream()
+
+        llm = XinferenceLLM(
+            model_name="qwen3.8",
+            timeout_config=TimeoutConfig(
+                first_token_timeout=0.2,
+                token_interval_timeout=0.02,
+            ),
+        )
+        llm._client = MagicMock()
+        llm._model_handle = ModelHandle()
+
+        chunks = [
+            chunk
+            async for chunk in llm.stream_chat(
+                messages=[{"role": "user", "content": "hello"}]
+            )
+        ]
+
+        assert [chunk.delta for chunk in chunks] == ["first payload"]
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_preserves_transport_timeout_cause(self) -> None:
+        transport_error = asyncio.TimeoutError("SDK read timed out")
+
+        class TransportTimeoutStream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise transport_error
+
+            async def aclose(self) -> None:
+                pass
+
+        class ModelHandle:
+            async def chat(self, **kwargs: object):
+                return TransportTimeoutStream()
+
+        llm = XinferenceLLM(
+            model_name="qwen3.8",
+            timeout_config=TimeoutConfig(
+                first_token_timeout=1,
+                token_interval_timeout=1,
+            ),
+        )
+        llm._client = MagicMock()
+        llm._model_handle = ModelHandle()
+
+        with pytest.raises(LLMTimeoutError, match="transport timeout") as exc:
+            async for _ in llm.stream_chat(
+                messages=[{"role": "user", "content": "hello"}]
+            ):
+                pass
+
+        assert exc.value.__cause__ is transport_error
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_outer_close_closes_inner_iterator(self) -> None:
+        class TrackingStream:
+            def __init__(self) -> None:
+                self.closed = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                return {
+                    "choices": [
+                        {
+                            "delta": {"content": "first"},
+                            "finish_reason": None,
+                        }
+                    ]
+                }
+
+            async def aclose(self) -> None:
+                self.closed += 1
+
+        stream = TrackingStream()
+
+        class ModelHandle:
+            async def chat(self, **kwargs: object):
+                return stream
+
+        llm = XinferenceLLM(model_name="qwen3.8")
+        llm._client = MagicMock()
+        llm._model_handle = ModelHandle()
+        outer = llm.stream_chat(messages=[{"role": "user", "content": "hello"}])
+
+        chunk = await outer.__anext__()
+        await outer.aclose()
+
+        assert chunk.delta == "first"
+        assert stream.closed == 1
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("api_key", "expected_authorization"),
         [(None, None), ("secret", "Bearer secret")],
@@ -479,26 +612,29 @@ class TestXinferenceLLM:
         ]
 
     @pytest.mark.asyncio
-    @patch("xagent.core.model.chat.basic.xinference.XinferenceClient")
+    @patch("xagent.core.model.chat.basic.xinference._create_async_client")
     async def test_list_available_models_handles_dict_response(
-        self, mock_client_class: MagicMock
+        self, mock_client_factory: MagicMock
     ) -> None:
         mock_client = MagicMock()
-        mock_client.list_models.return_value = {
-            "qwen-chat-uid": {
-                "model_name": "Qwen3-8B-Instruct",
-                "model_type": "LLM",
-                "model_ability": ["chat", "vision", "tool_calling"],
-                "model_description": "Qwen chat model",
-            },
-            "whisper-uid": {
-                "model_name": "whisper-large-v3",
-                "model_type": "audio",
-                "model_ability": ["audio2text"],
-                "model_description": "ASR model",
-            },
-        }
-        mock_client_class.return_value = mock_client
+        mock_client.list_models = AsyncMock(
+            return_value={
+                "qwen-chat-uid": {
+                    "model_name": "Qwen3-8B-Instruct",
+                    "model_type": "LLM",
+                    "model_ability": ["chat", "vision", "tool_calling"],
+                    "model_description": "Qwen chat model",
+                },
+                "whisper-uid": {
+                    "model_name": "whisper-large-v3",
+                    "model_type": "audio",
+                    "model_ability": ["audio2text"],
+                    "model_description": "ASR model",
+                },
+            }
+        )
+        mock_client.close = AsyncMock()
+        mock_client_factory.return_value = mock_client
 
         models = await XinferenceLLM.list_available_models(
             base_url="http://localhost:9997", api_key="test-key"
@@ -521,22 +657,26 @@ class TestXinferenceLLM:
             "abilities": ["asr"],
             "description": "ASR model",
         }
+        mock_client.close.assert_awaited_once()
 
     @pytest.mark.asyncio
-    @patch("xagent.core.model.chat.basic.xinference.XinferenceClient")
+    @patch("xagent.core.model.chat.basic.xinference._create_async_client")
     async def test_list_available_models_preserves_embedding_ability(
-        self, mock_client_class: MagicMock
+        self, mock_client_factory: MagicMock
     ) -> None:
         mock_client = MagicMock()
-        mock_client.list_models.return_value = {
-            "embedding-uid": {
-                "model_name": "Qwen3-Embedding-8B",
-                "model_type": "embedding",
-                "model_ability": ["embedding"],
-                "model_description": "Embedding model",
+        mock_client.list_models = AsyncMock(
+            return_value={
+                "embedding-uid": {
+                    "model_name": "Qwen3-Embedding-8B",
+                    "model_type": "embedding",
+                    "model_ability": ["embedding"],
+                    "model_description": "Embedding model",
+                }
             }
-        }
-        mock_client_class.return_value = mock_client
+        )
+        mock_client.close = AsyncMock()
+        mock_client_factory.return_value = mock_client
 
         models = await XinferenceLLM.list_available_models(
             base_url="http://localhost:9997", api_key="test-key"
@@ -554,21 +694,24 @@ class TestXinferenceLLM:
         ]
 
     @pytest.mark.asyncio
-    @patch("xagent.core.model.chat.basic.xinference.XinferenceClient")
+    @patch("xagent.core.model.chat.basic.xinference._create_async_client")
     async def test_list_available_models_handles_legacy_list_response(
-        self, mock_client_class: MagicMock
+        self, mock_client_factory: MagicMock
     ) -> None:
         mock_client = MagicMock()
-        mock_client.list_models.return_value = [
-            {
-                "id": "legacy-chat-uid",
-                "model_name": "legacy-chat",
-                "model_type": "LLM",
-                "model_ability": ["chat"],
-                "model_description": "Legacy chat model",
-            }
-        ]
-        mock_client_class.return_value = mock_client
+        mock_client.list_models = AsyncMock(
+            return_value=[
+                {
+                    "id": "legacy-chat-uid",
+                    "model_name": "legacy-chat",
+                    "model_type": "LLM",
+                    "model_ability": ["chat"],
+                    "model_description": "Legacy chat model",
+                }
+            ]
+        )
+        mock_client.close = AsyncMock()
+        mock_client_factory.return_value = mock_client
 
         models = await XinferenceLLM.list_available_models(
             base_url="http://localhost:9997", api_key="test-key"
@@ -584,6 +727,81 @@ class TestXinferenceLLM:
                 "description": "Legacy chat model",
             }
         ]
+
+    @pytest.mark.asyncio
+    @patch("xagent.core.model.chat.basic.xinference._create_async_client")
+    async def test_list_available_models_remains_responsive_and_closes_client(
+        self, mock_client_factory: MagicMock
+    ) -> None:
+        discovery_started = asyncio.Event()
+        release_discovery = asyncio.Event()
+
+        async def list_models():
+            discovery_started.set()
+            await release_discovery.wait()
+            return {}
+
+        mock_client = MagicMock()
+        mock_client.list_models = list_models
+        mock_client.close = AsyncMock()
+        mock_client_factory.return_value = mock_client
+
+        discovery_task = asyncio.create_task(
+            XinferenceLLM.list_available_models("http://localhost:9997")
+        )
+        await asyncio.wait_for(discovery_started.wait(), timeout=0.1)
+        heartbeat = asyncio.create_task(asyncio.sleep(0))
+        await asyncio.wait_for(heartbeat, timeout=0.1)
+        release_discovery.set()
+
+        assert await discovery_task == []
+        mock_client.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch(
+        "xagent.core.model.chat.basic.xinference.asyncio.sleep", new_callable=AsyncMock
+    )
+    @patch("xagent.core.model.chat.basic.xinference._create_async_client")
+    async def test_list_available_models_closes_client_after_errors(
+        self, mock_client_factory: MagicMock, _mock_sleep: AsyncMock
+    ) -> None:
+        mock_client = MagicMock()
+        mock_client.list_models = AsyncMock(side_effect=RuntimeError("boom"))
+        mock_client.close = AsyncMock()
+        mock_client_factory.return_value = mock_client
+
+        with pytest.raises(RuntimeError, match="Cannot connect to Xinference"):
+            await XinferenceLLM.list_available_models("http://localhost:9997")
+
+        assert mock_client_factory.call_count == 3
+        assert mock_client.close.await_count == 3
+
+    @pytest.mark.asyncio
+    @patch(
+        "xagent.core.model.chat.basic.xinference._MODEL_DISCOVERY_TIMEOUT_SECONDS",
+        0.01,
+    )
+    @patch(
+        "xagent.core.model.chat.basic.xinference.asyncio.sleep", new_callable=AsyncMock
+    )
+    @patch("xagent.core.model.chat.basic.xinference._create_async_client")
+    async def test_list_available_models_bounds_and_cleans_up_slow_discovery(
+        self, mock_client_factory: MagicMock, _mock_sleep: AsyncMock
+    ) -> None:
+        async def list_models():
+            await asyncio.Event().wait()
+
+        mock_client = MagicMock()
+        mock_client.list_models = list_models
+        mock_client.close = AsyncMock()
+        mock_client_factory.return_value = mock_client
+
+        with pytest.raises(RuntimeError, match="Cannot connect to Xinference") as exc:
+            await XinferenceLLM.list_available_models("http://localhost:9997")
+
+        assert isinstance(exc.value.__cause__, LLMTimeoutError)
+        assert mock_client_factory.call_count == 3
+        assert mock_client.close.await_count == 3
 
 
 class TestProcessChatResponse:
