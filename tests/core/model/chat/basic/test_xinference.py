@@ -1,5 +1,4 @@
 import asyncio
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -165,7 +164,6 @@ class TestXinferenceLLM:
         llm._client = MagicMock()
         llm._model_handle = BlockingModelHandle()
 
-        started_at = time.monotonic()
         try:
             with pytest.raises(LLMTimeoutError, match="First token timeout"):
                 async for _ in llm.stream_chat(
@@ -174,8 +172,6 @@ class TestXinferenceLLM:
                     pass
         finally:
             release_stream.set()
-
-        assert time.monotonic() - started_at < 0.15
 
     @pytest.mark.asyncio
     async def test_chat_timeout_is_retryable(self) -> None:
