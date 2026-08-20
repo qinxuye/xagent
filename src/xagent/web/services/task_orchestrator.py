@@ -1977,6 +1977,7 @@ def _execution_context_with_turn_id(
     execution_context = dict(context or {})
     if turn_id:
         execution_context["turn_id"] = turn_id
+    # A resumed/retried turn may already carry its authoritative file batch.
     if files and not execution_context.get("files"):
         execution_context["files"] = [dict(file_info) for file_info in files]
     return execution_context

@@ -20,6 +20,7 @@ from .context_ref import (
 logger = logging.getLogger(__name__)
 
 _IMAGE_CONTEXT_PLACEHOLDER = "Image context for the preceding message."
+_DEFAULT_CACHE_ENTRIES = 32
 _DEFAULT_CACHE_BYTES = 32 * 1024 * 1024
 _DEFAULT_CONTEXT_REF_TOKEN_BUDGET = 8_192
 _MAX_CONTEXT_IMAGE_BYTES_PER_REQUEST = 32 * 1024 * 1024
@@ -71,7 +72,7 @@ class WorkspaceContextReferenceResolver:
         self,
         workspace: Any,
         *,
-        cache_size: int = 8,
+        cache_size: int = _DEFAULT_CACHE_ENTRIES,
         cache_ttl_seconds: float = 300,
         max_image_bytes: int = 20 * 1024 * 1024,
         max_cache_bytes: int = _DEFAULT_CACHE_BYTES,
@@ -274,7 +275,7 @@ def _context_ref_fallback(
     reason: str | None = None,
 ) -> str:
     compact = reference.compact_text()
-    return f"{compact} ({reason})" if reason else compact
+    return f"{compact} {reason}" if reason else compact
 
 
 def _context_ref_token_budget(llm: Any) -> int:
@@ -294,7 +295,7 @@ def _prioritized_reference_positions(
 ]:
     """Return unique current-turn refs first and older refs newest-first."""
 
-    current_turn_start = 0
+    current_turn_start: int | None = None
     for message_index in range(len(messages) - 1, -1, -1):
         if messages[message_index].get("role") == "user":
             current_turn_start = message_index
@@ -317,7 +318,7 @@ def _prioritized_reference_positions(
                 reference_index,
                 reference,
             )
-            if message_index >= current_turn_start:
+            if current_turn_start is not None and message_index >= current_turn_start:
                 current.append(position)
             else:
                 historical.append(position)
@@ -346,6 +347,10 @@ async def materialize_messages(
             historical_positions,
             duplicate_positions,
         ) = _prioritized_reference_positions(messages, references_by_message)
+        for message_index, reference_index in duplicate_positions:
+            fallback_reasons[(message_index, reference_index)] = (
+                "The same image is included with a more recent message."
+            )
         token_budget = _context_ref_token_budget(llm)
         materialized_tokens = 0
         materialized_image_bytes = 0
@@ -359,7 +364,7 @@ async def materialize_messages(
                 OSError,
             ):
                 fallback_reasons[(position.message_index, position.reference_index)] = (
-                    "image data could not be resolved from its FileRef"
+                    "The image could not be loaded."
                 )
                 logger.debug(
                     "Falling back to text for unresolved context ref %s",
@@ -368,36 +373,12 @@ async def materialize_messages(
                 )
                 return None
 
-        for position in current_positions:
-            url = await resolve(position)
-            if url is None:
-                continue
-            estimated_tokens = position.reference.estimated_tokens()
-            if materialized_tokens + estimated_tokens > token_budget:
-                raise ContextReferenceResolutionError(
-                    "current-turn context images exceed the materialization "
-                    f"token budget ({materialized_tokens + estimated_tokens} "
-                    f"estimated tokens > {token_budget})"
-                )
-            image_bytes = len(url.encode("utf-8"))
-            if (
-                materialized_image_bytes + image_bytes
-                > _MAX_CONTEXT_IMAGE_BYTES_PER_REQUEST
-            ):
-                raise ContextReferenceResolutionError(
-                    "current-turn context images exceed the materialized byte "
-                    f"budget ({materialized_image_bytes + image_bytes} bytes > "
-                    f"{_MAX_CONTEXT_IMAGE_BYTES_PER_REQUEST})"
-                )
-            materialized_tokens += estimated_tokens
-            materialized_image_bytes += image_bytes
-            resolved_images[(position.message_index, position.reference_index)] = url
-
-        for position in historical_positions:
+        for position in (*current_positions, *historical_positions):
             estimated_tokens = position.reference.estimated_tokens()
             if materialized_tokens + estimated_tokens > token_budget:
                 fallback_reasons[(position.message_index, position.reference_index)] = (
-                    "omitted to fit the native image context budget"
+                    "The image was omitted because this request contains more "
+                    "images than the model can accept."
                 )
                 continue
             url = await resolve(position)
@@ -409,7 +390,8 @@ async def materialize_messages(
                 > _MAX_CONTEXT_IMAGE_BYTES_PER_REQUEST
             ):
                 fallback_reasons[(position.message_index, position.reference_index)] = (
-                    "omitted to fit the native image context budget"
+                    "The image was omitted because this request contains more "
+                    "image data than the model can accept."
                 )
                 continue
             materialized_tokens += estimated_tokens
@@ -433,9 +415,9 @@ async def materialize_messages(
         if not refs or not supports_vision or resolver is None:
             if refs:
                 if not supports_vision:
-                    reason = "the active model does not support native visual context"
+                    reason = "This model cannot view the image directly."
                 elif resolver is None:
-                    reason = "the native visual context resolver is unavailable"
+                    reason = "The image is not available for direct viewing."
                 else:
                     reason = None
                 fallback = "\n".join(
@@ -468,8 +450,6 @@ async def materialize_messages(
 
         unresolved: list[tuple[ContextReference, str | None]] = []
         for reference_index, reference in enumerate(refs):
-            if (index, reference_index) in duplicate_positions:
-                continue
             url = resolved_images.get((index, reference_index))
             if url is None:
                 unresolved.append(

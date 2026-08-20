@@ -174,12 +174,13 @@ and do not make reading a required reference document its own deliverable step.
 
 ## Use brand and reference assets intentionally
 
-Inspect standard raster reference images already attached to the conversation
-directly from visual context. Use `understand_media` when a reference is only
-available by file_id, was recovered from the workspace, or requires video or
-SVG source inspection. Pass useful product, campaign, style, or layout
-references to image generation or editing so the result belongs to the intended
-visual world.
+On vision-capable calls, inspect standard raster reference images already
+attached to the conversation directly from visual context. Use
+`understand_media` when the active model cannot receive native visual context,
+a reference is only available by file_id, was recovered from the workspace, or
+requires video or SVG source inspection. Pass useful product, campaign, style,
+or layout references to image generation or editing so the result belongs to
+the intended visual world.
 
 For work naming a real brand, resolve the brand identity before rendering final
 candidates. Three sources are legitimate: an asset the user gave you in this task

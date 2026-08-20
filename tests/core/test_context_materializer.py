@@ -222,8 +222,8 @@ async def test_tool_image_follows_complete_tool_result_group() -> None:
 @pytest.mark.parametrize(
     ("resolver", "expected_reason"),
     [
-        (None, "native visual context resolver is unavailable"),
-        (MissingResolver(), "image data could not be resolved from its FileRef"),
+        (None, "not available for direct viewing"),
+        (MissingResolver(), "image could not be loaded"),
     ],
 )
 async def test_unresolved_vision_reference_degrades_to_text(
@@ -270,7 +270,7 @@ async def test_nonvision_model_receives_file_ref_text_fallback() -> None:
 
     assert "file_id=image-1" in result[0]["content"]
     assert "not available as native visual context" in result[0]["content"]
-    assert "active model does not support native visual context" in result[0]["content"]
+    assert "cannot view the image directly" in result[0]["content"]
     assert "base64" not in result[0]["content"]
 
 
@@ -505,7 +505,40 @@ async def test_workspace_resolver_invalidates_cache_when_file_id_generation_chan
 
 
 @pytest.mark.asyncio
-async def test_uploaded_refs_enforce_materializer_token_budget() -> None:
+async def test_workspace_resolver_default_cache_covers_history_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths: dict[str, Path] = {}
+    for index in range(17):
+        path = tmp_path / f"image-{index}.png"
+        path.write_bytes(encoded_image_bytes(color=f"#{index:06x}"))
+        paths[f"image-{index}"] = path
+
+    class Workspace:
+        def resolve_file_id(self, file_id: str) -> Path:
+            return paths[file_id]
+
+    resolver = WorkspaceContextReferenceResolver(Workspace())
+    read_calls = 0
+    original_read_generation = resolver._read_generation
+
+    def counted_read_generation(*args: Any) -> bytes:
+        nonlocal read_calls
+        read_calls += 1
+        return original_read_generation(*args)
+
+    monkeypatch.setattr(resolver, "_read_generation", counted_read_generation)
+    references = [image_reference(file_id=f"image-{index}") for index in range(17)]
+
+    for reference in (*references, *references):
+        await resolver.resolve_image(reference)
+
+    assert read_calls == 17
+
+
+@pytest.mark.asyncio
+async def test_uploaded_refs_degrade_within_materializer_token_budget() -> None:
     class VisionLLMWithContextWindow(VisionLLM):
         context_window = 4_096
 
@@ -519,27 +552,29 @@ async def test_uploaded_refs_enforce_materializer_token_budget() -> None:
             for index in range(5)
         ]
     )
-    with pytest.raises(
-        ContextReferenceResolutionError,
-        match="materialization token budget",
-    ):
-        await materialize_messages(
-            llm=VisionLLMWithContextWindow(),
-            messages=[
-                {
-                    "role": "user",
-                    "content": "Inspect every image",
-                    CONTEXT_REFS_KEY: [
-                        reference.durable_dict() for reference in references
-                    ],
-                }
-            ],
-            resolver=RecordingResolver(),
-        )
+    resolver = RecordingResolver()
+    result = await materialize_messages(
+        llm=VisionLLMWithContextWindow(),
+        messages=[
+            {
+                "role": "user",
+                "content": "Inspect every image",
+                CONTEXT_REFS_KEY: [
+                    reference.durable_dict() for reference in references
+                ],
+            }
+        ],
+        resolver=resolver,
+    )
+
+    assert resolver.file_ids == ["image-4", "image-3", "image-2"]
+    assert sum(part["type"] == "image_url" for part in result[0]["content"]) == 3
+    assert "file_id=image-0" in result[0]["content"][-1]["text"]
+    assert "more images than the model can accept" in result[0]["content"][-1]["text"]
 
 
 @pytest.mark.asyncio
-async def test_materializer_rejects_aggregate_materialized_image_bytes(
+async def test_materializer_degrades_aggregate_materialized_image_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -548,21 +583,20 @@ async def test_materializer_rejects_aggregate_materialized_image_bytes(
         32,
     )
 
-    with pytest.raises(
-        ContextReferenceResolutionError,
-        match="materialized byte budget",
-    ):
-        await materialize_messages(
-            llm=VisionLLM(),
-            messages=[
-                {
-                    "role": "user",
-                    "content": "Inspect this image",
-                    CONTEXT_REFS_KEY: [image_reference().durable_dict()],
-                }
-            ],
-            resolver=Resolver(),
-        )
+    result = await materialize_messages(
+        llm=VisionLLM(),
+        messages=[
+            {
+                "role": "user",
+                "content": "Inspect this image",
+                CONTEXT_REFS_KEY: [image_reference().durable_dict()],
+            }
+        ],
+        resolver=Resolver(),
+    )
+
+    assert isinstance(result[0]["content"], str)
+    assert "more image data than the model can accept" in result[0]["content"]
 
 
 @pytest.mark.asyncio
@@ -612,8 +646,42 @@ async def test_materializer_prioritizes_current_and_newest_unique_history() -> N
 
     assert resolver.file_ids == ["current", "history-newest", "history-middle"]
     assert "file_id=history-oldest" in result[0]["content"]
-    assert result[2]["content"] == "duplicate current"
+    assert "same image is included with a more recent message" in result[2]["content"]
     assert isinstance(result[4]["content"], list)
+
+
+@pytest.mark.asyncio
+async def test_materializer_without_user_message_treats_refs_as_history() -> None:
+    reference = uploaded_image_reference("tool-image")
+    llm = VisionLLM()
+    llm.context_window = 4
+    resolver = RecordingResolver()
+    messages = [
+        {
+            "role": "tool",
+            "content": "captured",
+            CONTEXT_REFS_KEY: [reference.durable_dict()],
+        }
+    ]
+
+    current, historical, duplicates = (
+        context_materializer._prioritized_reference_positions(
+            messages,
+            [(reference,)],
+        )
+    )
+    assert current == []
+    assert [position.reference.file_id for position in historical] == ["tool-image"]
+    assert duplicates == set()
+
+    result = await materialize_messages(
+        llm=llm,
+        messages=messages,
+        resolver=resolver,
+    )
+
+    assert resolver.file_ids == []
+    assert "more images than the model can accept" in result[0]["content"]
 
 
 @pytest.mark.asyncio
