@@ -11,10 +11,12 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
+from ...core.agent.attachments import build_image_context_references
 from ...core.agent.transcript import (
     build_assistant_transcript_content,
     normalize_transcript_messages,
 )
+from ...core.context_ref import CONTEXT_REFS_KEY
 from ..models.chat_message import TaskChatMessage
 from .file_reference_output_service import reconcile_assistant_file_references
 from .ops_signals import (
@@ -704,7 +706,7 @@ def load_task_transcript(
     task_id: int,
     *,
     before_message_id: Optional[int] = None,
-) -> List[Dict[str, str]]:
+) -> List[Dict[str, Any]]:
     if before_message_id is not None:
         # Check if the reference message actually exists
         exists = (
@@ -725,10 +727,18 @@ def load_task_transcript(
     if before_message_id is not None:
         query = query.filter(TaskChatMessage.id < before_message_id)
 
-    messages = [
-        {"role": str(message.role), "content": str(message.content)}
-        for message in query.order_by(TaskChatMessage.id.asc()).all()
-    ]
+    messages: List[Dict[str, Any]] = []
+    for message in query.order_by(TaskChatMessage.id.asc()).all():
+        item: Dict[str, Any] = {
+            "role": str(message.role),
+            "content": str(message.content),
+        }
+        references = build_image_context_references(message.attachments)
+        if references:
+            item[CONTEXT_REFS_KEY] = [
+                reference.durable_dict() for reference in references
+            ]
+        messages.append(item)
     return normalize_transcript_messages(messages)
 
 

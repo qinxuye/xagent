@@ -16,6 +16,7 @@ from ..task_runtime import (
     normalize_input_modalities,
 )
 from ..workspace import WorkspaceManager
+from .attachments import build_image_context_references
 from .checkpoint import CheckpointCorruptError, read_latest_checkpoint_payload
 from .context import ContextManager, ExecutionContext
 from .result import extract_assistant_message
@@ -77,6 +78,7 @@ class AgentRunner:
         extra_tools: list[Any] | None = None,
         metadata: dict[str, Any] | None = None,
         initial_messages: list[dict[str, Any]] | None = None,
+        task_context_refs: Any = (),
     ) -> dict[str, Any]:
         execution_id = execution_id or str(uuid4())
         checkpoint = checkpoint or (
@@ -131,6 +133,7 @@ class AgentRunner:
                 context.add_user_message(
                     task,
                     metadata=self._initial_user_message_metadata(context),
+                    context_refs=task_context_refs,
                 )
 
         runtime = runtime or PatternRuntime(
@@ -471,7 +474,11 @@ class AgentRunner:
             metadata["turn_id"] = requested_turn_id
         self._ensure_user_message_turn_id(metadata)
 
-        added = context.add_user_message(resolved_execution_message, metadata=metadata)
+        added = context.add_user_message(
+            resolved_execution_message,
+            metadata=metadata,
+            context_refs=build_image_context_references(files),
+        )
         # Set a "this turn is waiting to be traced" pending marker before
         # we persist. The resume catch-up logic uses this to disambiguate
         # an old checkpoint that pre-dates this PR (no watermark, no

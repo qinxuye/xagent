@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from xagent.core.agent.transcript import build_assistant_transcript_content
+from xagent.core.context_ref import CONTEXT_REFS_KEY
 from xagent.web.models.chat_message import TaskChatMessage
 from xagent.web.models.database import Base
 from xagent.web.models.task import Task, TaskStatus
@@ -95,6 +96,43 @@ def test_load_task_transcript_returns_prior_turns_only():
                 "content": "The main risks are architecture drift and persistence gaps.",
             },
         ]
+    finally:
+        db_session.close()
+
+
+def test_load_task_transcript_preserves_uploaded_images_as_context_refs():
+    db_session = _create_db_session()
+    try:
+        task = _create_task(db_session)
+        image_message = persist_user_message(
+            db_session,
+            int(task.id),
+            int(task.user_id),
+            "What is shown?",
+            attachments=[
+                {
+                    "file_id": "image-id",
+                    "name": "diagram.png",
+                    "size": 321,
+                    "type": "image/png",
+                },
+                {
+                    "file_id": "pdf-id",
+                    "name": "notes.pdf",
+                    "size": 654,
+                    "type": "application/pdf",
+                },
+            ],
+        )
+        assert image_message is not None
+
+        transcript = load_task_transcript(db_session, int(task.id))
+
+        assert transcript[0]["content"] == "What is shown?"
+        references = transcript[0][CONTEXT_REFS_KEY]
+        assert len(references) == 1
+        assert references[0]["file_ref"]["file_id"] == "image-id"
+        assert references[0]["metadata"] == {"source": "user_upload"}
     finally:
         db_session.close()
 
