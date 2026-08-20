@@ -107,3 +107,32 @@ def test_build_image_context_references_infers_mime_and_deduplicates_file_ids():
 
     assert [reference.file_id for reference in references] == ["image-id"]
     assert references[0].safe_file_ref["mime_type"] == "image/webp"
+
+
+def test_build_image_context_references_normalizes_optional_upload_metadata():
+    references = build_image_context_references(
+        [
+            {
+                "file_id": "parameterized-mime",
+                "name": "diagram.png",
+                "type": " Image/PNG; charset=binary ",
+                "size": "12kb",
+            },
+            {
+                "file_id": "blank-name",
+                "original_name": "   ",
+                "name": "  ",
+                "type": "image/jpeg",
+                "size": -1,
+            },
+        ]
+    )
+
+    assert [reference.file_id for reference in references] == [
+        "parameterized-mime",
+        "blank-name",
+    ]
+    assert references[0].safe_file_ref["mime_type"] == "image/png"
+    assert "size" not in references[0].safe_file_ref
+    assert references[1].safe_file_ref["filename"] == "uploaded image"
+    assert "size" not in references[1].safe_file_ref

@@ -83,15 +83,16 @@ def build_image_context_references(files: Any) -> tuple[ContextReference, ...]:
         if not file_id or file_id in seen_file_ids:
             continue
 
-        filename = str(
-            info.get("original_name")
-            or info.get("name")
-            or info.get("filename")
-            or "uploaded image"
-        ).strip()
-        declared_mime_type = (
-            str(info.get("mime_type") or info.get("type") or "").strip().lower()
-        )
+        filename = "uploaded image"
+        for key in ("original_name", "name", "filename"):
+            candidate = str(info.get(key) or "").strip()
+            if candidate:
+                filename = candidate
+                break
+        declared_mime_type = str(
+            info.get("mime_type") or info.get("type") or ""
+        ).lower()
+        declared_mime_type = declared_mime_type.split(";", 1)[0].strip()
         if declared_mime_type == "image/jpg":
             declared_mime_type = "image/jpeg"
         guessed_mime_type = guess_mime_type(filename).lower()
@@ -104,9 +105,17 @@ def build_image_context_references(files: Any) -> tuple[ContextReference, ...]:
         if mime_type not in _DIRECT_CONTEXT_IMAGE_MIME_TYPES:
             continue
 
+        size: int | None = None
         raw_size = info.get("size")
+        if raw_size is not None:
+            try:
+                parsed_size = int(raw_size)
+            except (TypeError, ValueError):
+                pass
+            else:
+                if parsed_size >= 0:
+                    size = parsed_size
         try:
-            size = int(raw_size) if raw_size is not None else None
             reference = ContextReference(
                 file_ref=build_file_ref(
                     file_id=file_id,

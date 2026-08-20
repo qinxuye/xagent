@@ -16,6 +16,7 @@ from xagent.core.agent import (
     PatternRuntime,
     ReActPattern,
 )
+from xagent.core.agent.attachments import build_image_context_references
 from xagent.core.context_materializer import (
     ContextReferenceResolutionError,
     WorkspaceContextReferenceResolver,
@@ -184,39 +185,45 @@ async def test_tool_image_follows_complete_tool_result_group() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("resolver", [None, MissingResolver()])
 async def test_unresolved_vision_reference_degrades_to_text(resolver: Any) -> None:
+    reference = build_image_context_references(
+        [{"file_id": "image-1", "name": "settings.png", "type": "image/png"}]
+    )[0]
     result = await materialize_messages(
         llm=VisionLLM(),
         messages=[
             {
                 "role": "user",
                 "content": "Inspect this",
-                CONTEXT_REFS_KEY: [image_reference().durable_dict()],
+                CONTEXT_REFS_KEY: [reference.durable_dict()],
             }
         ],
         resolver=resolver,
     )
 
     assert "file_id=image-1" in result[0]["content"]
-    assert "A settings dialog" in result[0]["content"]
+    assert "understand_media" in result[0]["content"]
     assert "base64" not in result[0]["content"]
 
 
 @pytest.mark.asyncio
 async def test_nonvision_model_receives_file_ref_text_fallback() -> None:
+    reference = build_image_context_references(
+        [{"file_id": "image-1", "name": "settings.png", "type": "image/png"}]
+    )[0]
     result = await materialize_messages(
         llm=TextLLM(),
         messages=[
             {
                 "role": "user",
                 "content": "Inspect this",
-                CONTEXT_REFS_KEY: [image_reference().durable_dict()],
+                CONTEXT_REFS_KEY: [reference.durable_dict()],
             }
         ],
         resolver=None,
     )
 
     assert "file_id=image-1" in result[0]["content"]
-    assert "A settings dialog" in result[0]["content"]
+    assert "understand_media" in result[0]["content"]
     assert "base64" not in result[0]["content"]
 
 
@@ -371,15 +378,20 @@ async def test_workspace_resolver_invalidates_cache_when_file_id_generation_chan
 
 
 @pytest.mark.asyncio
-async def test_materializer_rejects_image_request_over_token_budget() -> None:
+async def test_uploaded_refs_enforce_materializer_token_budget() -> None:
     class VisionLLMWithContextWindow(VisionLLM):
-        context_window = 32_768
+        context_window = 4_096
 
-    references = [
-        image_reference(detail=ImageDetail.HIGH, file_id=f"image-{index}")
-        for index in range(12)
-    ]
-
+    references = build_image_context_references(
+        [
+            {
+                "file_id": f"image-{index}",
+                "name": f"image-{index}.png",
+                "type": "image/png",
+            }
+            for index in range(5)
+        ]
+    )
     with pytest.raises(
         ContextReferenceResolutionError,
         match="materialization token budget",

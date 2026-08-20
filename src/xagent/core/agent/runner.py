@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from ...config import get_compact_threshold_default, get_compact_threshold_ratio
 from ..context_materializer import WorkspaceContextReferenceResolver
-from ..context_ref import CONTEXT_REFS_KEY
+from ..context_ref import CONTEXT_REFS_KEY, ContextReference
 from ..model.intent import enter_goal, exit_goal
 from ..task_runtime import (
     PREFERRED_INPUT_MODALITIES_METADATA_KEY,
@@ -78,7 +78,7 @@ class AgentRunner:
         extra_tools: list[Any] | None = None,
         metadata: dict[str, Any] | None = None,
         initial_messages: list[dict[str, Any]] | None = None,
-        task_context_refs: Any = (),
+        task_context_refs: tuple[ContextReference, ...] = (),
     ) -> dict[str, Any]:
         execution_id = execution_id or str(uuid4())
         checkpoint = checkpoint or (

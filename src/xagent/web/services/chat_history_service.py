@@ -16,7 +16,7 @@ from ...core.agent.transcript import (
     build_assistant_transcript_content,
     normalize_transcript_messages,
 )
-from ...core.context_ref import CONTEXT_REFS_KEY
+from ...core.context_ref import CONTEXT_REFS_KEY, ContextReference
 from ..models.chat_message import TaskChatMessage
 from .file_reference_output_service import reconcile_assistant_file_references
 from .ops_signals import (
@@ -34,6 +34,12 @@ DELIVERY_FAILED = "failed"
 
 QUESTION_MESSAGE_TYPE = "question"
 SUPERSEDED_MESSAGE_TYPE = "question_superseded"
+
+# Historical attachments are replayed context rather than the current upload
+# batch. Keep a bounded recent window so an image-heavy task cannot exhaust the
+# materializer's request budget and make every later turn fail. Sixteen AUTO
+# refs remain comfortably below the materializer's default 8k-token allowance.
+_MAX_HISTORICAL_IMAGE_CONTEXT_REFS = 16
 
 
 def _assistant_question_filters(task_id: int) -> tuple[ColumnElement[bool], ...]:
@@ -727,13 +733,24 @@ def load_task_transcript(
     if before_message_id is not None:
         query = query.filter(TaskChatMessage.id < before_message_id)
 
+    stored_messages = query.order_by(TaskChatMessage.id.asc()).all()
+    retained_references: list[tuple[ContextReference, ...]] = [
+        () for _ in stored_messages
+    ]
+    remaining_references = _MAX_HISTORICAL_IMAGE_CONTEXT_REFS
+    for index in range(len(stored_messages) - 1, -1, -1):
+        if remaining_references <= 0:
+            break
+        references = build_image_context_references(stored_messages[index].attachments)
+        retained_references[index] = references[:remaining_references]
+        remaining_references -= len(retained_references[index])
+
     messages: List[Dict[str, Any]] = []
-    for message in query.order_by(TaskChatMessage.id.asc()).all():
+    for message, references in zip(stored_messages, retained_references):
         item: Dict[str, Any] = {
             "role": str(message.role),
             "content": str(message.content),
         }
-        references = build_image_context_references(message.attachments)
         if references:
             item[CONTEXT_REFS_KEY] = [
                 reference.durable_dict() for reference in references

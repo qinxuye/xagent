@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...config import get_tool_max_concurrency, get_tool_parallel_enabled
+from ..context_ref import ContextReference
 from ..task_runtime import (
     PREFERRED_INPUT_MODALITIES_METADATA_KEY,
     normalize_input_modalities,
@@ -340,10 +341,10 @@ class AgentExecutionAdapter:
     @staticmethod
     def _request_context_refs(
         context: dict[str, Any] | None,
-    ) -> tuple[Any, ...]:
+    ) -> tuple[ContextReference, ...]:
         if not isinstance(context, dict):
             return ()
-        references = []
+        references: list[ContextReference] = []
         seen: set[str] = set()
         for key in ("file_info", "files", "attachments"):
             for reference in build_image_context_references(context.get(key)):
