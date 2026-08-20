@@ -124,9 +124,8 @@ def build_image_context_references(files: Any) -> tuple[ContextReference, ...]:
                     size=size,
                 ),
                 text_fallback=(
-                    "This uploaded image is available by FileRef. If it is not "
-                    "visible in the current model context, inspect it with "
-                    "understand_media."
+                    "An uploaded image was referenced by FileRef but is not "
+                    "available as native visual context in this model call."
                 ),
                 metadata={"source": "user_upload"},
             )

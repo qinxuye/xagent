@@ -36,9 +36,9 @@ QUESTION_MESSAGE_TYPE = "question"
 SUPERSEDED_MESSAGE_TYPE = "question_superseded"
 
 # Historical attachments are replayed context rather than the current upload
-# batch. Keep a bounded recent window so an image-heavy task cannot exhaust the
-# materializer's request budget and make every later turn fail. Sixteen AUTO
-# refs remain comfortably below the materializer's default 8k-token allowance.
+# batch. Keep a bounded recent window as a secondary replay limit; the shared
+# materializer applies the active model's token and encoded-byte budgets while
+# preserving current-turn priority.
 _MAX_HISTORICAL_IMAGE_CONTEXT_REFS = 16
 
 
