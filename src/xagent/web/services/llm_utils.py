@@ -773,17 +773,24 @@ class UserAwareModelStorage:
                     self.db, target.id, int(config.user_id)
                 )
             ):
-                raise RuntimeError(
-                    f"Auto candidate {candidate.routing_model_id!r} is unavailable"
+                logger.warning(
+                    "Skipping unavailable Auto candidate %r",
+                    candidate.routing_model_id,
                 )
+                continue
             target_cfg = self.core_storage._db_model_to_config(target)
             if not isinstance(target_cfg, ChatModelConfig):
-                raise RuntimeError(
-                    f"Auto candidate {candidate.routing_model_id!r} is not a chat model"
+                logger.warning(
+                    "Skipping non-chat Auto candidate %r",
+                    candidate.routing_model_id,
                 )
+                continue
             targets_by_profile[candidate.routing_model_id] = target_cfg
             if candidate.target_model_id == config.fallback_model_id:
                 fallback_profile = candidate.routing_model_id
+
+        if not targets_by_profile:
+            raise RuntimeError("Auto model has no active configured candidates")
 
         profile_ids = list(targets_by_profile)
         configured = router_cfg.model_copy(

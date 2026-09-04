@@ -580,7 +580,31 @@ class TestModelAPI:
             assert llm._fallback_model == "deepseek/deepseek-v4-flash"
             downstream = llm._downstream_resolver("openai/gpt-5.5")
             assert downstream.model_id == first.json()["model_id"]
+
+            first_db_model = db.get(DBModel, first.json()["id"])
+            second_db_model = db.get(DBModel, second.json()["id"])
+            assert first_db_model is not None
+            assert second_db_model is not None
+
+            first_db_model.is_active = False
+            db.flush()
+            degraded_llm = UserAwareModelStorage(db).get_llm_by_id(
+                data["auto_model"]["model_id"], regular_user["id"]
+            )
+            assert isinstance(degraded_llm, RouterLLM)
+            assert degraded_llm._candidate_models == ("deepseek/deepseek-v4-flash",)
+            assert degraded_llm._fallback_model == "deepseek/deepseek-v4-flash"
+
+            second_db_model.is_active = False
+            db.flush()
+            assert (
+                UserAwareModelStorage(db).get_llm_by_id(
+                    data["auto_model"]["model_id"], regular_user["id"]
+                )
+                is None
+            )
         finally:
+            db.rollback()
             db.close()
 
         delete_response = client.delete(

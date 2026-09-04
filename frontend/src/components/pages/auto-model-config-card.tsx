@@ -34,7 +34,7 @@ import type { Model } from "./models";
 interface RouterProfile {
   id: string;
   provider?: string;
-  aliases: string[];
+  aliases?: string[] | null;
   input_modalities: string[];
   context_window?: number;
 }
@@ -76,13 +76,13 @@ function normalizedValues(model: Model): string[] {
   return [...values];
 }
 
-function guessProfile(
+export function guessProfile(
   model: Model,
   profiles: RouterProfile[],
 ): string | undefined {
   const modelValues = new Set(normalizedValues(model));
   return profiles.find((profile) => {
-    const profileValues = [profile.id, ...profile.aliases].map((value) =>
+    const profileValues = [profile.id, ...(profile.aliases || [])].map((value) =>
       value.trim().toLowerCase(),
     );
     return profileValues.some((value) => modelValues.has(value));
