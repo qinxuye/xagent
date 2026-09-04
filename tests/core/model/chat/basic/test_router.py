@@ -277,6 +277,44 @@ def test_route_sync_forwards_modalities_when_router_supports_them(
     ]
 
 
+def test_route_sync_limits_selection_to_configured_candidates(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class Service:
+        def route(
+            self,
+            prompt: str,
+            *,
+            config_name: str,
+            models: list[str],
+        ) -> dict[str, Any]:
+            calls.append(
+                {"prompt": prompt, "config_name": config_name, "models": models}
+            )
+            return {"selected": [models[0]]}
+
+    monkeypatch.setattr(
+        "xagent.core.model.chat.basic.router._get_service",
+        lambda: Service(),
+    )
+    router = RouterLLM(
+        model_name="quality-pair",
+        candidate_models=["openai/gpt-5.5", "deepseek/deepseek-v4-flash"],
+        use_environment_fallback=False,
+    )
+
+    selected = router._route_sync("implement this")
+
+    assert selected == ["openai/gpt-5.5"]
+    assert calls == [
+        {
+            "prompt": "implement this",
+            "config_name": "quality-pair",
+            "models": ["openai/gpt-5.5", "deepseek/deepseek-v4-flash"],
+        }
+    ]
+
+
 def test_route_sync_forwards_advisory_modalities_when_supported(monkeypatch) -> None:
     calls: list[tuple[str, ...]] = []
 

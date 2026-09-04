@@ -481,6 +481,149 @@ async def test_validate_provider_model_listing_honors_caller_supplied_timeout():
 class TestModelAPI:
     """Test model management API endpoints"""
 
+    def test_auto_config_binds_existing_models_and_blocks_candidate_delete(
+        self, test_db, regular_user, regular_headers, sample_model_data
+    ):
+        first = client.post(
+            "/api/models/", json=sample_model_data, headers=regular_headers
+        )
+        second_payload = {
+            **sample_model_data,
+            "model_id": "test-second-model",
+            "model_name": "gpt-4.1",
+        }
+        second = client.post(
+            "/api/models/", json=second_payload, headers=regular_headers
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+
+        class Catalog:
+            @staticmethod
+            def known_model_ids():
+                return ("openai/gpt-5.5", "deepseek/deepseek-v4-flash")
+
+        with patch(
+            "xagent.web.services.auto_model_service.load_router_profile_catalog",
+            return_value=Catalog(),
+        ):
+            response = client.put(
+                "/api/models/auto-config",
+                headers=regular_headers,
+                json={
+                    "strategy": "quality",
+                    "fallback_model_id": second.json()["id"],
+                    "set_as_default": True,
+                    "candidates": [
+                        {
+                            "target_model_id": first.json()["id"],
+                            "routing_model_id": "openai/gpt-5.5",
+                        },
+                        {
+                            "target_model_id": second.json()["id"],
+                            "routing_model_id": "deepseek/deepseek-v4-flash",
+                        },
+                    ],
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["configured"] is True
+        # Legacy clients may still send a strategy, but configured Auto now always
+        # uses xrouter's single-model "auto" policy.
+        assert data["strategy"] == "balanced"
+        assert data["auto_model"]["model_provider"] == "router"
+        assert data["auto_model"]["model_name"] == "auto"
+        assert data["auto_model"]["can_delete"] is False
+        assert {candidate["routing_model_id"] for candidate in data["candidates"]} == {
+            "openai/gpt-5.5",
+            "deepseek/deepseek-v4-flash",
+        }
+
+        get_response = client.get("/api/models/auto-config", headers=regular_headers)
+        assert get_response.status_code == 200
+        assert get_response.json()["auto_model"]["id"] == data["auto_model"]["id"]
+        assert get_response.json()["strategy"] == "balanced"
+
+        defaults_response = client.get(
+            "/api/models/user-default", headers=regular_headers
+        )
+        assert defaults_response.status_code == 200
+        general_default = next(
+            item
+            for item in defaults_response.json()
+            if item["config_type"] == "general"
+        )
+        assert general_default["model_id"] == data["auto_model"]["id"]
+
+        list_response = client.get("/api/models/", headers=regular_headers)
+        assert list_response.status_code == 200
+        assert any(
+            model["model_provider"] == "router" for model in list_response.json()
+        )
+
+        from xagent.core.model.chat.basic.router import RouterLLM
+        from xagent.web.services.llm_utils import UserAwareModelStorage
+
+        db = next(get_db())
+        try:
+            llm = UserAwareModelStorage(db).get_llm_by_id(
+                data["auto_model"]["model_id"], regular_user["id"]
+            )
+            assert isinstance(llm, RouterLLM)
+            assert llm.model_name == "auto"
+            assert llm._candidate_models == (
+                "openai/gpt-5.5",
+                "deepseek/deepseek-v4-flash",
+            )
+            assert llm._fallback_model == "deepseek/deepseek-v4-flash"
+            downstream = llm._downstream_resolver("openai/gpt-5.5")
+            assert downstream.model_id == first.json()["model_id"]
+        finally:
+            db.close()
+
+        delete_response = client.delete(
+            f"/api/models/{first.json()['model_id']}", headers=regular_headers
+        )
+        assert delete_response.status_code == 409
+        assert "Auto configuration" in delete_response.json()["detail"]
+
+    def test_auto_config_rejects_duplicate_profile_mapping(
+        self, test_db, regular_user, regular_headers, sample_model_data
+    ):
+        first = client.post(
+            "/api/models/", json=sample_model_data, headers=regular_headers
+        )
+        second = client.post(
+            "/api/models/",
+            json={
+                **sample_model_data,
+                "model_id": "another-model",
+                "model_name": "gpt-4.1",
+            },
+            headers=regular_headers,
+        )
+        response = client.put(
+            "/api/models/auto-config",
+            headers=regular_headers,
+            json={
+                "fallback_model_id": first.json()["id"],
+                "candidates": [
+                    {
+                        "target_model_id": first.json()["id"],
+                        "routing_model_id": "openai/gpt-5.5",
+                    },
+                    {
+                        "target_model_id": second.json()["id"],
+                        "routing_model_id": "openai/gpt-5.5",
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 422
+
     def test_test_connection_embedding_uses_embedding_adapter(
         self, test_db, regular_user, regular_headers
     ):

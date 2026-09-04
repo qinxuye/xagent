@@ -490,6 +490,25 @@ class ModelStore:
         if share_with_users:
             user_model.is_shared = True  # type: ignore[assignment]
         elif currently_shared:
+            from ..models.auto_model import AutoModelCandidate, AutoModelConfig
+
+            external_auto_references = (
+                self.db.query(AutoModelCandidate.id)
+                .join(
+                    AutoModelConfig,
+                    AutoModelCandidate.config_id == AutoModelConfig.id,
+                )
+                .filter(
+                    AutoModelCandidate.target_model_id == model_id,
+                    AutoModelConfig.user_id != user_id,
+                )
+                .first()
+            )
+            if external_auto_references is not None:
+                raise ModelSharingConflictError(
+                    "Cannot un-share: another user's Auto configuration uses this model."
+                )
+
             owner_defaults = (
                 self.db.query(UserDefaultModel)
                 .filter(

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, List, Optional, Tuple, Union
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from ...core.model.chat.basic.adapter import create_base_llm
 from ...core.model.chat.basic.base import BaseLLM
@@ -25,9 +25,11 @@ from ...core.model.model import (
     VideoModelConfig,
 )
 from ...core.model.providers import (
+    ROUTER_PROVIDER,
     is_auto_router_model,
     is_placeholder_api_key,
 )
+from ..models.auto_model import AutoModelCandidate, AutoModelConfig
 from ..models.model import Model
 from ..models.user import UserDefaultModel, UserModel
 
@@ -348,8 +350,8 @@ class CoreStorage:
     ) -> Optional[BaseLLM]:
         """Create LLM instance from ModelConfig.
 
-        ``downstream_resolver`` is forwarded to the router provider so the
-        "auto" model dispatches through the user-configured OpenRouter model.
+        ``downstream_resolver`` is forwarded to virtual router models so Auto
+        can dispatch through the selected saved model configuration.
         """
         try:
             if not isinstance(model_config, ChatModelConfig):
@@ -357,7 +359,7 @@ class CoreStorage:
                 return None
 
             # Keep the bare create_base_llm(config) call for ordinary models;
-            # only the OpenRouter "auto" model needs the downstream resolver.
+            # only virtual "auto" models need the downstream resolver.
             if downstream_resolver is not None:
                 return create_base_llm(model_config, downstream_resolver)
             return create_base_llm(model_config)
@@ -694,6 +696,14 @@ class UserAwareModelStorage:
             if is_auto_router_model(
                 model_config.model_provider, model_config.model_name
             ):
+                if model_config.model_provider == ROUTER_PROVIDER:
+                    configured_model, resolver = self._build_configured_router_resolver(
+                        model_config, db_model
+                    )
+                    return self.core_storage.create_llm_instance(
+                        configured_model,
+                        downstream_resolver=resolver,
+                    )
                 return self.core_storage.create_llm_instance(
                     model_config,
                     downstream_resolver=self._build_openrouter_resolver(model_config),
@@ -728,6 +738,90 @@ class UserAwareModelStorage:
             return llm
 
         return _resolve
+
+    def _build_configured_router_resolver(
+        self, router_cfg: ChatModelConfig, router_model: Model
+    ) -> tuple[ChatModelConfig, Callable[[str], BaseLLM]]:
+        """Snapshot the user's Auto bindings into a resolver for this run."""
+
+        from .auto_model_service import AUTO_ROUTER_CONFIG_NAME
+        from .model_service import _is_model_visible_to_user
+
+        config = (
+            self.db.query(AutoModelConfig)
+            .options(
+                joinedload(AutoModelConfig.candidates).joinedload(
+                    AutoModelCandidate.target_model
+                )
+            )
+            .filter(AutoModelConfig.router_model_id == router_model.id)
+            .first()
+        )
+        if config is None or not config.candidates:
+            raise RuntimeError("Auto model has no configured candidates")
+
+        targets_by_profile: dict[str, ChatModelConfig] = {}
+        fallback_profile: str | None = None
+        for candidate in config.candidates:
+            target = candidate.target_model
+            if (
+                target is None
+                or not target.is_active
+                or target.category != "llm"
+                or is_auto_router_model(target.model_provider, target.model_name)
+                or not _is_model_visible_to_user(
+                    self.db, target.id, int(config.user_id)
+                )
+            ):
+                raise RuntimeError(
+                    f"Auto candidate {candidate.routing_model_id!r} is unavailable"
+                )
+            target_cfg = self.core_storage._db_model_to_config(target)
+            if not isinstance(target_cfg, ChatModelConfig):
+                raise RuntimeError(
+                    f"Auto candidate {candidate.routing_model_id!r} is not a chat model"
+                )
+            targets_by_profile[candidate.routing_model_id] = target_cfg
+            if candidate.target_model_id == config.fallback_model_id:
+                fallback_profile = candidate.routing_model_id
+
+        profile_ids = list(targets_by_profile)
+        configured = router_cfg.model_copy(
+            update={
+                "router_config_name": AUTO_ROUTER_CONFIG_NAME,
+                "router_candidate_models": profile_ids,
+                "router_fallback_model": fallback_profile,
+            }
+        )
+
+        def _resolve(profile_id: str) -> BaseLLM:
+            target_cfg = targets_by_profile.get(profile_id)
+            if target_cfg is None:
+                raise RuntimeError(
+                    f"xrouter selected unbound Auto profile {profile_id!r}"
+                )
+            llm = self.core_storage.create_llm_instance(target_cfg)
+            if llm is None:
+                raise RuntimeError(
+                    f"failed to build Auto downstream LLM for {profile_id!r}"
+                )
+            return llm
+
+        return configured, _resolve
+
+    def _create_default_model(
+        self, db_model: Model, user_id: Optional[int]
+    ) -> Optional[BaseLLM]:
+        """Create a default model, hydrating configured Auto when necessary."""
+
+        model_id = str(db_model.model_id)
+        model_config = self.core_storage.load(model_id)
+        if (
+            getattr(model_config, "model_provider", None) == ROUTER_PROVIDER
+            and getattr(model_config, "model_name", None) == "auto"
+        ):
+            return self.get_llm_by_name_with_access(model_id, user_id)
+        return self.core_storage.create_llm_instance(model_config)
 
     def get_configured_defaults(
         self, user_id: Optional[int] = None
@@ -774,11 +868,8 @@ class UserAwareModelStorage:
                     if _is_model_visible_to_user(
                         self.db, general_default.model.id, user_id
                     ):
-                        model_config = self.core_storage.load(
-                            general_default.model.model_id
-                        )
-                        default_llm = self.core_storage.create_llm_instance(
-                            model_config
+                        default_llm = self._create_default_model(
+                            general_default.model, user_id
                         )
 
                 # Get small/fast model
@@ -802,10 +893,9 @@ class UserAwareModelStorage:
                     if _is_model_visible_to_user(
                         self.db, fast_default.model.id, user_id
                     ):
-                        model_config = self.core_storage.load(
-                            fast_default.model.model_id
+                        fast_llm = self._create_default_model(
+                            fast_default.model, user_id
                         )
-                        fast_llm = self.core_storage.create_llm_instance(model_config)
 
                 # Get vision model
                 vision_default = (
@@ -828,10 +918,9 @@ class UserAwareModelStorage:
                     if _is_model_visible_to_user(
                         self.db, vision_default.model.id, user_id
                     ):
-                        model_config = self.core_storage.load(
-                            vision_default.model.model_id
+                        vision_llm = self._create_default_model(
+                            vision_default.model, user_id
                         )
-                        vision_llm = self.core_storage.create_llm_instance(model_config)
 
                 # Get compact model
                 compact_default = (
@@ -854,11 +943,8 @@ class UserAwareModelStorage:
                     if _is_model_visible_to_user(
                         self.db, compact_default.model.id, user_id
                     ):
-                        model_config = self.core_storage.load(
-                            compact_default.model.model_id
-                        )
-                        compact_llm = self.core_storage.create_llm_instance(
-                            model_config
+                        compact_llm = self._create_default_model(
+                            compact_default.model, user_id
                         )
 
             # If user-specific defaults are not complete, try visible users' shared defaults
@@ -884,18 +970,21 @@ class UserAwareModelStorage:
                 )
 
                 for admin_default in admin_defaults:
-                    model_config = self.core_storage.load(admin_default.model.model_id)
                     if not default_llm and admin_default.config_type == "general":
-                        default_llm = self.core_storage.create_llm_instance(
-                            model_config
+                        default_llm = self._create_default_model(
+                            admin_default.model, user_id
                         )
                     elif not fast_llm and admin_default.config_type == "small_fast":
-                        fast_llm = self.core_storage.create_llm_instance(model_config)
+                        fast_llm = self._create_default_model(
+                            admin_default.model, user_id
+                        )
                     elif not vision_llm and admin_default.config_type == "visual":
-                        vision_llm = self.core_storage.create_llm_instance(model_config)
+                        vision_llm = self._create_default_model(
+                            admin_default.model, user_id
+                        )
                     elif not compact_llm and admin_default.config_type == "compact":
-                        compact_llm = self.core_storage.create_llm_instance(
-                            model_config
+                        compact_llm = self._create_default_model(
+                            admin_default.model, user_id
                         )
 
             # Fallback to environment variables if no configured models
