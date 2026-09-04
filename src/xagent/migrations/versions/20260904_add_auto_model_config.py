@@ -20,6 +20,23 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     existing_tables = set(sa.inspect(op.get_bind()).get_table_names())
     if "auto_model_configs" not in existing_tables:
+        config_foreign_keys = []
+        if "models" in existing_tables:
+            config_foreign_keys.extend(
+                [
+                    sa.ForeignKeyConstraint(
+                        ["fallback_model_id"], ["models.id"], ondelete="RESTRICT"
+                    ),
+                    sa.ForeignKeyConstraint(
+                        ["router_model_id"], ["models.id"], ondelete="CASCADE"
+                    ),
+                ]
+            )
+        if "users" in existing_tables:
+            config_foreign_keys.append(
+                sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE")
+            )
+
         op.create_table(
             "auto_model_configs",
             sa.Column("id", sa.Integer(), nullable=False),
@@ -39,13 +56,7 @@ def upgrade() -> None:
                 server_default=sa.text("CURRENT_TIMESTAMP"),
                 nullable=True,
             ),
-            sa.ForeignKeyConstraint(
-                ["fallback_model_id"], ["models.id"], ondelete="RESTRICT"
-            ),
-            sa.ForeignKeyConstraint(
-                ["router_model_id"], ["models.id"], ondelete="CASCADE"
-            ),
-            sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+            *config_foreign_keys,
             sa.PrimaryKeyConstraint("id"),
             sa.UniqueConstraint(
                 "router_model_id", name="uq_auto_model_config_router_model"
@@ -65,6 +76,18 @@ def upgrade() -> None:
             unique=False,
         )
     if "auto_model_candidates" not in existing_tables:
+        candidate_foreign_keys = [
+            sa.ForeignKeyConstraint(
+                ["config_id"], ["auto_model_configs.id"], ondelete="CASCADE"
+            )
+        ]
+        if "models" in existing_tables:
+            candidate_foreign_keys.append(
+                sa.ForeignKeyConstraint(
+                    ["target_model_id"], ["models.id"], ondelete="RESTRICT"
+                )
+            )
+
         op.create_table(
             "auto_model_candidates",
             sa.Column("id", sa.Integer(), nullable=False),
@@ -77,12 +100,7 @@ def upgrade() -> None:
                 server_default=sa.text("CURRENT_TIMESTAMP"),
                 nullable=True,
             ),
-            sa.ForeignKeyConstraint(
-                ["config_id"], ["auto_model_configs.id"], ondelete="CASCADE"
-            ),
-            sa.ForeignKeyConstraint(
-                ["target_model_id"], ["models.id"], ondelete="RESTRICT"
-            ),
+            *candidate_foreign_keys,
             sa.PrimaryKeyConstraint("id"),
             sa.UniqueConstraint(
                 "config_id",
