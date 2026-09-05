@@ -225,6 +225,12 @@ class RouterLLM(BaseLLM):
     def supports_thinking_mode(self) -> bool:
         return "thinking_mode" in self._abilities
 
+    @property
+    def uses_configured_candidates(self) -> bool:
+        """Whether this router is backed by an explicit Auto candidate set."""
+
+        return self._candidate_models is not None
+
     async def chat(
         self,
         messages: list[dict[str, str]],
@@ -630,7 +636,8 @@ class _ResolvedRouterLLM(BaseLLM):
         self._downstream = downstream
         self._selected_model = selected_model
         self.context_window = context_window
-        abilities = list(getattr(downstream, "abilities", router.abilities))
+        ability_source = downstream if router.uses_configured_candidates else router
+        abilities = list(getattr(ability_source, "abilities", router.abilities))
         for modality in input_modalities:
             ability = _MODALITY_ABILITIES.get(modality)
             if ability is not None and ability not in abilities:
@@ -655,6 +662,8 @@ class _ResolvedRouterLLM(BaseLLM):
 
     @property
     def supports_thinking_mode(self) -> bool:
+        if not self._router.uses_configured_candidates:
+            return self._router.supports_thinking_mode
         return getattr(
             self._downstream,
             "supports_thinking_mode",

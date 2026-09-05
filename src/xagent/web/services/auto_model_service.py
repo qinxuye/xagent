@@ -19,6 +19,15 @@ from .hot_path_cache import invalidate_model_cache
 from .model_store import ModelStore
 
 AUTO_ROUTER_CONFIG_NAME = "auto"
+AUTO_ROUTER_MODEL_ID_PREFIX = "auto-router-"
+
+
+def is_reserved_auto_router_model_id(model_id: object) -> bool:
+    """Return whether an ID belongs to the service-owned Auto namespace."""
+
+    return isinstance(model_id, str) and model_id.strip().startswith(
+        AUTO_ROUTER_MODEL_ID_PREFIX
+    )
 
 
 class AutoModelConfigurationError(ValueError):
@@ -266,7 +275,7 @@ class AutoModelService:
         return result
 
     def _create_router_model(self, user_id: int, targets: Iterable[DBModel]) -> DBModel:
-        model_id = f"auto-router-{user_id}"
+        model_id = f"{AUTO_ROUTER_MODEL_ID_PREFIX}{user_id}"
         if self.db.query(DBModel.id).filter(DBModel.model_id == model_id).first():
             raise AutoModelConfigurationError(
                 f"Reserved Auto model ID {model_id!r} is already in use"

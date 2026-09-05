@@ -14,11 +14,13 @@ from xagent.core.model.model import ChatModelConfig, EmbeddingModelConfig
 from xagent.web.api import model as model_module
 from xagent.web.api.auth import auth_router
 from xagent.web.api.model import model_router
+from xagent.web.models.auto_model import AutoModelCandidate, AutoModelConfig
 from xagent.web.models.database import Base, get_db, get_engine
 from xagent.web.models.model import Model as DBModel
 from xagent.web.models.user import UserDefaultModel, UserModel
 from xagent.web.services.llm_utils import (
     PLATFORM_MODEL_MANAGER,
+    AutoModelUnavailableError,
     CoreStorage,
     PlatformModelIdentityError,
     PlatformModelStore,
@@ -262,6 +264,18 @@ def test_user_creation_rejects_platform_namespace(
         assert db.query(DBModel).filter_by(model_id="platform/forged").first() is None
     finally:
         db.close()
+
+
+@pytest.mark.parametrize("path", ["/api/models/", "/api/models/register"])
+def test_user_creation_rejects_auto_router_namespace(
+    test_db, regular_headers, sample_model_data, path
+):
+    payload = {**sample_model_data, "model_id": "auto-router-999"}
+
+    response = client.post(path, headers=regular_headers, json=payload)
+
+    assert response.status_code == 403
+    assert "auto-router-" in response.json()["detail"]
 
 
 def test_trusted_platform_store_persists_provenance_without_user_ownership(test_db):
@@ -563,6 +577,26 @@ class TestModelAPI:
             model["model_provider"] == "router" for model in list_response.json()
         )
 
+        fake_llm = AsyncMock()
+        fake_llm.chat.return_value = "ok"
+        with patch.object(
+            model_module.CoreStorage,
+            "get_llm_by_id",
+            return_value=fake_llm,
+        ) as get_llm:
+            all_test_response = client.post("/api/models/test", headers=regular_headers)
+            auto_test_response = client.post(
+                "/api/models/test",
+                headers=regular_headers,
+                json={"model_ids": [data["auto_model"]["model_id"]]},
+            )
+        assert all_test_response.status_code == 200
+        assert auto_test_response.status_code == 200
+        assert auto_test_response.json() == []
+        assert data["auto_model"]["model_id"] not in {
+            call.args[0] for call in get_llm.call_args_list
+        }
+
         from xagent.core.model.chat.basic.router import RouterLLM
         from xagent.web.services.llm_utils import UserAwareModelStorage
 
@@ -597,12 +631,24 @@ class TestModelAPI:
 
             second_db_model.is_active = False
             db.flush()
-            assert (
+            with pytest.raises(
+                AutoModelUnavailableError,
+                match="Auto model has no active configured candidates",
+            ):
                 UserAwareModelStorage(db).get_llm_by_id(
                     data["auto_model"]["model_id"], regular_user["id"]
                 )
-                is None
-            )
+            with (
+                patch(
+                    "xagent.web.services.llm_utils.create_llm_from_env"
+                ) as env_fallback,
+                pytest.raises(
+                    AutoModelUnavailableError,
+                    match="Auto model has no active configured candidates",
+                ),
+            ):
+                UserAwareModelStorage(db).get_configured_defaults(regular_user["id"])
+            env_fallback.assert_not_called()
         finally:
             db.rollback()
             db.close()
@@ -612,6 +658,98 @@ class TestModelAPI:
         )
         assert delete_response.status_code == 409
         assert "Auto configuration" in delete_response.json()["detail"]
+
+    @pytest.mark.parametrize("owner_action", ["unshare", "category", "delete"])
+    def test_other_users_auto_binding_does_not_control_model_owner(
+        self,
+        test_db,
+        regular_user,
+        admin_user,
+        admin_headers,
+        owner_action,
+    ):
+        db = next(get_db())
+        try:
+            target = DBModel(
+                model_id=f"cross-tenant-{owner_action}",
+                category="llm",
+                model_provider="openai",
+                model_name="gpt-4",
+                api_key="owner-key",
+                abilities=["chat"],
+                is_active=True,
+            )
+            router_model = DBModel(
+                model_id=f"auto-router-test-{owner_action}",
+                category="llm",
+                model_provider="router",
+                model_name="auto",
+                api_key="",
+                abilities=["chat"],
+                is_active=True,
+            )
+            db.add_all([target, router_model])
+            db.flush()
+            db.add(
+                UserModel(
+                    user_id=admin_user["id"],
+                    model_id=target.id,
+                    is_owner=True,
+                    can_edit=True,
+                    can_delete=True,
+                    is_shared=owner_action == "unshare",
+                )
+            )
+            config = AutoModelConfig(
+                user_id=regular_user["id"],
+                router_model_id=router_model.id,
+                strategy="balanced",
+                fallback_model_id=target.id,
+            )
+            db.add(config)
+            db.flush()
+            db.add(
+                AutoModelCandidate(
+                    config_id=config.id,
+                    routing_model_id="openai/gpt-5.5",
+                    target_model_id=target.id,
+                )
+            )
+            db.commit()
+            target_id = int(target.id)
+            config_id = int(config.id)
+        finally:
+            db.close()
+
+        if owner_action == "delete":
+            response = client.delete(
+                f"/api/models/cross-tenant-{owner_action}",
+                headers=admin_headers,
+            )
+        else:
+            update = (
+                {"share_with_users": False}
+                if owner_action == "unshare"
+                else {"category": "embedding"}
+            )
+            response = client.put(
+                f"/api/models/cross-tenant-{owner_action}",
+                headers=admin_headers,
+                json=update,
+            )
+
+        assert response.status_code == 200
+        db = next(get_db())
+        try:
+            assert (
+                db.query(AutoModelCandidate)
+                .filter(AutoModelCandidate.target_model_id == target_id)
+                .count()
+                == 0
+            )
+            assert db.get(AutoModelConfig, config_id).fallback_model_id is None
+        finally:
+            db.close()
 
     def test_auto_config_rejects_duplicate_profile_mapping(
         self, test_db, regular_user, regular_headers, sample_model_data

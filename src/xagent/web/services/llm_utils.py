@@ -43,6 +43,10 @@ class PlatformModelIdentityError(ValueError):
     """Raised when an ordinary write crosses the platform model boundary."""
 
 
+class AutoModelUnavailableError(RuntimeError):
+    """Raised when a configured Auto model has no usable downstream model."""
+
+
 class ModelWriteMode(Enum):
     """Control whether a model write owns or joins the current transaction."""
 
@@ -709,6 +713,8 @@ class UserAwareModelStorage:
                     downstream_resolver=self._build_openrouter_resolver(model_config),
                 )
             return self.core_storage.create_llm_instance(model_config)
+        except AutoModelUnavailableError:
+            raise
         except Exception as e:
             logger.error(f"Error getting LLM instance for model '{model_name}': {e}")
             import traceback
@@ -758,7 +764,7 @@ class UserAwareModelStorage:
             .first()
         )
         if config is None or not config.candidates:
-            raise RuntimeError("Auto model has no configured candidates")
+            raise AutoModelUnavailableError("Auto model has no configured candidates")
 
         targets_by_profile: dict[str, ChatModelConfig] = {}
         fallback_profile: str | None = None
@@ -790,7 +796,9 @@ class UserAwareModelStorage:
                 fallback_profile = candidate.routing_model_id
 
         if not targets_by_profile:
-            raise RuntimeError("Auto model has no active configured candidates")
+            raise AutoModelUnavailableError(
+                "Auto model has no active configured candidates"
+            )
 
         profile_ids = list(targets_by_profile)
         configured = router_cfg.model_copy(
@@ -1011,6 +1019,8 @@ class UserAwareModelStorage:
 
             return default_llm, fast_llm, vision_llm, compact_llm
 
+        except AutoModelUnavailableError:
+            raise
         except Exception as e:
             logger.error(f"Error getting configured defaults: {e}")
             # Final fallback to environment variables

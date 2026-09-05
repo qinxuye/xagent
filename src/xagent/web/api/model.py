@@ -40,7 +40,7 @@ from xagent.core.model.providers import (
 from xagent.core.utils.security import redact_sensitive_text
 
 from ..auth_dependencies import get_current_user
-from ..models.auto_model import AutoModelCandidate
+from ..models.auto_model import AutoModelCandidate, AutoModelConfig
 from ..models.database import get_db
 from ..models.model import Model as DBModel
 from ..models.user import User, UserDefaultModel, UserModel
@@ -61,6 +61,7 @@ from ..services.auto_model_service import (
     AutoModelConfigurationError,
     AutoModelDependencyError,
     AutoModelService,
+    is_reserved_auto_router_model_id,
     list_router_profiles,
 )
 from ..services.llm_utils import (
@@ -461,6 +462,11 @@ async def create_model(
         raise HTTPException(
             status_code=403,
             detail="Model IDs beginning with 'platform/' are reserved",
+        )
+    if is_reserved_auto_router_model_id(model.model_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Model IDs beginning with 'auto-router-' are reserved",
         )
 
     # Check if model_id already exists
@@ -1158,6 +1164,7 @@ async def test_models(
             .filter(
                 DBModel.model_id.in_(test_request.model_ids),
                 DBModel.is_active,
+                DBModel.model_provider != ROUTER_PROVIDER,
                 build_user_model_visibility_filter(int(user.id), visible_ids),
             )
             .all()
@@ -1169,6 +1176,7 @@ async def test_models(
             .join(UserModel, DBModel.id == UserModel.model_id)
             .filter(
                 DBModel.is_active,
+                DBModel.model_provider != ROUTER_PROVIDER,
                 build_user_model_visibility_filter(int(user.id), visible_ids),
             )
             .all()
@@ -2024,18 +2032,30 @@ async def update_model(
     effective_model_name = update_data.get("model_name", db_model.model_name)
     _validate_provider_model_name(effective_provider, effective_model_name)
     effective_category = update_data.get("category", db_model.category)
-    if (
-        effective_category != "llm"
-        or is_auto_router_model(effective_provider, effective_model_name)
-    ) and (
-        db.query(AutoModelCandidate.id)
-        .filter(AutoModelCandidate.target_model_id == db_model.id)
-        .first()
-        is not None
-    ):
-        raise HTTPException(
-            409,
-            detail="Cannot change this model into a non-LLM or Auto model while an Auto configuration uses it.",
+    incompatible_with_auto = effective_category != "llm" or is_auto_router_model(
+        effective_provider, effective_model_name
+    )
+    if incompatible_with_auto:
+        own_auto_reference = (
+            db.query(AutoModelCandidate.id)
+            .join(
+                AutoModelConfig,
+                AutoModelConfig.id == AutoModelCandidate.config_id,
+            )
+            .filter(
+                AutoModelCandidate.target_model_id == db_model.id,
+                AutoModelConfig.user_id == int(user.id),
+            )
+            .first()
+        )
+        if own_auto_reference is not None:
+            raise HTTPException(
+                409,
+                detail="Cannot change this model into a non-LLM or Auto model while an Auto configuration uses it.",
+            )
+        model_store.prune_external_auto_references(
+            model_id=int(db_model.id),
+            owner_user_id=int(user.id),
         )
 
     for field, value in update_data.items():
@@ -2112,7 +2132,14 @@ async def delete_model(
 
     auto_references = (
         db.query(AutoModelCandidate)
-        .filter(AutoModelCandidate.target_model_id == user_model.model.id)
+        .join(
+            AutoModelConfig,
+            AutoModelConfig.id == AutoModelCandidate.config_id,
+        )
+        .filter(
+            AutoModelCandidate.target_model_id == user_model.model.id,
+            AutoModelConfig.user_id == int(user.id),
+        )
         .count()
     )
     if auto_references > 0:
@@ -2121,7 +2148,13 @@ async def delete_model(
             detail="Cannot delete: this model is used by an Auto configuration.",
         )
 
-    ModelStore(db).delete_model(model_storage=model_storage, user_model=user_model)
+    model_store = ModelStore(db)
+    model_store.prune_external_auto_references(
+        model_id=int(user_model.model.id),
+        owner_user_id=int(user.id),
+    )
+
+    model_store.delete_model(model_storage=model_storage, user_model=user_model)
 
     return {"message": "Model deleted successfully"}
 
