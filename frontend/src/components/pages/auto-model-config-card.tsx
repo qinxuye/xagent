@@ -109,6 +109,7 @@ export function AutoModelConfigCard({
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [routerAvailable, setRouterAvailable] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
   const [config, setConfig] = useState<AutoConfig | null>(null);
   const [profiles, setProfiles] = useState<RouterProfile[]>([]);
@@ -188,6 +189,10 @@ export function AutoModelConfigCard({
           ),
         );
       }
+      if (profilesResponse.status === 503) {
+        setRouterAvailable(false);
+        return;
+      }
       if (!profilesResponse.ok) {
         throw new Error(
           await errorMessage(
@@ -197,7 +202,9 @@ export function AutoModelConfigCard({
         );
       }
       hydrateForm(await configResponse.json(), await profilesResponse.json());
+      setRouterAvailable(true);
     } catch (error) {
+      setRouterAvailable(true);
       toast.error(
         error instanceof Error
           ? error.message
@@ -300,6 +307,10 @@ export function AutoModelConfigCard({
       setSaving(false);
     }
   };
+
+  if (routerAvailable !== true) {
+    return null;
+  }
 
   return (
     <>

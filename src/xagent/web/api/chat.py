@@ -105,7 +105,7 @@ from ..services.hot_path_cache import (
     web_task_detail_key,
     web_task_status_key,
 )
-from ..services.llm_utils import resolve_llms_from_names
+from ..services.llm_utils import AutoModelUnavailableError, resolve_llms_from_names
 from ..services.managed_file_ref import ensure_uploaded_file_local_path
 from ..services.mcp_runtime import (
     MCPBuiltinOAuthActorPolicy,
@@ -2624,6 +2624,7 @@ class AgentServiceManager:
                             self._sync_execution_scope(task_id, scope)
                             return self._agents[task_id]
                     except (
+                        AutoModelUnavailableError,
                         HTTPException,
                         TaskOwnerMismatchError,
                         _AgentRuntimeSessionBoundaryError,
@@ -2792,6 +2793,7 @@ class AgentServiceManager:
                     task_vision_llm = None
                     task_compact_llm = None
             except (
+                AutoModelUnavailableError,
                 HTTPException,
                 TaskOwnerMismatchError,
                 _AgentRuntimeSessionBoundaryError,

@@ -1,7 +1,22 @@
-import { describe, expect, it } from "vitest"
+import { render, waitFor } from "@testing-library/react"
+import { createElement } from "react"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { Model } from "./models"
-import { guessProfile } from "./auto-model-config-card"
+import { AutoModelConfigCard, guessProfile } from "./auto-model-config-card"
+
+const { apiRequestMock, toastErrorMock } = vi.hoisted(() => ({
+  apiRequestMock: vi.fn(),
+  toastErrorMock: vi.fn(),
+}))
+
+vi.mock("@/lib/api-wrapper", () => ({ apiRequest: apiRequestMock }))
+vi.mock("@/components/ui/sonner", () => ({
+  toast: { error: toastErrorMock, success: vi.fn() },
+}))
+vi.mock("@/contexts/i18n-context", () => ({
+  useI18n: () => ({ t: (key: string) => key }),
+}))
 
 const model: Model = {
   id: 1,
@@ -24,5 +39,34 @@ describe("guessProfile", () => {
         { id: "openai/gpt-5.5", input_modalities: ["text"] },
       ]),
     ).toBe("openai/gpt-5.5")
+  })
+})
+
+describe("AutoModelConfigCard", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset()
+    toastErrorMock.mockReset()
+  })
+
+  it("stays hidden without a router installation and does not show an error", async () => {
+    apiRequestMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ configured: false, candidates: [] }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+
+    const view = render(
+      createElement(AutoModelConfigCard, {
+        models: [],
+        onSuccess: vi.fn(),
+      }),
+    )
+
+    await waitFor(() => expect(apiRequestMock).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(view.container).toBeEmptyDOMElement())
+    expect(toastErrorMock).not.toHaveBeenCalled()
   })
 })
