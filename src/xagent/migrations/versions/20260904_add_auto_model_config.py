@@ -1,7 +1,7 @@
 """add per-user Auto model configuration
 
 Revision ID: 20260904_add_auto_model_config
-Revises: 20260902_seed_magento_mcp_app
+Revises: 20260905_task_execution_events
 Create Date: 2026-09-04 00:00:00.000000
 
 """
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "20260904_add_auto_model_config"
-down_revision: Union[str, None] = "20260902_seed_magento_mcp_app"
+down_revision: Union[str, None] = "20260905_task_execution_events"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

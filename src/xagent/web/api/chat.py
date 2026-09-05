@@ -87,6 +87,7 @@ from ..services.chat_history_service import (
     load_task_transcript_window,
     persist_assistant_message_no_commit,
 )
+from ..services.client_error_messages import ClientErrorCode, client_error_message
 from ..services.connector_runtime import (
     bind_connector_runtime_selection_snapshot,
     prepare_connector_runtime_selection_snapshot,
@@ -4674,6 +4675,11 @@ async def create_task(
 
     except HTTPException:
         raise
+    except AutoModelUnavailableError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=client_error_message(ClientErrorCode.AUTO_MODEL_UNAVAILABLE),
+        ) from exc
     except ConnectorRuntimeError as exc:
         raise HTTPException(
             status_code=exc.status_code, detail=exc.safe_message

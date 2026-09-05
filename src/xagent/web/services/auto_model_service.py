@@ -149,7 +149,7 @@ class AutoModelService:
             )
             .first()
         )
-        if request.set_as_default:
+        if request.set_as_default is True:
             if general_default is None:
                 self.db.add(
                     UserDefaultModel(
@@ -160,8 +160,10 @@ class AutoModelService:
                 )
             else:
                 general_default.model_id = config.router_model_id
-        elif general_default is not None and int(general_default.model_id) == int(
-            config.router_model_id
+        elif (
+            request.set_as_default is False
+            and general_default is not None
+            and int(general_default.model_id) == int(config.router_model_id)
         ):
             self.db.delete(general_default)
 
@@ -312,6 +314,4 @@ class AutoModelService:
         abilities = {"chat"}
         if ability_sets:
             abilities.update(set.intersection(*ability_sets))
-            if any("vision" in ability_set for ability_set in ability_sets):
-                abilities.add("vision")
         router_model.abilities = sorted(abilities)  # type: ignore[assignment]

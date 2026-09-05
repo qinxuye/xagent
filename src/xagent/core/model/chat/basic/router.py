@@ -452,6 +452,22 @@ class RouterLLM(BaseLLM):
             )
         )
 
+    def _compatible_fallback(
+        self, required_input_modalities: tuple[str, ...]
+    ) -> str | None:
+        if self._fallback_model is None:
+            return None
+        if not required_input_modalities:
+            return self._fallback_model
+        supported = set(self._profile_input_modalities(self._fallback_model))
+        missing = sorted(set(required_input_modalities) - supported)
+        if missing:
+            raise RouterModalityRoutingError(
+                f"Auto fallback model {self._fallback_model!r} does not support "
+                f"required input modalities: {', '.join(missing)}"
+            )
+        return self._fallback_model
+
     async def _select_model(
         self,
         prompt: str,
@@ -471,13 +487,14 @@ class RouterLLM(BaseLLM):
         except RouterModalityRoutingError:
             raise
         except Exception as exc:  # noqa: BLE001 - routing must not crash the agent
-            if self._fallback_model:
+            fallback_model = self._compatible_fallback(preferred_input_modalities)
+            if fallback_model:
                 logger.warning(
                     "xrouter route failed (%s); using fallback %s",
                     exc,
-                    self._fallback_model,
+                    fallback_model,
                 )
-                return self._fallback_model
+                return fallback_model
             raise RuntimeError(
                 f"xrouter-llm routing failed: {exc}. "
                 + (
@@ -487,8 +504,9 @@ class RouterLLM(BaseLLM):
                 )
             ) from exc
         if not selected:
-            if self._fallback_model:
-                return self._fallback_model
+            fallback_model = self._compatible_fallback(preferred_input_modalities)
+            if fallback_model:
+                return fallback_model
             raise RuntimeError("xrouter-llm returned no selected model")
         return str(selected[0])
 

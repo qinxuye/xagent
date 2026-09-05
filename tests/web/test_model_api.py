@@ -499,7 +499,12 @@ class TestModelAPI:
         self, test_db, regular_user, regular_headers, sample_model_data
     ):
         first = client.post(
-            "/api/models/", json=sample_model_data, headers=regular_headers
+            "/api/models/",
+            json={
+                **sample_model_data,
+                "abilities": ["chat", "tool_calling", "vision"],
+            },
+            headers=regular_headers,
         )
         second_payload = {
             **sample_model_data,
@@ -550,6 +555,7 @@ class TestModelAPI:
         assert data["auto_model"]["model_provider"] == "router"
         assert data["auto_model"]["model_name"] == "auto"
         assert data["auto_model"]["can_delete"] is False
+        assert "vision" not in data["auto_model"]["abilities"]
         assert {candidate["routing_model_id"] for candidate in data["candidates"]} == {
             "openai/gpt-5.5",
             "deepseek/deepseek-v4-flash",
@@ -570,6 +576,38 @@ class TestModelAPI:
             if item["config_type"] == "general"
         )
         assert general_default["model_id"] == data["auto_model"]["id"]
+
+        with patch(
+            "xagent.web.services.auto_model_service.load_router_profile_catalog",
+            return_value=Catalog(),
+        ):
+            update_response = client.put(
+                "/api/models/auto-config",
+                headers=regular_headers,
+                json={
+                    "fallback_model_id": second.json()["id"],
+                    "candidates": [
+                        {
+                            "target_model_id": first.json()["id"],
+                            "routing_model_id": "openai/gpt-5.5",
+                        },
+                        {
+                            "target_model_id": second.json()["id"],
+                            "routing_model_id": "deepseek/deepseek-v4-flash",
+                        },
+                    ],
+                },
+            )
+        assert update_response.status_code == 200
+        defaults_after_update = client.get(
+            "/api/models/user-default", headers=regular_headers
+        )
+        assert defaults_after_update.status_code == 200
+        assert any(
+            item["config_type"] == "general"
+            and item["model_id"] == data["auto_model"]["id"]
+            for item in defaults_after_update.json()
+        )
 
         list_response = client.get("/api/models/", headers=regular_headers)
         assert list_response.status_code == 200

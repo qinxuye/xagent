@@ -572,6 +572,37 @@ async def test_modality_support_error_is_not_hidden_by_generic_fallback(
         )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "route_result",
+    [RuntimeError("router unavailable"), []],
+    ids=["routing-error", "empty-selection"],
+)
+async def test_text_only_fallback_rejects_required_image(
+    monkeypatch, route_result
+) -> None:
+    monkeypatch.setenv("XAGENT_ROUTER_FALLBACK_MODEL", "fallback/model")
+    router = RouterLLM()
+
+    def route(*_args, **_kwargs):
+        if isinstance(route_result, Exception):
+            raise route_result
+        return route_result
+
+    monkeypatch.setattr(router, "_route_sync", route)
+    monkeypatch.setattr(
+        router,
+        "_profile_input_modalities",
+        lambda _model_id: ("text",),
+    )
+
+    with pytest.raises(RouterModalityRoutingError, match="fallback/model.*image"):
+        await router._select_model(
+            "inspect",
+            preferred_input_modalities=("image",),
+        )
+
+
 class _LegacyModalityUnawareService:
     """An installed xrouter-llm whose route() predates modality preferences."""
 

@@ -407,7 +407,7 @@ class AutoModelConfigUpdate(BaseModel):
         description="Deprecated compatibility field; Auto always uses xrouter auto.",
     )
     fallback_model_id: Optional[int] = None
-    set_as_default: bool = False
+    set_as_default: Optional[bool] = None
     candidates: List[AutoModelCandidateUpdate]
 
     @model_validator(mode="after")
