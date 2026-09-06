@@ -269,6 +269,48 @@ describe('MarkdownRenderer', () => {
     }
   })
 
+  it('wraps each table in its own keyboard-accessible scroll region', () => {
+    render(<MarkdownRenderer content={[
+      '| Long plan description | Price |', '| :--- | ---: |', '| SIMBA | $15 |',
+      '', 'Another comparison:', '',
+      '| Country | Status |', '| --- | --- |', '| AU | Paused |',
+    ].join('\n')} />)
+    const tables = screen.getAllByRole('table')
+    expect(tables).toHaveLength(2)
+    for (const table of tables) {
+      expect(table.parentElement).toHaveClass('markdown-table-scroll')
+      expect(table.parentElement).toHaveAttribute('tabindex', '0')
+      expect(table.parentElement).toHaveAttribute('role', 'region')
+      expect(table.parentElement).toHaveAttribute('aria-label', 'markdownRenderer.tableScrollLabel')
+    }
+    expect(screen.getByRole('columnheader', { name: 'Price' })).toHaveStyle({ textAlign: 'right' })
+    expect(screen.getByRole('cell', { name: '$15' })).toHaveStyle({ textAlign: 'right' })
+  })
+
+  it('preserves escaped pipes and code inside cells without moving values between columns', () => {
+    render(<MarkdownRenderer content={[
+      '| Campaign | Country | Status | Spend |', '| --- | --- | --- | --- |',
+      String.raw`| Jack \| TEST | AU | Paused | $1,909.81 |`,
+      String.raw`| \`a\|b\` | SG | Active | $15–$25 |`.replaceAll('\\`', '`'),
+    ].join('\n')} />)
+    expect(screen.getAllByRole('cell').map((cell) => cell.textContent)).toEqual([
+      'Jack | TEST', 'AU', 'Paused', '$1,909.81', 'a|b', 'SG', 'Active', '$15–$25',
+    ])
+  })
+
+  it('keeps the table and scroll wrapper stable while a streamed row grows', () => {
+    const header = '| Plan | Price |\n| --- | --- |\n'
+    const { rerender } = render(<MarkdownRenderer content={header + '| SIMBA |'} />)
+    const table = screen.getByRole('table')
+    const wrapper = table.parentElement
+    for (const row of ['| SIMBA | $', '| SIMBA | $15', '| SIMBA | $15–$25 |']) {
+      rerender(<MarkdownRenderer content={header + row} />)
+      expect(screen.getByRole('table')).toBe(table)
+      expect(table.parentElement).toBe(wrapper)
+    }
+    expect(screen.getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['SIMBA', '$15–$25'])
+  })
+
   it('renders numeric formulas alongside currency without merging their delimiters', () => {
     const { container } = render(
       <MarkdownRenderer content="Pay $15 or $25; the equation is $2 + 2 = 4$, then $x^2$." />,

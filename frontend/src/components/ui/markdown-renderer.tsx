@@ -338,6 +338,20 @@ function MarkdownParagraph({
   return <p {...props}>{children}</p>
 }
 
+function MarkdownTable({ node: _node, children, ...props }: MarkdownComponentProps<'table'>) {
+  const { t } = useI18n()
+  return (
+    <div
+      className="markdown-table-scroll"
+      role="region"
+      aria-label={t('markdownRenderer.tableScrollLabel')}
+      tabIndex={0}
+    >
+      <table {...props}>{children}</table>
+    </div>
+  )
+}
+
 function MarkdownLink({
   node,
   href,
@@ -566,6 +580,7 @@ const markdownComponents: Components = {
   p: MarkdownParagraph,
   a: MarkdownLink,
   img: MarkdownImage,
+  table: MarkdownTable,
 }
 
 export function MarkdownRenderer({
