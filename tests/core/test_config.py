@@ -2725,13 +2725,14 @@ class TestUrlUserinfoRejectionIsScopedToDeepDoc:
         assert get_s2s_api_base_url() == "http://user:pw@api.example.com"
 
 
-def test_inline_file_delivery_budget(monkeypatch):
+def test_inline_file_delivery_budget(monkeypatch, caplog):
     monkeypatch.delenv(config.INLINE_FILE_DELIVERY_MAX_BYTES, raising=False)
     assert config.get_inline_file_delivery_max_bytes() == 8 * 1024 * 1024
     for value in ("0", "1024"):
         monkeypatch.setenv(config.INLINE_FILE_DELIVERY_MAX_BYTES, value)
         assert config.get_inline_file_delivery_max_bytes() == int(value)
-    for value in ("-1", "invalid"):
+    for value in ("-1", "invalid", ""):
         monkeypatch.setenv(config.INLINE_FILE_DELIVERY_MAX_BYTES, value)
-        with pytest.raises(ValueError):
-            config.get_inline_file_delivery_max_bytes()
+        caplog.clear()
+        assert config.get_inline_file_delivery_max_bytes() == 0
+        assert "Invalid XAGENT_INLINE_FILE_DELIVERY_MAX_BYTES" in caplog.text

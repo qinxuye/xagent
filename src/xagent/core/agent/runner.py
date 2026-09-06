@@ -339,7 +339,7 @@ class AgentRunner:
                         )
                         continue
 
-                    # Normalize only the final answer, never tool arguments,
+                    # Normalize user-facing answer text, never tool arguments,
                     # input files or reasoning. Streaming and buffered patterns
                     # share this delivery owner and its registered-file cache.
                     raw_answer = (

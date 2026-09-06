@@ -2922,10 +2922,16 @@ def get_tool_max_field_count() -> int:
 
 
 def get_inline_file_delivery_max_bytes() -> int:
-    """Decoded inline-file budget per run; zero disables delivery, default 8 MiB."""
-    value = int(os.getenv(INLINE_FILE_DELIVERY_MAX_BYTES, str(8 * 1024 * 1024)))
-    if value < 0:
-        raise ValueError("Inline file delivery budget must be non-negative")
+    """Decoded budget per run; zero rejects attachments, not Base64 passthrough."""
+    try:
+        value = int(os.getenv(INLINE_FILE_DELIVERY_MAX_BYTES, str(8 * 1024 * 1024)))
+        if value < 0:
+            raise ValueError("Inline file delivery budget must be non-negative")
+    except ValueError:
+        logger.warning(
+            "Invalid XAGENT_INLINE_FILE_DELIVERY_MAX_BYTES; rejecting inline attachments"
+        )
+        return 0
     return value
 
 

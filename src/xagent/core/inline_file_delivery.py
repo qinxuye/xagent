@@ -45,6 +45,9 @@ _DATA_LINK = re.compile(
 )
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)")
 _NAMED_BASE64 = re.compile(r"base64[ \t]+filename=([^\r\n]+)\Z", re.IGNORECASE)
+_STREAM_MARKER = re.compile(
+    r"\]\(data:|(?:^|\n) {0,3}(?:`{3,}|~{3,})[ \t]*base64", re.IGNORECASE
+)
 
 
 class InlineFileStreamGuard:
@@ -58,15 +61,20 @@ class InlineFileStreamGuard:
         if self.held:
             return ""
         self.pending += delta
-        lower = self.pending.lower()
-        starts = [i for marker in ("data:", "base64") if (i := lower.find(marker)) >= 0]
-        if starts:
-            prefix = self.pending[: min(starts)]
+        marker = _STREAM_MARKER.search(self.pending)
+        if marker:
+            prefix = self.pending[: marker.start()]
             self.pending = ""
             self.held = True
             return prefix
         # Retain enough suffix to recognize markers split across any chunk edge.
-        prefix, self.pending = self.pending[:-5], self.pending[-5:]
+        keep = 6
+        # A fence header can contain whitespace or a longer delimiter. Retain
+        # its incomplete line until its language is known, not ordinary prose.
+        fence = re.search(r"(?:^|\n) {0,3}[`~][^\r\n]*$", self.pending)
+        if fence:
+            keep = max(keep, len(self.pending) - fence.start())
+        prefix, self.pending = self.pending[:-keep], self.pending[-keep:]
         return prefix
 
     def flush(self) -> str:
@@ -96,6 +104,8 @@ class InlineFileDelivery:
         inline_ticks = 0
         while i < len(lines):
             line = lines[i]
+            if not line.strip():
+                inline_ticks = 0
             fence = _FENCE.match(line) if not inline_ticks else None
             if fence:
                 marker, info = fence.groups()
@@ -150,7 +160,19 @@ class InlineFileDelivery:
                         end += 1
                     ticks = end - pos
                     if not inline_ticks:
-                        inline_ticks = ticks
+                        # Only matched delimiters open inline code. Code spans
+                        # may cross soft line breaks, but not blank-line/fence
+                        # boundaries; an unmatched tick is ordinary text.
+                        paragraph = line[end:]
+                        following = i + 1
+                        while following < len(lines):
+                            candidate = lines[following]
+                            if not candidate.strip() or _FENCE.match(candidate):
+                                break
+                            paragraph += candidate
+                            following += 1
+                        if re.search(r"(?<!`)`{" + str(ticks) + r"}(?!`)", paragraph):
+                            inline_ticks = ticks
                     elif inline_ticks == ticks:
                         inline_ticks = 0
                     pieces.append(line[pos:end])
@@ -190,6 +212,14 @@ class InlineFileDelivery:
         )
         if extension and not name.lower().endswith(extension):
             name = (Path(name).stem or "attachment") + extension
+        if extension:
+            stem = name[: -len(extension)]
+            name = (
+                stem.encode("utf-8")[: 240 - len(extension)].decode(
+                    "utf-8", errors="ignore"
+                )
+                + name[-len(extension) :]
+            )
         unavailable = f"{name} (attachment unavailable)"
         if not extension:
             return unavailable
@@ -218,8 +248,19 @@ class InlineFileDelivery:
                 try:
                     with path.open("xb") as stream:
                         stream.write(data)
+                    register_delivery = getattr(
+                        self.workspace, "register_delivery_file", None
+                    )
+                    file_id = (
+                        register_delivery(str(path))
+                        if callable(register_delivery)
+                        else None
+                    )
                     ref = build_workspace_file_ref(
-                        workspace=self.workspace, file_path=path, mime_type=mime
+                        workspace=self.workspace,
+                        file_path=path,
+                        mime_type=mime,
+                        file_id=file_id,
                     )
                     if not ref.get("markdown_link"):
                         raise ValueError("Attachment registration returned no link")

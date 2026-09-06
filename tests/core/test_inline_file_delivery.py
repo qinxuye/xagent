@@ -177,6 +177,67 @@ def test_ordinary_stream_text_flushes_without_loss():
     assert emitted == source
 
 
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "Use `df to load.\n",
+        "Use `df to load.\n\n",
+        "Use ``df to load.\n",
+        "An unmatched ` tick.\n\nA later ` paragraph.\n",
+    ],
+)
+def test_unmatched_backtick_does_not_hide_later_delivery(delivery, prefix):
+    assert (
+        delivery.transform(prefix + link())
+        == prefix + "[report.csv](file:registered-0)"
+    )
+
+
+def test_inline_code_does_not_cross_paragraphs(delivery):
+    source = "`Example\n\n" + link() + "\n`"
+    assert (
+        delivery.transform(source) == "`Example\n\n[report.csv](file:registered-0)\n`"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "Config uses metadata: values",
+        "This explains base64 encoding without an attachment.",
+        "Normal data: values and base64.",
+    ],
+)
+def test_prose_markers_do_not_stall_stream(source):
+    for offset in range(len(source) + 1):
+        guard = InlineFileStreamGuard()
+        emitted = guard.feed(source[:offset]) + guard.feed(source[offset:])
+        assert not guard.held
+        assert len(emitted) >= len(source) - 6
+        assert emitted + guard.flush() == source
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~~", "````````"])
+def test_named_fence_stream_splits_withhold_payload(fence):
+    source = f"Download:\n{fence}base64 filename=report.csv\nYSwK\n{fence}"
+    for offset in range(len(source) + 1):
+        guard = InlineFileStreamGuard()
+        emitted = (
+            guard.feed(source[:offset]) + guard.feed(source[offset:]) + guard.flush()
+        )
+        assert "YSwK" not in emitted
+        assert source.startswith(emitted)
+
+
+def test_long_unicode_filename_fits_byte_budget(delivery):
+    result = delivery.transform(link(name="报" * 100 + ".csv"))
+    assert "file:registered-0" in result
+    path = Path(next(iter(delivery.workspace.files)))
+    assert len(path.name.encode("utf-8")) <= 240
+    assert path.suffix == ".csv"
+    assert path.read_bytes() == b"order,rate\r\nA01,0.15\r\n"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_child_runtime", [False, True])
 async def test_runtime_stream_end_and_buffered_result_share_registered_file(

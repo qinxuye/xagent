@@ -50,6 +50,26 @@ def _seed_workspace_task(db, *, task_id: int, username: str) -> User:
     return user
 
 
+def test_inline_delivery_rejects_registration_without_durable_task_owner(
+    monkeypatch, tmp_path, constrained_workspace_db
+):
+    from xagent.core.inline_file_delivery import InlineFileDelivery
+
+    engine, SessionLocal, db = constrained_workspace_db
+    monkeypatch.setattr(
+        "xagent.web.models.database.get_session_local", lambda: SessionLocal
+    )
+    monkeypatch.setattr("xagent.core.storage.manager.create_db_session", SessionLocal)
+    workspace = TaskWorkspace(id="web_task_9999", base_dir=str(tmp_path))
+    delivery = InlineFileDelivery(workspace)
+    result = delivery.transform("[report.csv](data:text/csv;base64,YSwK)")
+    assert result == "report.csv (attachment unavailable)"
+    assert db.query(UploadedFile).count() == 0
+    db.rollback()
+    assert engine.pool.checkedout() == 0
+    assert not list(workspace.output_dir.iterdir())
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("file_kind", ["csv", "xlsx", "png"])
 @pytest.mark.parametrize("delivery_kind", ["link", "fence"])
