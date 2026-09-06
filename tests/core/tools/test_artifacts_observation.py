@@ -6,6 +6,34 @@ from xagent.core.tools.artifacts import (
 )
 
 
+def test_invalid_artifact_is_not_described_as_displayable_or_delivered():
+    observation = format_tool_result_for_observation(
+        "python_executor",
+        {
+            "success": True,
+            "artifacts": [
+                {
+                    "file_id": "repair-id",
+                    "filename": "data.xlsx",
+                    "validation": {"status": "invalid"},
+                }
+            ],
+            "file_refs": [
+                {
+                    "file_id": "repair-id",
+                    "filename": "data.xlsx",
+                    "mime_type": "application/octet-stream",
+                    "validation": {"status": "invalid"},
+                }
+            ],
+        },
+    )
+    assert "Validation: INVALID" in observation
+    assert "produced displayable" not in observation
+    assert "[data.xlsx](file:repair-id)" in observation
+    assert "'validation': {'status': 'invalid'}" in observation
+
+
 def test_format_tool_result_for_observation_hides_image_path_when_artifact_exists():
     observation = format_tool_result_for_observation(
         "generate_image",

@@ -229,6 +229,31 @@ from xagent.config import (
 )
 
 
+@pytest.mark.parametrize("value", ["0", "-1", "garbage"])
+def test_artifact_validation_byte_budget_invalid(monkeypatch, value):
+    monkeypatch.setenv("XAGENT_ARTIFACT_VALIDATION_MAX_BYTES", value)
+    with pytest.raises(ValueError):
+        config.get_artifact_validation_max_bytes()
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "garbage"])
+def test_artifact_validation_timeout_invalid(monkeypatch, value):
+    monkeypatch.setenv("XAGENT_ARTIFACT_VALIDATION_TIMEOUT_SECONDS", value)
+    with pytest.raises(ValueError):
+        config.get_artifact_validation_timeout_seconds()
+
+
+def test_artifact_validation_defaults_and_overrides(monkeypatch):
+    monkeypatch.delenv("XAGENT_ARTIFACT_VALIDATION_MAX_BYTES", raising=False)
+    monkeypatch.delenv("XAGENT_ARTIFACT_VALIDATION_TIMEOUT_SECONDS", raising=False)
+    assert config.get_artifact_validation_max_bytes() == 32 * 1024 * 1024
+    assert config.get_artifact_validation_timeout_seconds() == 8
+    monkeypatch.setenv("XAGENT_ARTIFACT_VALIDATION_MAX_BYTES", "1024")
+    monkeypatch.setenv("XAGENT_ARTIFACT_VALIDATION_TIMEOUT_SECONDS", "0.5")
+    assert config.get_artifact_validation_max_bytes() == 1024
+    assert config.get_artifact_validation_timeout_seconds() == 0.5
+
+
 class TestEnvironmentVariableConstants:
     """Test environment variable constant names."""
 

@@ -80,6 +80,7 @@ def test_host_process_reregisters_sandbox_generated_files(tmp_path):
                         "file_id": SANDBOX_MINTED_FILE_ID,
                         "filename": "report.docx",
                         "file_path": str(generated),
+                        "validation": {"status": "valid", "sha256": "guest-claim"},
                     }
                 ],
                 "artifacts": [],
@@ -95,6 +96,8 @@ def test_host_process_reregisters_sandbox_generated_files(tmp_path):
     assert file_ref["filename"] == "report.docx"
     assert file_ref["size"] == generated.stat().st_size
     assert result["generated_files"] == ["report.docx"]
+    assert file_ref["validation"]["status"] == "invalid"
+    assert file_ref["validation"]["sha256"] != "guest-claim"
 
 
 def test_unreachable_sandbox_paths_are_left_untouched(tmp_path):
@@ -108,6 +111,7 @@ def test_unreachable_sandbox_paths_are_left_untouched(tmp_path):
                 "file_id": SANDBOX_MINTED_FILE_ID,
                 "filename": "report.docx",
                 "file_path": "/guest/only/report.docx",
+                "validation": {"status": "valid"},
             }
         ],
         "artifacts": [],
@@ -120,6 +124,7 @@ def test_unreachable_sandbox_paths_are_left_untouched(tmp_path):
     result = asyncio.run(wrapper.run_json_async({}))
 
     assert result["file_refs"][0]["file_id"] == SANDBOX_MINTED_FILE_ID
+    assert "validation" not in result["file_refs"][0]
 
 
 def _enter_sandbox_runner_mode(monkeypatch) -> None:

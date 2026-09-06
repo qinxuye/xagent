@@ -1497,6 +1497,13 @@ Build when you need.`,
       page: "Page {page} of {pages}",
       next: "Next",
     },
+    validation: {
+      checking: "Checking file format…",
+      valid: "Format readable · content not verified",
+      invalid: "File validation failed · repair required",
+      unchecked: "File not checked",
+      recheck: "Recheck",
+    },
     previewDialog: {
       buttons: {
         download: "Download",

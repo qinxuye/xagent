@@ -493,6 +493,13 @@ class SandboxedToolWrapper(AbstractBaseTool):
     async def run_json_async(self, args: Mapping[str, Any]) -> Any:
         """Execute the tool in the sandbox, then register its files here."""
         result = await self._run_json_in_sandbox(args)
+        # Guest metadata is not evidence about persisted host bytes. Only the
+        # host rebuild below can attach an authoritative validation report.
+        if isinstance(result, dict):
+            for field in ("file_refs", "artifacts"):
+                for ref in result.get(field) or []:
+                    if isinstance(ref, dict):
+                        ref.pop("validation", None)
         try:
             return await self._register_sandbox_outputs(result)
         except Exception:

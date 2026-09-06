@@ -1811,6 +1811,30 @@ def get_frontend_dist_dir() -> Path:
     return get_web_dir() / "frontend_dist"
 
 
+ARTIFACT_VALIDATION_MAX_BYTES = "XAGENT_ARTIFACT_VALIDATION_MAX_BYTES"
+ARTIFACT_VALIDATION_TIMEOUT_SECONDS = "XAGENT_ARTIFACT_VALIDATION_TIMEOUT_SECONDS"
+
+
+def get_artifact_validation_max_bytes() -> int:
+    """Maximum snapshot bytes to format-check (larger files remain unchecked)."""
+    value = int(os.getenv(ARTIFACT_VALIDATION_MAX_BYTES, str(32 * 1024 * 1024)))
+    if value <= 0:
+        raise ValueError(f"{ARTIFACT_VALIDATION_MAX_BYTES} must be positive")
+    return value
+
+
+def get_artifact_validation_timeout_seconds() -> float:
+    """Hard timeout for each isolated artifact parser process."""
+    import math
+
+    value = float(os.getenv(ARTIFACT_VALIDATION_TIMEOUT_SECONDS, "8"))
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            f"{ARTIFACT_VALIDATION_TIMEOUT_SECONDS} must be positive and finite"
+        )
+    return value
+
+
 def get_max_upload_size_bytes() -> int:
     """Get the maximum allowed upload size in bytes.
 
