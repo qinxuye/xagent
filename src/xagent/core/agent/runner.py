@@ -22,7 +22,7 @@ from .attachments import build_image_context_references
 from .checkpoint import CheckpointCorruptError, read_latest_checkpoint_payload
 from .context import ContextManager, ExecutionContext
 from .language import reset_output_language_to_request_context
-from .result import extract_assistant_message
+from .result import extract_assistant_message, set_assistant_message
 from .runtime import ExecutionInterrupted, PatternRuntime, load_pattern_checkpoint
 
 logger = logging.getLogger(__name__)
@@ -354,15 +354,7 @@ class AgentRunner:
                         if delivered_answer != raw_answer:
                             if isinstance(result, dict):
                                 result = dict(result)
-                                for key in (
-                                    "response",
-                                    "answer",
-                                    "output",
-                                    "content",
-                                    "message",
-                                ):
-                                    if isinstance(result.get(key), str):
-                                        result[key] = delivered_answer
+                                set_assistant_message(result, delivered_answer)
                             else:
                                 result = {"success": True, "output": delivered_answer}
                             for index in range(len(context.messages) - 1, -1, -1):
@@ -1235,9 +1227,7 @@ class AgentRunner:
 
         assistant_message = extract_assistant_message(normalized)
         if assistant_message:
-            for key in ("response", "answer", "output", "content", "message"):
-                if isinstance(normalized.get(key), str):
-                    normalized[key] = assistant_message
+            set_assistant_message(normalized, assistant_message)
         if assistant_message and not self._has_assistant_message(
             context, assistant_message
         ):

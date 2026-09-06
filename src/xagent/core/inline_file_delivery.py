@@ -22,6 +22,8 @@ from ..config import get_inline_file_delivery_max_bytes
 from .file_ref import build_workspace_file_ref
 
 logger = logging.getLogger(__name__)
+_MAX_FILES_PER_RUN = 8
+_DATA_PARAMETERS = r"(?:;[\w!#$%&'*+.^`|~-]+=[^;\s,()\[\]]*)*"
 
 # Never infer active HTML/SVG or executable types from untrusted model output.
 _EXTENSIONS = {
@@ -40,7 +42,7 @@ _EXTENSIONS = {
 }
 _DATA_LINK = re.compile(
     r"(?P<image>!)?\[(?P<label>[^\[\]\r\n]*)\]\("
-    r"data:(?P<mime>[\w.+/-]+)(?:;charset=[\w-]+)?;base64,"
+    r"data:(?P<mime>[\w.+/-]+)" + _DATA_PARAMETERS + r";base64,"
     r"(?P<payload>[^\s()\[\]]*)(?P<closed>\))?",
     re.IGNORECASE,
 )
@@ -48,7 +50,7 @@ _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)")
 _STREAM_FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})([^\r\n]*)")
 _NAMED_BASE64 = re.compile(r"base64[ \t]+filename=([^\r\n]+)\Z", re.IGNORECASE)
 _STREAM_MARKER = re.compile(
-    r"\]\(data:[\w.+/-]+(?:;charset=[\w-]+)?;base64,", re.IGNORECASE
+    r"\]\(data:[\w.+/-]+" + _DATA_PARAMETERS + r";base64,", re.IGNORECASE
 )
 _LIST_ITEM = re.compile(r"^( *)(?:[-+*]|\d{1,9}[.)])[ \t]+")
 _DATA_CONTINUATION = re.compile(
@@ -165,6 +167,8 @@ class InlineFileDelivery:
                 if named:
                     filename = named.group(1).strip().strip('"')
                     suffix = Path(filename).suffix.lower()
+                    if suffix == ".jpeg":
+                        suffix = ".jpg"
                     mime = next(
                         (m for m, ext in _EXTENSIONS.items() if suffix == ext),
                         "",
@@ -305,7 +309,10 @@ class InlineFileDelivery:
             key = (mime, hashlib.sha256(data).hexdigest())
             ref = self._refs.get(key)
             if ref is None:
-                if len(self._refs) >= 8 or self._bytes + len(data) > limit:
+                if (
+                    len(self._refs) >= _MAX_FILES_PER_RUN
+                    or self._bytes + len(data) > limit
+                ):
                     return unavailable
                 root = Path(self.workspace.workspace_dir).resolve()
                 output = Path(self.workspace.output_dir).resolve()

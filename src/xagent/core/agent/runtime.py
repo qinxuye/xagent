@@ -225,7 +225,7 @@ class PatternRuntime:
     last_final_answer_stream_message_id: str | None = None
     inline_file_delivery: InlineFileDelivery | None = None
     _inline_stream_guards: dict[str, InlineFileStreamGuard] = field(
-        default_factory=dict
+        default_factory=dict, init=False, repr=False
     )
     _active_llm_tasks: set[asyncio.Future[Any]] = field(
         default_factory=set,
@@ -352,11 +352,15 @@ class PatternRuntime:
             await stream.finish(content)
             return response
         except Exception as exc:
-            await stream.fail(str(exc))
+            if self.last_final_answer_stream_message_id != stream.message_id:
+                await stream.fail(str(exc))
             raise
         finally:
             # Includes cancellation, which is not an Exception on Python 3.11+.
-            await stream.fail("Final answer stream abandoned")
+            # Once end has started broadcasting, it cannot safely be retracted
+            # with a contradictory error frame after partial delivery.
+            if self.last_final_answer_stream_message_id != stream.message_id:
+                await stream.fail("Final answer stream abandoned")
 
     async def run_streaming_llm_call(
         self,

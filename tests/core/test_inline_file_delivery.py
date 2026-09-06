@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import json
 import textwrap
 from pathlib import Path
 
@@ -55,6 +56,34 @@ def test_explicit_named_base64_fence(delivery, fence, filename):
     source = f'{fence}base64 filename="{filename}"\nYSwK\nYiwK\n{fence}\n'
     assert delivery.transform(source) == f"[{filename}](file:registered-0)\n"
     assert Path(next(iter(delivery.workspace.files))).read_bytes() == b"a,\nb,\n"
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        ";name=x",
+        ";charset=utf-8;name=my%20file",
+        ";name=x;charset=UTF-8",
+        ";name=",
+        ";x-custom=base64",
+    ],
+)
+def test_data_uri_parameters_share_stream_and_delivery_grammar(delivery, parameters):
+    source = link().replace(";base64,", parameters + ";base64,")
+    for offset in range(len(source) + 1):
+        guard = InlineFileStreamGuard()
+        emitted = (
+            guard.feed(source[:offset]) + guard.feed(source[offset:]) + guard.flush()
+        )
+        assert "b3JkZX" not in emitted
+    assert delivery.transform(source) == "[report.csv](file:registered-0)"
+
+
+@pytest.mark.parametrize("extension", ["jpg", "jpeg", "JPEG"])
+def test_named_jpeg_alias_is_a_registered_download(delivery, extension):
+    source = f"```base64 filename=photo.{extension}\nYQ==\n```"
+    assert delivery.transform(source) == "[photo.jpg](file:registered-0)"
+    assert Path(next(iter(delivery.workspace.files))).read_bytes() == b"a"
 
 
 @pytest.mark.parametrize(
@@ -497,6 +526,85 @@ async def test_start_callback_failure_releases_guard(delivery):
     with pytest.raises(RuntimeError, match="Disconnected"):
         await runtime.start_final_answer_stream()
     assert not runtime._inline_stream_guards
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "cancel", "error"])
+async def test_terminal_broadcast_never_gets_contradictory_error(
+    delivery, monkeypatch, outcome
+):
+    from xagent.core.agent import PatternRuntime
+
+    events = []
+    end_sent = asyncio.Event()
+
+    async def outbound(event):
+        events.append(event)
+        if event["type"] == "final_answer_end":
+            end_sent.set()
+            if outcome == "cancel":
+                await asyncio.Event().wait()
+            if outcome == "error":
+                raise RuntimeError("Broadcast interrupted after delivery")
+
+    runtime = PatternRuntime(
+        outbound_message_handler=outbound, inline_file_delivery=delivery
+    )
+    monkeypatch.setattr(runtime, "_has_native_stream_chat", lambda llm: True)
+
+    async def response(*args, **kwargs):
+        return link()
+
+    monkeypatch.setattr(runtime, "run_streaming_llm_call", response)
+    task = asyncio.create_task(runtime.stream_final_answer(object()))
+    if outcome == "cancel":
+        await asyncio.wait_for(end_sent.wait(), timeout=5)
+        task.cancel()
+    if outcome == "success":
+        await task
+    else:
+        with pytest.raises(
+            asyncio.CancelledError if outcome == "cancel" else RuntimeError
+        ):
+            await task
+    assert [event["type"] for event in events].count("final_answer_end") == 1
+    assert not any(event["type"] == "final_answer_error" for event in events)
+    assert events[-1]["content"] == "[report.csv](file:registered-0)"
+    assert not runtime._inline_stream_guards
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer_key", ["response", "answer", "output", "content", "message"]
+)
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_delivery_changes_only_the_selected_result_field(
+    delivery, answer_key, legacy
+):
+    from xagent.core.agent import Agent, PatternRuntime
+    from xagent.core.agent.runner import AgentRunner
+
+    keys = ["response", "answer", "output", "content", "message"]
+    original = {
+        key: "" if keys.index(key) < keys.index(answer_key) else f"unrelated {key}"
+        for key in keys
+    }
+    original[answer_key] = json.dumps({"final_answer": link()}) if legacy else link()
+
+    class Pattern:
+        async def run(self, **kwargs):
+            return dict(original)
+
+    runner = AgentRunner(
+        Agent(name="field-test", patterns=[Pattern()]), workspace_enabled=False
+    )
+    result = await runner.run(
+        "Deliver", runtime=PatternRuntime(inline_file_delivery=delivery)
+    )
+    assert result[answer_key] == "[report.csv](file:registered-0)"
+    for key in keys:
+        if key != answer_key:
+            assert result[key] == original[key]
 
 
 @pytest.mark.asyncio
