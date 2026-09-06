@@ -48,9 +48,10 @@ def test_registers_exact_bytes_and_deduplicates_repeated_deliveries(delivery):
 
 
 @pytest.mark.parametrize("fence", ["```", "~~~~"])
-def test_explicit_named_base64_fence(delivery, fence):
-    source = f'{fence}base64 filename="report.csv"\nYSwK\nYiwK\n{fence}\n'
-    assert delivery.transform(source) == "[report.csv](file:registered-0)\n"
+@pytest.mark.parametrize("filename", ["report.csv", "report.CSV"])
+def test_explicit_named_base64_fence(delivery, fence, filename):
+    source = f'{fence}base64 filename="{filename}"\nYSwK\nYiwK\n{fence}\n'
+    assert delivery.transform(source) == f"[{filename}](file:registered-0)\n"
     assert Path(next(iter(delivery.workspace.files))).read_bytes() == b"a,\nb,\n"
 
 

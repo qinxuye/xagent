@@ -112,12 +112,9 @@ class InlineFileDelivery:
                 named = _NAMED_BASE64.fullmatch(info.strip())
                 if named:
                     filename = named.group(1).strip().strip('"')
+                    suffix = Path(filename).suffix.lower()
                     mime = next(
-                        (
-                            m
-                            for m, ext in _EXTENSIONS.items()
-                            if Path(filename).suffix.lower() == ext
-                        ),
+                        (m for m, ext in _EXTENSIONS.items() if suffix == ext),
                         "",
                     )
                     replacement = self._deliver(
