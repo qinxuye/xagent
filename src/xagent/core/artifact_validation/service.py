@@ -129,13 +129,13 @@ def _validate_snapshot(
     if len(data) > max_bytes:
         return unchecked("File exceeds the validation byte budget.")
 
-    def identity(stat: os.stat_result) -> tuple[int, ...]:
+    def identity(stat_result: os.stat_result) -> tuple[int, ...]:
         return (
-            stat.st_dev,
-            stat.st_ino,
-            stat.st_size,
-            stat.st_mtime_ns,
-            stat.st_ctime_ns,
+            stat_result.st_dev,
+            stat_result.st_ino,
+            stat_result.st_size,
+            stat_result.st_mtime_ns,
+            stat_result.st_ctime_ns,
         )
 
     if identity(before) != identity(after) or identity(after) != identity(current):

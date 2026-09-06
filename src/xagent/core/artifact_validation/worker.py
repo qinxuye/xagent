@@ -30,6 +30,7 @@ def main() -> None:
     data = sys.stdin.buffer.read(limits.max_bytes + 1)
     report = default_registry().validate(ArtifactContent(sys.argv[1], data, limits))
     output.write(json.dumps(report.as_dict()))
+    output.flush()
 
 
 if __name__ == "__main__":

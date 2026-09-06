@@ -45,7 +45,7 @@ def check_csv(content: ArtifactContent) -> None:
 
 def check_pdf(content: ArtifactContent) -> None:
     from pypdf import PdfReader
-    from pypdf.errors import PdfReadError
+    from pypdf.errors import DependencyError, PdfReadError, PyPdfError
     from pypdf.generic import ArrayObject, EncodedStreamObject
 
     if not content.data.lstrip().startswith(b"%PDF-"):
@@ -56,8 +56,13 @@ def check_pdf(content: ArtifactContent) -> None:
         reader = PdfReader(BytesIO(content.data), strict=False)
         if reader.is_encrypted:
             raise UncheckedArtifact("Encrypted PDFs require a password to validate.")
-        if len(reader.pages) > min(content.limits.max_units, 500):
-            raise UncheckedArtifact("PDF exceeds the page budget.")
+        # A fixed parser ceiling, not partial validation: larger PDFs are
+        # unchecked in their entirety, never certified from a page sample.
+        page_limit = min(content.limits.max_units, 500)
+        if len(reader.pages) > page_limit:
+            raise UncheckedArtifact(
+                f"PDF exceeds the page budget ({page_limit} pages)."
+            )
         expanded = 0
         for page in reader.pages:
             raw_contents = page.get("/Contents")
@@ -85,9 +90,14 @@ def check_pdf(content: ArtifactContent) -> None:
                     # from a genuinely empty compressed stream, without treating
                     # successful nonempty recovery as strict-conformance failure.
                     if not part.get_data():
+                        encoded = getattr(part, "_data", None)
+                        if not isinstance(encoded, bytes):
+                            raise UncheckedArtifact(
+                                "PDF reader does not expose encoded stream bytes for recovery verification."
+                            )
                         try:
                             decoder = zlib.decompressobj()
-                            decoded = decoder.decompress(part._data, 1)
+                            decoded = decoder.decompress(encoded, 1)
                         except zlib.error as exc:
                             raise UncheckedArtifact(
                                 "PDF content stream recovery could not be verified."
@@ -104,6 +114,10 @@ def check_pdf(content: ArtifactContent) -> None:
     except (PdfReadError, ValueError, KeyError, TypeError, OSError) as exc:
         raise InvalidArtifact(
             "PDF structure or page content cannot be decoded."
+        ) from exc
+    except (PyPdfError, DependencyError) as exc:
+        raise UncheckedArtifact(
+            "PDF reader could not complete validation (dependency or parser limit)."
         ) from exc
 
 

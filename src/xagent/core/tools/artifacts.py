@@ -222,6 +222,14 @@ def _format_artifact_lines(artifacts: list[Any]) -> list[str]:
             lines.append(
                 "  Validation: UNCHECKED. Do not claim this file passed validation."
             )
+            checks = validation.get("checks")
+            if isinstance(checks, list):
+                for check in checks:
+                    if isinstance(check, dict) and check.get("status") == "unchecked":
+                        message = check.get("message")
+                        if isinstance(message, str) and message.strip():
+                            lines.append(f"  Validation reason: {message}")
+                            break
     return lines
 
 

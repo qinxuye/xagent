@@ -248,6 +248,10 @@ def test_artifact_validation_defaults_and_overrides(monkeypatch):
     monkeypatch.delenv("XAGENT_ARTIFACT_VALIDATION_TIMEOUT_SECONDS", raising=False)
     assert config.get_artifact_validation_max_bytes() == 32 * 1024 * 1024
     assert config.get_artifact_validation_timeout_seconds() == 8
+    monkeypatch.setenv("XAGENT_ARTIFACT_VALIDATION_MAX_BYTES", "")
+    monkeypatch.setenv("XAGENT_ARTIFACT_VALIDATION_TIMEOUT_SECONDS", "")
+    assert config.get_artifact_validation_max_bytes() == 32 * 1024 * 1024
+    assert config.get_artifact_validation_timeout_seconds() == 8
     monkeypatch.setenv("XAGENT_ARTIFACT_VALIDATION_MAX_BYTES", "1024")
     monkeypatch.setenv("XAGENT_ARTIFACT_VALIDATION_TIMEOUT_SECONDS", "0.5")
     assert config.get_artifact_validation_max_bytes() == 1024
@@ -265,7 +269,7 @@ def test_artifact_validation_and_upload_share_size_parser(monkeypatch, value, ex
     assert config.get_max_upload_size_bytes() == expected
 
 
-@pytest.mark.parametrize("value", ["inf", "infM", "nan", "nanM", "-1M", ""])
+@pytest.mark.parametrize("value", ["inf", "infM", "nan", "nanM", "-1M"])
 def test_artifact_validation_size_rejects_invalid_and_nonfinite(monkeypatch, value):
     monkeypatch.setenv("XAGENT_ARTIFACT_VALIDATION_MAX_BYTES", value)
     with pytest.raises(ValueError):

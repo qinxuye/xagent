@@ -239,8 +239,11 @@ def test_worker_keeps_stricter_address_space_limits(existing, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["worker", "data.csv", "1024"])
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(b"a,b\n1,2\n")))
     output = StringIO()
+    flush = Mock(wraps=output.flush)
+    monkeypatch.setattr(output, "flush", flush)
     monkeypatch.setattr(sys, "stdout", output)
     worker.main()
+    flush.assert_called_once_with()
     assert applied == [
         tuple(1024**3 if limit == -1 else min(limit, 1024**3) for limit in existing)
     ]
@@ -349,6 +352,65 @@ def test_pdf_does_not_certify_silently_discarded_flate_content(
     assert report.status == expected
     if expected == "unchecked":
         assert "stream recovery" in report.checks[0].message
+
+
+@pytest.mark.parametrize(
+    "pages,max_units,expected",
+    [(500, 200_000, "valid"), (501, 200_000, "unchecked"), (3, 2, "unchecked")],
+)
+def test_pdf_page_ceiling_is_not_partial_success(pages, max_units, expected):
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=10, height=10)
+    output = BytesIO()
+    writer.write(output)
+    report = check(output.getvalue(), "pages.pdf", max_units=max_units)
+    assert report.status == expected
+    if expected == "unchecked":
+        assert f"{min(max_units, 500)} pages" in report.checks[-1].message
+
+
+@pytest.mark.parametrize("error_name", ["LimitReachedError", "DependencyError"])
+def test_pdf_reader_limits_and_dependencies_are_expected_unchecked(
+    monkeypatch, caplog, error_name
+):
+    import pypdf
+    from pypdf import errors
+
+    error_type = getattr(errors, error_name)
+    monkeypatch.setattr(
+        pypdf, "PdfReader", Mock(side_effect=error_type("private parser detail"))
+    )
+    report = check(b"%PDF-1.7\n", "limited.pdf")
+    assert report.status == "unchecked"
+    assert "dependency or parser limit" in report.checks[-1].message
+    assert "private parser detail" not in str(report.as_dict())
+    assert not caplog.records
+
+
+def test_pdf_missing_encoded_stream_api_has_explicit_diagnostic(monkeypatch):
+    from types import SimpleNamespace
+
+    import pypdf
+    from pypdf.generic import EncodedStreamObject, NameObject
+
+    stream = EncodedStreamObject()
+    stream[NameObject("/Filter")] = NameObject("/FlateDecode")
+    stream._data = b""
+    del stream._data
+    monkeypatch.setattr(stream, "get_data", lambda: b"")
+    monkeypatch.setattr(
+        pypdf,
+        "PdfReader",
+        lambda *args, **kwargs: SimpleNamespace(
+            is_encrypted=False, pages=[{"/Contents": stream}]
+        ),
+    )
+    report = check(b"%PDF-1.7\n", "stream.pdf")
+    assert report.status == "unchecked"
+    assert "does not expose encoded stream bytes" in report.checks[-1].message
 
 
 def test_readable_pdf_with_recoverable_xref_is_not_invalid():

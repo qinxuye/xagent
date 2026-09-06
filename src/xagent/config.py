@@ -1818,7 +1818,7 @@ ARTIFACT_VALIDATION_TIMEOUT_SECONDS = "XAGENT_ARTIFACT_VALIDATION_TIMEOUT_SECOND
 def get_artifact_validation_max_bytes() -> int:
     """Maximum snapshot bytes to format-check (larger files remain unchecked)."""
     return _parse_size_bytes(
-        os.getenv(ARTIFACT_VALIDATION_MAX_BYTES, "32M"), ARTIFACT_VALIDATION_MAX_BYTES
+        os.getenv(ARTIFACT_VALIDATION_MAX_BYTES) or "32M", ARTIFACT_VALIDATION_MAX_BYTES
     )
 
 
@@ -1826,7 +1826,7 @@ def get_artifact_validation_timeout_seconds() -> float:
     """Hard timeout for each isolated artifact parser process."""
     import math
 
-    value = float(os.getenv(ARTIFACT_VALIDATION_TIMEOUT_SECONDS, "8"))
+    value = float(os.getenv(ARTIFACT_VALIDATION_TIMEOUT_SECONDS) or "8")
     if not math.isfinite(value) or value <= 0:
         raise ValueError(
             f"{ARTIFACT_VALIDATION_TIMEOUT_SECONDS} must be positive and finite"

@@ -4,6 +4,7 @@ import { useI18n } from '@/contexts/i18n-context'
 
 type Status = 'valid' | 'invalid' | 'unchecked'
 type DisplayReport = { status: Status | 'error'; supported: boolean }
+const STATUSES: ReadonlySet<string> = new Set(['valid', 'invalid', 'unchecked'])
 
 async function readReport(response: Response): Promise<DisplayReport> {
   if (!response.ok) throw new Error('Validation unavailable')
@@ -13,10 +14,9 @@ async function readReport(response: Response): Promise<DisplayReport> {
     throw new Error('Not a validation response')
   }
   const data = await response.json()
-  const statuses = ['valid', 'invalid', 'unchecked']
-  if (!data || !statuses.includes(data.status) ||
+  if (!data || !STATUSES.has(data.status) ||
       !Array.isArray(data.checks) || !data.checks.length ||
-      !data.checks.every((c: { status?: unknown } | null) => c && statuses.includes(String(c.status)))) {
+      !data.checks.every((c: { status?: unknown } | null) => c && STATUSES.has(String(c.status)))) {
     throw new Error('Invalid report')
   }
   if (data.status !== 'unchecked' &&
