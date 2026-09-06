@@ -37,6 +37,7 @@ from ...config import (
     get_storage_root,
     get_uploads_dir,
 )
+from ...core.artifact_validation.defaults import default_registry
 from ...core.artifact_validation.service import validate_artifact
 from ...core.execution_scope import resolve_execution_scope
 from ...core.file_storage import get_user_file_storage, normalize_storage_key
@@ -236,6 +237,7 @@ async def _inline_preview_response(
     file_id: Optional[str] = None,
     extra_headers: Optional[Dict[str, str]] = None,
     validation_only: bool = False,
+    public_validation: bool = False,
 ) -> Response:
     """Build the final inline preview FileResponse, rasterizing SVG to PNG.
 
@@ -252,9 +254,11 @@ async def _inline_preview_response(
     """
 
     if validation_only:
-        report = await asyncio.to_thread(validate_artifact, path, filename=filename)
+        report = await asyncio.to_thread(
+            validate_artifact, path, filename=filename, public=public_validation
+        )
         return JSONResponse(
-            report.as_dict(),
+            {**report.as_dict(), "supported": default_registry().supports(filename)},
             media_type="application/vnd.xagent.validation+json",
             headers={"Cache-Control": "no-store"},
         )
@@ -2110,6 +2114,7 @@ async def public_preview_file(
                 file_id=file_id if is_valid_uuid(file_id) else None,
                 extra_headers=_PUBLIC_PREVIEW_CACHE_HEADERS,
                 validation_only=validation_only,
+                public_validation=True,
             )
     else:
         # Try to resolve as legacy path across all user directories
@@ -2170,6 +2175,7 @@ async def public_preview_file(
         file_id=file_id if is_valid_uuid(file_id) else None,
         extra_headers=_PUBLIC_PREVIEW_CACHE_HEADERS,
         validation_only=validation_only,
+        public_validation=True,
     )
 
 

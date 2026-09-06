@@ -205,7 +205,10 @@ def _format_artifact_lines(artifacts: list[Any]) -> list[str]:
         )
         validation = artifact.get("validation")
         if not isinstance(validation, dict):
-            validation = {}
+            lines.append(
+                "  Validation: NOT RUN. No validation report was produced for this file."
+            )
+            continue
         status = validation.get("status", "unchecked")
         if status == "invalid":
             lines.append(

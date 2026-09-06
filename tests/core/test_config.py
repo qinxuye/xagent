@@ -254,6 +254,24 @@ def test_artifact_validation_defaults_and_overrides(monkeypatch):
     assert config.get_artifact_validation_timeout_seconds() == 0.5
 
 
+@pytest.mark.parametrize(
+    "value,expected",
+    [("32M", 32 * 1024**2), ("1.5MB", 1572864), ("512K", 524288), ("1024", 1024)],
+)
+def test_artifact_validation_and_upload_share_size_parser(monkeypatch, value, expected):
+    monkeypatch.setenv("XAGENT_ARTIFACT_VALIDATION_MAX_BYTES", value)
+    monkeypatch.setenv("XAGENT_MAX_UPLOAD_SIZE", value)
+    assert config.get_artifact_validation_max_bytes() == expected
+    assert config.get_max_upload_size_bytes() == expected
+
+
+@pytest.mark.parametrize("value", ["inf", "infM", "nan", "nanM", "-1M", ""])
+def test_artifact_validation_size_rejects_invalid_and_nonfinite(monkeypatch, value):
+    monkeypatch.setenv("XAGENT_ARTIFACT_VALIDATION_MAX_BYTES", value)
+    with pytest.raises(ValueError):
+        config.get_artifact_validation_max_bytes()
+
+
 class TestEnvironmentVariableConstants:
     """Test environment variable constant names."""
 

@@ -26,6 +26,9 @@ from .models import CheckResult, ValidationReport, unchecked
 logger = logging.getLogger(__name__)
 
 _slots = BoundedSemaphore(2)
+# Public capability URLs may be shared widely. Reserve at least one worker
+# slot for authenticated/tool callers and never queue public requests here.
+_public_slots = BoundedSemaphore(1)
 _cache_lock = Lock()
 _cache: OrderedDict[tuple[str, str, int], ValidationReport] = OrderedDict()
 
@@ -68,7 +71,7 @@ def _run_checks(
 
 
 def validate_artifact(
-    path: str | Path, *, filename: str | None = None
+    path: str | Path, *, filename: str | None = None, public: bool = False
 ) -> ValidationReport:
     if in_sandbox_tool_runner():
         return unchecked("Awaiting host-side file validation.")
@@ -80,15 +83,22 @@ def validate_artifact(
         max_bytes = get_artifact_validation_max_bytes()
         timeout = get_artifact_validation_timeout_seconds()
     except ValueError:
+        logger.warning("Invalid artifact validation configuration; checks are disabled")
         return unchecked("Validation configuration is invalid.")
+    if public and not _public_slots.acquire(blocking=False):
+        return unchecked("Public validation capacity is busy; retry later.")
     # Acquire before loading bytes, not merely before launching the parser.
     # Concurrent preview requests must not each retain a max-sized snapshot.
-    if not _slots.acquire(timeout=timeout):
-        return unchecked("Validation capacity is busy; file has not been checked.")
     try:
-        return _validate_snapshot(path, filename, max_bytes, timeout)
+        if not _slots.acquire(timeout=timeout):
+            return unchecked("Validation capacity is busy; file has not been checked.")
+        try:
+            return _validate_snapshot(path, filename, max_bytes, timeout)
+        finally:
+            _slots.release()
     finally:
-        _slots.release()
+        if public:
+            _public_slots.release()
 
 
 def _validate_snapshot(

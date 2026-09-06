@@ -8,12 +8,12 @@ import { I18nProvider } from '@/contexts/i18n-context'
 import { InlineFilePreview } from './inline-file-preview'
 
 const reportHeaders = { 'content-type': 'application/vnd.xagent.validation+json' }
-const report = (status: string, message = '') => new Response(JSON.stringify({ status, sha256: '0'.repeat(64), checks: [{ status, message }] }), { headers: reportHeaders })
+const report = (status: string, message = '', supported = true) => new Response(JSON.stringify({ status, supported, sha256: '0'.repeat(64), checks: [{ status, message }] }), { headers: reportHeaders })
 const wrap = (children: React.ReactNode, request = vi.fn(), extra = {}) => <I18nProvider>
   <FileAccessProvider policy={{ ...defaultFileAccessPolicy, request, ...extra }}>{children}</FileAccessProvider>
 </I18nProvider>
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); localStorage.removeItem('app_locale') })
 
 describe('ArtifactValidation', () => {
   it.each(['valid', 'invalid', 'unchecked'] as const)('shows %s without hiding repair/download access', async status => {
@@ -36,14 +36,15 @@ describe('ArtifactValidation', () => {
   })
 
   it.each([
-    new Response('', { status: 403 }), report('made-up'), new Response('not json'),
+    new Response('', { status: 403 }), new Response('', { status: 500 }), report('made-up'), new Response('not json'),
     new Response('{"status":"valid"}', { headers: reportHeaders }),
     new Response('{"status":"valid","checks":[{"status":"valid"}]}', { headers: reportHeaders }),
     new Response(JSON.stringify({ status: 'valid', sha256: '0'.repeat(64), checks: [{ status: 'unchecked' }] }), { headers: reportHeaders }),
     new Response(JSON.stringify({ status: 'valid', sha256: '0'.repeat(64), checks: [{ status: 'valid' }] }), { headers: { 'content-type': 'application/json' } }),
   ])('does not treat a failed/malformed request as a pass', async response => {
     render(wrap(<ArtifactValidation fileId="one">file</ArtifactValidation>, vi.fn().mockResolvedValue(response)))
-    await screen.findByText('File not checked')
+    await screen.findByText('Unable to request file validation · try again')
+    expect(screen.queryByText('File not checked')).toBeNull()
   })
 
   it('ignores an old response after the file changes', async () => {
@@ -76,10 +77,40 @@ describe('ArtifactValidation', () => {
     expect(fetchMock.mock.calls[0][1].headers.has('Authorization')).toBe(false)
   })
 
-  it('is wired to inline attachments without requiring a skill or tool trace', async () => {
-    const request = vi.fn().mockResolvedValue(report('unchecked'))
+  it('hides unsupported-format controls using the server capability, retaining the file', async () => {
+    const request = vi.fn().mockResolvedValue(report('unchecked', 'No validator is installed for this format.', false))
     render(wrap(<InlineFilePreview source={{ fileId: '123e4567-e89b-12d3-a456-426614174000', filename: 'notes.txt' }} />, request))
-    await screen.findByText('File not checked')
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: 'Recheck' })).toBeNull()
     expect(screen.getByRole('link')).toHaveTextContent('notes.txt')
+  })
+
+  it('distinguishes a network error and permits a successful retry', async () => {
+    const request = vi.fn().mockRejectedValueOnce(new TypeError('offline')).mockResolvedValueOnce(report('valid'))
+    render(wrap(<ArtifactValidation fileId="one">file</ArtifactValidation>, request))
+    await screen.findByText('Unable to request file validation · try again')
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck' }))
+    await screen.findByText('Format readable · content not verified')
+  })
+
+  it('reports a client timeout as a request error, not a completed unchecked report', async () => {
+    vi.useFakeTimers()
+    const request = vi.fn().mockImplementation((_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+    }))
+    render(wrap(<ArtifactValidation fileId="one">file</ArtifactValidation>, request))
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_001) })
+    expect(screen.getByText('Unable to request file validation · try again')).toBeInTheDocument()
+    expect(request.mock.calls[0][1].signal.aborted).toBe(true)
+  })
+
+  it('uses translated machine-status labels instead of raw English parser diagnostics', async () => {
+    localStorage.setItem('app_locale', 'zh')
+    const request = vi.fn().mockResolvedValue(report('invalid', 'PDF header is missing.'))
+    render(wrap(<ArtifactValidation fileId="one">file</ArtifactValidation>, request))
+    await screen.findByText('文件校验失败 · 需要修复')
+    expect(screen.queryByText('PDF header is missing.')).toBeNull()
+    expect(screen.getByRole('button', { name: '重新检查' })).toBeInTheDocument()
   })
 })

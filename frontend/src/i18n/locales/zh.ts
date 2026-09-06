@@ -1502,6 +1502,7 @@ const zh = {
       valid: "格式可读 · 内容尚未核验",
       invalid: "文件校验失败 · 需要修复",
       unchecked: "文件未校验",
+      error: "无法请求文件校验 · 请重试",
       recheck: "重新检查",
     },
     previewDialog: {

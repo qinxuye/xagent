@@ -1502,6 +1502,7 @@ Build when you need.`,
       valid: "Format readable · content not verified",
       invalid: "File validation failed · repair required",
       unchecked: "File not checked",
+      error: "Unable to request file validation · try again",
       recheck: "Recheck",
     },
     previewDialog: {

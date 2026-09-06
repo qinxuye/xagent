@@ -34,6 +34,24 @@ def test_invalid_artifact_is_not_described_as_displayable_or_delivered():
     assert "'validation': {'status': 'invalid'}" in observation
 
 
+def test_missing_validation_report_differs_from_inconclusive_validation():
+    artifact = {"file_id": "image-id", "filename": "image.png"}
+    not_run = format_tool_result_for_observation(
+        "generate_image", {"success": True, "artifacts": [artifact]}
+    )
+    unchecked = format_tool_result_for_observation(
+        "generate_image",
+        {
+            "success": True,
+            "artifacts": [{**artifact, "validation": {"status": "unchecked"}}],
+        },
+    )
+    assert "Validation: NOT RUN" in not_run
+    assert "Validation: UNCHECKED" not in not_run
+    assert "Validation: UNCHECKED" in unchecked
+    assert "Validation: NOT RUN" not in unchecked
+
+
 def test_format_tool_result_for_observation_hides_image_path_when_artifact_exists():
     observation = format_tool_result_for_observation(
         "generate_image",

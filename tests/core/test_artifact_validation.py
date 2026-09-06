@@ -4,6 +4,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+import struct
 import subprocess
 import sys
 from io import BytesIO
@@ -132,6 +134,101 @@ def test_archive_budgets_and_unsafe_xml():
         for name in ["[Content_Types].xml", "_rels/.rels", "xl/workbook.xml"]:
             archive.writestr(name, '<!DOCTYPE a [<!ENTITY x "value">]><a>&x;</a>')
     assert check(stream.getvalue(), "data.xlsx").status == "invalid"
+
+
+@pytest.mark.parametrize(
+    "suffix,root",
+    [
+        ("xlsx", "xl/workbook.xml"),
+        ("docx", "word/document.xml"),
+        ("pptx", "ppt/presentation.xml"),
+    ],
+)
+@pytest.mark.parametrize(
+    "bad_member",
+    ["/absolute.xml", "../outside.xml", "xl/../../outside.xml", "[Content_Types].xml"],
+)
+def test_office_package_rejects_ambiguous_members(suffix, root, bad_member):
+    stream = BytesIO()
+    with ZipFile(stream, "w") as archive:
+        for name in ["[Content_Types].xml", "_rels/.rels", root, bad_member]:
+            archive.writestr(name, "<a/>")
+    report = check(stream.getvalue(), f"file.{suffix}")
+    assert report.status == "invalid"
+    assert len(report.checks) == 1
+    assert "ambiguous member paths" in report.checks[0].message
+
+
+@pytest.mark.parametrize(
+    "missing", ["[Content_Types].xml", "_rels/.rels", "xl/workbook.xml"]
+)
+def test_office_package_rejects_missing_required_parts(missing):
+    stream = BytesIO()
+    with ZipFile(stream, "w") as archive:
+        for name in ["[Content_Types].xml", "_rels/.rels", "xl/workbook.xml"]:
+            if name != missing:
+                archive.writestr(name, "<a/>")
+    report = check(stream.getvalue(), "file.xlsx")
+    assert report.status == "invalid"
+    assert "missing required document parts" in report.checks[0].message
+
+
+def test_office_package_entry_count_and_encrypted_member_guards():
+    stream = BytesIO()
+    with ZipFile(stream, "w") as archive:
+        for name in ["[Content_Types].xml", "_rels/.rels", "xl/workbook.xml"]:
+            archive.writestr(name, "<a/>")
+    report = check(stream.getvalue(), "file.xlsx", max_entries=2)
+    assert report.status == "unchecked"
+    assert "expansion budget" in report.checks[0].message
+
+    data = bytearray(stream.getvalue())
+    # Mark the first local and central-directory entry encrypted. The guard
+    # must stop before attempting to decode its untrusted payload.
+    struct.pack_into("<H", data, data.index(b"PK\x03\x04") + 6, 1)
+    struct.pack_into("<H", data, data.index(b"PK\x01\x02") + 8, 1)
+    report = check(bytes(data), "file.xlsx")
+    assert report.status == "unchecked"
+    assert "Encrypted Office" in report.checks[0].message
+
+
+def test_readable_pdf_with_recoverable_xref_is_not_invalid():
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.errors import PdfReadError
+
+    stream = BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.write(stream)
+    original = stream.getvalue()
+    match = re.search(rb"startxref\s+(\d+)", original)
+    assert match
+    data = (
+        original[: match.start(1)]
+        + str(int(match[1]) + 1).encode()
+        + original[match.end(1) :]
+    )
+    with pytest.raises(PdfReadError):
+        PdfReader(BytesIO(data), strict=True)
+    assert len(PdfReader(BytesIO(data), strict=False).pages) == 1
+    assert check(data, "recoverable.pdf").status == "valid"
+    assert check(b"%PDF-1.7\nnot a document", "broken.pdf").status == "invalid"
+
+
+def test_cache_keeps_filename_and_extension_with_identical_bytes(tmp_path, monkeypatch):
+    service._cache.clear()
+    path = tmp_path / "artifact.bin"
+    path.write_bytes(b"a,b\n1,2")
+    run = Mock(wraps=service._run_checks)
+    monkeypatch.setattr(service, "_run_checks", run)
+    for filename, status in [
+        ("one.csv", "valid"),
+        ("two.csv", "valid"),
+        ("one.pdf", "invalid"),
+    ]:
+        assert validate_artifact(path, filename=filename).status == status
+        assert validate_artifact(path, filename=filename).status == status
+    assert run.call_count == 3
 
 
 def test_image_pixel_budget_and_pdf_encryption():
@@ -283,9 +380,60 @@ def test_real_office_dependency_absence_is_unchecked(monkeypatch):
     assert [c.status for c in report.checks] == ["valid", "unchecked"]
 
 
-def test_invalid_configuration_preserves_an_unchecked_report(tmp_path, monkeypatch):
+def test_invalid_configuration_preserves_an_unchecked_report(
+    tmp_path, monkeypatch, caplog
+):
     monkeypatch.setenv("XAGENT_ARTIFACT_VALIDATION_MAX_BYTES", "invalid")
     assert validate_artifact(tmp_path / "file.csv").status == "unchecked"
+    assert "Invalid artifact validation configuration" in caplog.text
+
+
+def test_public_validation_cannot_exhaust_private_capacity(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import BoundedSemaphore, Event
+
+    service._cache.clear()
+    monkeypatch.setattr(service, "_slots", BoundedSemaphore(2))
+    monkeypatch.setattr(service, "_public_slots", BoundedSemaphore(1))
+    entered, release = Event(), Event()
+    path = tmp_path / "data.csv"
+    path.write_bytes(b"a,b")
+
+    def slow_public(filename, data, *_args):
+        if filename == "public.csv":
+            entered.set()
+            assert release.wait(5)
+        return check(data, filename)
+
+    monkeypatch.setattr(service, "_run_checks", slow_public)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        public = pool.submit(
+            validate_artifact, path, filename="public.csv", public=True
+        )
+        try:
+            assert entered.wait(5)
+            assert validate_artifact(path, public=True).status == "unchecked"
+            assert validate_artifact(path).status == "valid"
+        finally:
+            release.set()
+        assert public.result(timeout=5).status == "valid"
+    assert validate_artifact(path, public=True).status == "valid"
+
+
+def test_public_validation_releases_capacity_on_unexpected_failure(
+    tmp_path, monkeypatch
+):
+    from threading import BoundedSemaphore
+
+    public = BoundedSemaphore(1)
+    monkeypatch.setattr(service, "_public_slots", public)
+    monkeypatch.setattr(
+        service, "_validate_snapshot", Mock(side_effect=RuntimeError("failed"))
+    )
+    with pytest.raises(RuntimeError, match="failed"):
+        validate_artifact(tmp_path / "data.csv", public=True)
+    assert public.acquire(blocking=False)
+    public.release()
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO not available")

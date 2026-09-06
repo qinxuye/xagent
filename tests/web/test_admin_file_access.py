@@ -146,6 +146,7 @@ def test_validation_uses_current_bytes_and_keeps_raw_download(
     assert first.headers["cache-control"] == "no-store"
     assert first.headers["content-type"] == "application/vnd.xagent.validation+json"
     assert first.json()["status"] == "valid"
+    assert first.json()["supported"] is True
     path.write_text('a,b\n"broken')
     second = client.get(url, params={"validation_only": "true"}, headers=headers)
     assert second.json()["status"] == "invalid"
@@ -189,6 +190,35 @@ def test_validation_preserves_private_and_widget_authority(
     assert public.status_code == 403
     assert "token" in public.json()["detail"].lower()
     validator.assert_not_called()
+
+
+@pytest.mark.parametrize("route,public", [("preview", False), ("public/preview", True)])
+def test_validation_reports_format_support_and_public_capacity_class(
+    test_db, temp_uploads_dir, monkeypatch, route, public
+):
+    from unittest.mock import Mock
+
+    from xagent.core.artifact_validation.models import unchecked
+
+    _admin, owner, app, session = test_db
+    task = Task(user_id=owner.id, title="unsupported")
+    session.add(task)
+    session.commit()
+    file = create_uploaded_file(
+        session, temp_uploads_dir, owner.id, task.id, "notes.txt", "notes"
+    )
+    validator = Mock(
+        return_value=unchecked("No validator is installed for this format.")
+    )
+    monkeypatch.setattr(files_module, "validate_artifact", validator)
+    response = TestClient(app).get(
+        f"/api/files/{route}/{file.file_id}?validation_only=true",
+        headers=create_auth_headers(owner),
+    )
+    assert response.status_code == 200
+    assert response.json()["supported"] is False
+    assert response.json()["status"] == "unchecked"
+    assert validator.call_args.kwargs["public"] is public
 
 
 def test_validation_does_not_redirect_away_from_checks(

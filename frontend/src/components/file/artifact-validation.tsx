@@ -3,7 +3,7 @@ import { useFileAccess } from '@/contexts/file-access-context'
 import { useI18n } from '@/contexts/i18n-context'
 
 type Status = 'valid' | 'invalid' | 'unchecked'
-type DisplayReport = { status: Status; message: string }
+type DisplayReport = { status: Status | 'error'; supported: boolean }
 
 async function readReport(response: Response): Promise<DisplayReport> {
   if (!response.ok) throw new Error('Validation unavailable')
@@ -26,10 +26,11 @@ async function readReport(response: Response): Promise<DisplayReport> {
   if (data.status === 'valid' && !data.checks.every((c: { status: string }) => c.status === 'valid')) {
     throw new Error('Incomplete checks')
   }
-  const message = data.checks
-    .filter((c: { status: string; message?: unknown }) => c.status !== 'valid' && typeof c.message === 'string')
-    .map((c: { message: string }) => c.message).join(' ')
-  return { status: data.status, message }
+  // The backend owns format support. Do not duplicate a suffix allowlist in
+  // the UI or show an endless Recheck action for formats without a validator.
+  // Machine statuses drive localized presentation; English parser diagnostics
+  // remain in the API/model report rather than leaking into the user's locale.
+  return { status: data.status, supported: data.supported !== false }
 }
 
 /** Server-authoritative, current-byte checks, independent of preview renderers. */
@@ -55,7 +56,7 @@ export function ArtifactValidation({ fileId, children }: {
         const report = await readReport(response)
         if (active) setResult({ key, ...report })
       } catch {
-        if (active) setResult({ key, status: 'unchecked', message: '' })
+        if (active) setResult({ key, status: 'error', supported: true })
       } finally {
         clearTimeout(timeout)
       }
@@ -70,6 +71,7 @@ export function ArtifactValidation({ fileId, children }: {
 
   if (!url) return <>{children}</>
   const current = result?.key === key ? result : undefined
+  if (current?.supported === false) return <>{children}</>
   const label = current?.status ?? 'checking'
   return (
     <div data-artifact-validation={label}>
@@ -83,7 +85,6 @@ export function ArtifactValidation({ fileId, children }: {
           </button>
         ) : null}
       </div>
-      {current?.message ? <p className="text-xs text-muted-foreground">{current.message}</p> : null}
       <React.Fragment key={key}>{children}</React.Fragment>
     </div>
   )

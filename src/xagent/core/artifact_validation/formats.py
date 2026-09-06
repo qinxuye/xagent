@@ -45,7 +45,9 @@ def check_pdf(content: ArtifactContent) -> None:
     if not content.data.lstrip().startswith(b"%PDF-"):
         raise InvalidArtifact("PDF header is missing.")
     try:
-        reader = PdfReader(BytesIO(content.data), strict=True)
+        # Validate readability, not strict PDF conformance. Real readers can
+        # recover common producer defects such as an inaccurate xref offset.
+        reader = PdfReader(BytesIO(content.data), strict=False)
         if reader.is_encrypted:
             raise UncheckedArtifact("Encrypted PDFs require a password to validate.")
         if len(reader.pages) > min(content.limits.max_units, 500):
