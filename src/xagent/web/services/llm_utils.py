@@ -1076,36 +1076,48 @@ class UserAwareModelStorage:
             )
             default_llm, _, _, _ = self.get_configured_defaults(user_id)
 
-        # Get specialized LLMs - load defaults once for efficiency
-        _, default_fast_llm, default_vision_llm, default_compact_llm = (
-            self.get_configured_defaults(user_id)
-        )
-
         # Get fast LLM (optional)
         fast_llm = None
         if fast_name:
             fast_llm = self.get_llm_by_name_with_access(fast_name, user_id)
-            if not fast_llm:
-                logger.warning(
-                    f"Fast LLM '{fast_name}' not found or no access, using configured fast default"
-                )
-                fast_llm = default_fast_llm
 
         # Get vision LLM (optional)
         vision_llm = None
         if vision_name:
             vision_llm = self.get_llm_by_name_with_access(vision_name, user_id)
-            if not vision_llm:
-                logger.warning(
-                    f"Vision LLM '{vision_name}' not found or no access, using configured vision default"
-                )
-                vision_llm = default_vision_llm
 
         # Get compact LLM (optional)
         compact_llm = None
         if compact_name:
             logger.info(f"Looking for compact LLM: {compact_name}")
             compact_llm = self.get_llm_by_name_with_access(compact_name, user_id)
+
+        default_fast_llm = None
+        default_vision_llm = None
+        default_compact_llm = None
+        needs_specialized_defaults = (
+            (bool(fast_name) and fast_llm is None)
+            or (bool(vision_name) and vision_llm is None)
+            or compact_llm is None
+        )
+        if needs_specialized_defaults:
+            _, default_fast_llm, default_vision_llm, default_compact_llm = (
+                self.get_configured_defaults(user_id)
+            )
+
+        if fast_name and not fast_llm:
+            logger.warning(
+                f"Fast LLM '{fast_name}' not found or no access, using configured fast default"
+            )
+            fast_llm = default_fast_llm
+
+        if vision_name and not vision_llm:
+            logger.warning(
+                f"Vision LLM '{vision_name}' not found or no access, using configured vision default"
+            )
+            vision_llm = default_vision_llm
+
+        if compact_name:
             if not compact_llm:
                 logger.warning(
                     f"Compact LLM '{compact_name}' not found or no access, using configured compact default"
