@@ -221,6 +221,7 @@ TOOL_MAX_OUTPUT_LENGTH = "XAGENT_TOOL_MAX_OUTPUT_LENGTH"
 TOOL_MAX_RECURSION_DEPTH = "XAGENT_TOOL_MAX_RECURSION_DEPTH"
 TOOL_MAX_FIELD_COUNT = "XAGENT_TOOL_MAX_FIELD_COUNT"
 MAX_TRACE_PAYLOAD_BYTES = "XAGENT_MAX_TRACE_PAYLOAD_BYTES"
+INLINE_FILE_DELIVERY_MAX_BYTES = "XAGENT_INLINE_FILE_DELIVERY_MAX_BYTES"
 
 WEB_SEARCH_PROVIDERS = {"auto", "google", "tavily", "exa", "zhipu"}
 
@@ -2918,6 +2919,14 @@ def get_tool_max_field_count() -> int:
         except ValueError:
             logger.warning("Invalid TOOL_MAX_FIELDS value: {env_str}")
     return 1000
+
+
+def get_inline_file_delivery_max_bytes() -> int:
+    """Decoded inline-file budget per run; zero disables delivery, default 8 MiB."""
+    value = int(os.getenv(INLINE_FILE_DELIVERY_MAX_BYTES, str(8 * 1024 * 1024)))
+    if value < 0:
+        raise ValueError("Inline file delivery budget must be non-negative")
+    return value
 
 
 def get_max_trace_payload_bytes() -> int:

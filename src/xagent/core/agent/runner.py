@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, cast
@@ -11,6 +11,7 @@ from uuid import uuid4
 from ...config import get_compact_threshold_default, get_compact_threshold_ratio
 from ..context_materializer import WorkspaceContextReferenceResolver
 from ..context_ref import CONTEXT_REFS_KEY, ContextReference
+from ..inline_file_delivery import InlineFileDelivery
 from ..model.intent import enter_goal, exit_goal
 from ..task_runtime import (
     PREFERRED_INPUT_MODALITIES_METADATA_KEY,
@@ -251,6 +252,10 @@ class AgentRunner:
                 if inspect.isawaitable(workspace):
                     workspace = await workspace
             runtime.context_ref_resolver = WorkspaceContextReferenceResolver(workspace)
+        if workspace is not None and callable(
+            getattr(workspace, "register_file", None)
+        ):
+            runtime.inline_file_delivery = InlineFileDelivery(workspace)
         self._active_controls[execution_id] = ExecutionControl(
             runtime=runtime,
             task=task,
@@ -334,6 +339,42 @@ class AgentRunner:
                         )
                         continue
 
+                    # Normalize only the final answer, never tool arguments,
+                    # input files or reasoning. Streaming and buffered patterns
+                    # share this delivery owner and its registered-file cache.
+                    raw_answer = (
+                        extract_assistant_message(result)
+                        if isinstance(result, dict)
+                        else result
+                    )
+                    if isinstance(raw_answer, str):
+                        delivered_answer = await runtime.prepare_final_answer(
+                            raw_answer
+                        )
+                        if delivered_answer != raw_answer:
+                            if isinstance(result, dict):
+                                result = dict(result)
+                                for key in (
+                                    "response",
+                                    "answer",
+                                    "output",
+                                    "content",
+                                    "message",
+                                ):
+                                    if isinstance(result.get(key), str):
+                                        result[key] = delivered_answer
+                            else:
+                                result = {"success": True, "output": delivered_answer}
+                            for index in range(len(context.messages) - 1, -1, -1):
+                                context_message = context.messages[index]
+                                if (
+                                    context_message.role == "assistant"
+                                    and context_message.content == raw_answer
+                                ):
+                                    context.messages[index] = replace(
+                                        context_message, content=delivered_answer
+                                    )
+                                    break
                     normalized = self._normalize_result(
                         result=result,
                         pattern=pattern,

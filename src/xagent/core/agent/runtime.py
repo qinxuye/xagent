@@ -20,6 +20,7 @@ from ..context_materializer import (
     ContextReferenceResolver,
     materialize_llm_kwargs,
 )
+from ..inline_file_delivery import InlineFileDelivery, InlineFileStreamGuard
 from ..model.chat.basic.base import BaseLLM
 from ..model.chat.error import retry_on
 from ..model.chat.exceptions import LLMToolProtocolError
@@ -222,6 +223,10 @@ class PatternRuntime:
     # relying on step_id or timestamp-adjacency heuristics.
     active_turn_id: str | None = None
     last_final_answer_stream_message_id: str | None = None
+    inline_file_delivery: InlineFileDelivery | None = None
+    _inline_stream_guards: dict[str, InlineFileStreamGuard] = field(
+        default_factory=dict
+    )
     _active_llm_tasks: set[asyncio.Future[Any]] = field(
         default_factory=set,
         init=False,
@@ -643,6 +648,8 @@ class PatternRuntime:
         if self.outbound_message_handler is None:
             return None
         message_id = f"final_answer_{uuid4().hex}"
+        if self.inline_file_delivery is not None:
+            self._inline_stream_guards[message_id] = InlineFileStreamGuard()
         self.last_final_answer_stream_message_id = None
         await self._emit_outbound(
             {
@@ -661,6 +668,9 @@ class PatternRuntime:
         return message_id
 
     async def emit_final_answer_delta(self, message_id: str, delta: str) -> None:
+        guard = self._inline_stream_guards.get(message_id)
+        if guard is not None:
+            delta = guard.feed(delta)
         if not delta:
             return
         await self._emit_outbound(
@@ -672,7 +682,16 @@ class PatternRuntime:
             }
         )
 
+    async def prepare_final_answer(self, content: str) -> str:
+        if self.inline_file_delivery is None or "base64" not in content.lower():
+            return content
+        return await asyncio.to_thread(self.inline_file_delivery.transform, content)
+
     async def end_final_answer_stream(self, message_id: str, content: str) -> None:
+        content = await self.prepare_final_answer(content)
+        guard = self._inline_stream_guards.pop(message_id, None)
+        if guard is not None:
+            await self.emit_final_answer_delta(message_id, guard.flush())
         self.last_final_answer_stream_message_id = message_id
         await self._emit_outbound(
             {
@@ -693,6 +712,7 @@ class PatternRuntime:
         )
 
     async def fail_final_answer_stream(self, message_id: str, error: str) -> None:
+        self._inline_stream_guards.pop(message_id, None)
         if self.last_final_answer_stream_message_id == message_id:
             self.last_final_answer_stream_message_id = None
         await self._emit_outbound(

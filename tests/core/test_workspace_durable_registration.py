@@ -50,6 +50,53 @@ def _seed_workspace_task(db, *, task_id: int, username: str) -> User:
     return user
 
 
+@pytest.mark.asyncio
+async def test_inline_delivery_uses_task_owned_durable_file_registration(
+    monkeypatch, tmp_path, constrained_workspace_db
+):
+    from pathlib import Path
+
+    from xagent.core.agent import PatternRuntime
+    from xagent.core.inline_file_delivery import InlineFileDelivery
+    from xagent.web.services.managed_file_ref import ManagedFileRef
+
+    engine, SessionLocal, db = constrained_workspace_db
+    user = _seed_workspace_task(db, task_id=9019, username="inline-delivery-owner")
+    user_id = int(user.id)
+    db.rollback()
+    monkeypatch.setenv("XAGENT_FILE_STORAGE_URI", (tmp_path / "objects").as_uri())
+    get_unscoped_file_storage.cache_clear()
+    monkeypatch.setattr(
+        "xagent.web.models.database.get_session_local", lambda: SessionLocal
+    )
+    monkeypatch.setattr(
+        "xagent.web.services.uploaded_file_store.get_session_local",
+        lambda: SessionLocal,
+    )
+    monkeypatch.setattr("xagent.core.storage.manager.create_db_session", SessionLocal)
+    workspace = TaskWorkspace(id="web_task_9019", base_dir=str(tmp_path / "workspaces"))
+    try:
+        runtime = PatternRuntime(inline_file_delivery=InlineFileDelivery(workspace))
+        answer = await runtime.prepare_final_answer(
+            "[report.csv](data:text/csv;base64,YSwK)"
+        )
+        assert answer.startswith("[report.csv](file:")
+        with SessionLocal() as verify_db:
+            record = verify_db.query(UploadedFile).one()
+            assert record.user_id == user_id
+            assert record.task_id == 9019
+            assert record.storage_status == "available"
+            assert answer == f"[report.csv](file:{record.file_id})"
+            local_path = Path(record.storage_path)
+            assert local_path.read_bytes() == b"a,\n"
+            verify_db.expunge(record)
+        assert engine.pool.checkedout() == 0
+        local_path.unlink()
+        assert ManagedFileRef(record).materialize().read_bytes() == b"a,\n"
+    finally:
+        get_unscoped_file_storage.cache_clear()
+
+
 def _assert_task_output_generation_key(
     storage_key: str,
     *,
