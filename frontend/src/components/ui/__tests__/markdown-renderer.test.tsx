@@ -300,7 +300,7 @@ describe('MarkdownRenderer', () => {
 
   it('keeps the table and scroll wrapper stable while a streamed row grows', () => {
     const header = '| Plan | Price |\n| --- | --- |\n'
-    const { rerender } = render(<MarkdownRenderer content={header + '| SIMBA |'} />)
+    const { rerender } = render(<MarkdownRenderer content={header + '| SIMBA | $'} />)
     const table = screen.getByRole('table')
     const wrapper = table.parentElement
     for (const row of ['| SIMBA | $', '| SIMBA | $15', '| SIMBA | $15–$25 |']) {
@@ -309,6 +309,80 @@ describe('MarkdownRenderer', () => {
       expect(table.parentElement).toBe(wrapper)
     }
     expect(screen.getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['SIMBA', '$15–$25'])
+  })
+
+  it.each([
+    '| SIMBA | $15 | never discard this |',
+    '| SIMBA |',
+    '| Jack | TEST | $1,909.81 |',
+    '| `a|b` | $15 |',
+    '| <img src=x onerror=alert(1)> | $15 | private value |',
+  ])('preserves the exact source of a table with mismatched cells: %s', (row) => {
+    const source = ['| Plan | Price |', '| --- | --- |', row].join('\n')
+    const { container } = render(<MarkdownRenderer content={source} />)
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    expect(container.querySelector('pre code')?.textContent).toBe(source + '\n')
+    expect(container.querySelector('img')).toBeNull()
+  })
+
+  it('preserves nested mismatched tables without changing surrounding content', () => {
+    const source = '> | A | B |\n> | --- | --- |\n> | one | two | three |'
+    const { container } = render(<MarkdownRenderer content={[
+      'Before **table**.', '', source, '',
+      '- Nested list:', '', '  | A | B |', '  | --- | --- |', '  | x | y | z |', '',
+      '| Valid | Table |', '| --- | --- |', '| yes | $15 |', '', 'After table.',
+    ].join('\n')} />)
+    expect(container.querySelector('blockquote pre code')?.textContent).toBe(source.slice(2) + '\n')
+    expect(container.querySelector('li pre code')?.textContent).toContain('| x | y | z |')
+    expect(screen.getAllByRole('table')).toHaveLength(1)
+    expect(screen.getByText('After table.')).toBeInTheDocument()
+    expect(container.querySelector('strong')?.textContent).toBe('table')
+  })
+
+  it('switches safely between incomplete, valid and overflowing streamed rows', () => {
+    const header = '| Campaign | Spend |\n| --- | --- |\n'
+    const { container, rerender } = render(<MarkdownRenderer content={header + '| Jack |'} />)
+    expect(container.querySelector('pre code')?.textContent).toBe(header + '| Jack |\n')
+    rerender(<MarkdownRenderer content={header + '| Jack | $15 |'} />)
+    expect(screen.getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['Jack', '$15'])
+    const overflow = header + '| Jack | TEST | $15 |'
+    rerender(<MarkdownRenderer content={overflow} />)
+    expect(container.querySelector('pre code')?.textContent).toBe(overflow + '\n')
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    rerender(<MarkdownRenderer content={header + String.raw`| Jack \| TEST | $15 |`} />)
+    expect(screen.getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['Jack | TEST', '$15'])
+  })
+
+  it('retains explicitly empty cells and leaves table-shaped code examples alone', () => {
+    const { container } = render(<MarkdownRenderer content={[
+      '| A | B |', '| --- | --- |', '| one | |', '| | two |', '',
+      '```markdown', '| A | B |', '| --- | --- |', '| x | y | z |', '```',
+    ].join('\n')} />)
+    expect(screen.getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['one', '', '', 'two'])
+    expect(container.querySelector('pre code')?.textContent).toBe('| A | B |\n| --- | --- |\n| x | y | z |\n')
+  })
+
+  it('replays the plan comparison table captured from the original TC6 task', () => {
+    // Verbatim table excerpt from local benchmark task 880, assistant message
+    // 2555. This is a rendering fixture, not a claim about current plan prices.
+    const source = [
+      '| Provider | Representative plans | Main proposition | Competitive strength | Weakness |',
+      '|---|---:|---|---|---|',
+      '| **SIMBA** | $10–$25 per 30 days | 500–800GB local data, large APAC/global roaming bundles, IDD and local-call benefits | Best international value; highly generous roaming; low prices | Plan architecture is complicated; very large headline data quotas can look less credible or less relevant to ordinary users |',
+      '| **Singtel hi!** | About $15–$40 per 4 weeks, plus senior options | Large local data bundles, Singtel 5G+ network, roaming and IDD, app-based top-up | Strongest brand and perceived network reliability; broad retail and service ecosystem | Usually weaker raw value than SIMBA, Maxx or eight; higher prices for comparable heavy-data users |',
+      '| **eight** | About $8–$18 per 30 days | 488–688GB headline data, 4G/5G tiers, roaming, IDD and local benefits | Strong data value plus automatic rollover; rollover balance can build up to eight months of current-plan entitlement | More complex naming and benefit structure; customers may struggle to understand what is local data versus roaming data |',
+      '| **Maxx** | About $7.90–$12 per month | 290–500GB plans, 4G/5G options, Singapore/Malaysia or wider Asian usage, IDD and roaming | Very sharp price points; simple proposition; backed by M1’s network | Less generous than SIMBA/eight at the top end; no data rollover in the surfaced comparison; physical SIM availability may be less flexible than eSIM-led rivals |',
+    ].join('\n')
+    const { container } = render(<MarkdownRenderer content={source} />)
+    expect(screen.getAllByRole('columnheader')).toHaveLength(5)
+    expect(screen.getAllByRole('row')).toHaveLength(5)
+    expect(screen.getAllByRole('cell').map((cell) => cell.textContent)).toEqual(
+      source.split('\n').slice(2).flatMap((row) => row.split('|').slice(1, -1).map(
+        (cell) => cell.trim().replaceAll('**', ''),
+      )),
+    )
+    expect(screen.getByRole('table').parentElement).toHaveClass('markdown-table-scroll')
+    expect(container.querySelector('.katex')).toBeNull()
   })
 
   it('renders numeric formulas alongside currency without merging their delimiters', () => {
