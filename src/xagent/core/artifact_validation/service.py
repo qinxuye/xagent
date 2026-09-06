@@ -6,6 +6,7 @@ registers nor deletes files and must never run inside a database transaction.
 
 import hashlib
 import json
+import logging
 import os
 import stat
 import subprocess
@@ -21,6 +22,8 @@ from ...config import (
 )
 from .defaults import default_registry
 from .models import CheckResult, ValidationReport, unchecked
+
+logger = logging.getLogger(__name__)
 
 _slots = BoundedSemaphore(2)
 _cache_lock = Lock()
@@ -60,6 +63,7 @@ def _run_checks(
     except subprocess.TimeoutExpired:
         return unchecked("File validation exceeded its time budget.")
     except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError):
+        logger.exception("Artifact validator process failed unexpectedly")
         return unchecked("Validator process could not complete.")
 
 

@@ -1,6 +1,8 @@
 """Format checks are composable and never conflate execution with delivery."""
 
 import hashlib
+import json
+import logging
 import os
 import subprocess
 import sys
@@ -60,6 +62,36 @@ def test_real_readers_accept_minimal_documents(extension):
         Image.new("RGB", (4, 4)).save(stream, format="PNG")
     result = check(stream.getvalue(), f"file.{extension}")
     assert result.status == "valid", result
+
+
+def test_read_only_xlsx_checks_cells_beyond_stale_dimensions():
+    from openpyxl import Workbook
+
+    original = BytesIO()
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["header"])
+    sheet.append([1])
+    sheet.append([123])
+    workbook.save(original)
+
+    rewritten = BytesIO()
+    with ZipFile(original) as source, ZipFile(rewritten, "w", ZIP_DEFLATED) as target:
+        for entry in source.infolist():
+            data = source.read(entry)
+            if entry.filename == "xl/worksheets/sheet1.xml":
+                assert b'<dimension ref="A1:A3"/>' in data
+                assert b"<v>123</v>" in data
+                data = data.replace(
+                    b'<dimension ref="A1:A3"/>', b'<dimension ref="A1:A1"/>'
+                )
+                data = data.replace(b"<v>123</v>", b"<v>not-a-number</v>")
+            target.writestr(entry, data)
+
+    # The XML/ZIP remains well formed. Without resetting the read-only sheet's
+    # bounds, iteration stops at row 2 before decoding the corrupt third row.
+    report = check(rewritten.getvalue(), "stale-dimensions.xlsx")
+    assert [c.status for c in report.checks] == ["valid", "invalid"]
 
 
 @pytest.mark.parametrize(
@@ -187,6 +219,52 @@ def test_worker_failure_timeout_missing_file_and_byte_budget(tmp_path, monkeypat
     monkeypatch.setenv("XAGENT_ARTIFACT_VALIDATION_MAX_BYTES", "2")
     assert validate_artifact(path).status == "unchecked"
     assert validate_artifact(tmp_path / "missing.csv").status == "unchecked"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [OSError("server-only detail"), subprocess.CalledProcessError(1, ["validator"])],
+)
+def test_worker_failures_are_logged_without_exposing_details(
+    monkeypatch, caplog, error
+):
+    monkeypatch.setattr(service.subprocess, "run", Mock(side_effect=error))
+    with caplog.at_level(logging.ERROR, logger=service.__name__):
+        report = service._run_checks("data.csv", b"a,b", 1024, 1)
+
+    assert report.status == "unchecked"
+    assert report.checks[0].message == "Validator process could not complete."
+    assert "server-only detail" not in str(report.as_dict())
+    record = caplog.records[-1]
+    assert record.name == service.__name__
+    assert record.exc_info[1] is error
+
+
+def test_malformed_worker_response_retains_server_trace(monkeypatch, caplog):
+    monkeypatch.setattr(
+        service.subprocess,
+        "run",
+        Mock(
+            return_value=subprocess.CompletedProcess(
+                ["validator"], 0, stdout=b"private payload"
+            )
+        ),
+    )
+    with caplog.at_level(logging.ERROR, logger=service.__name__):
+        report = service._run_checks("data.csv", b"a,b", 1024, 1)
+
+    assert report.status == "unchecked"
+    assert isinstance(caplog.records[-1].exc_info[1], json.JSONDecodeError)
+    assert "private payload" not in str(report.as_dict())
+
+
+def test_real_worker_preserves_binary_stdin_bytes():
+    # CRLF, Ctrl-Z, NUL and every byte value catch text-mode translation or
+    # truncation. Exercise the actual parent/worker pipe, not a mocked stream.
+    payload = b"PK\x03\x04\r\n\x1a\x00\xff" + bytes(range(256)) * 4
+    report = service._run_checks("payload.bin", payload, len(payload), 8)
+    assert report.status == "unchecked"  # No format reader is selected.
+    assert report.sha256 == hashlib.sha256(payload).hexdigest()
 
 
 def test_sandbox_cannot_assert_host_validation(tmp_path, monkeypatch):
