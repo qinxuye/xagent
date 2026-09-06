@@ -348,13 +348,15 @@ class PatternRuntime:
             response = await self.run_streaming_llm_call(
                 llm, on_chunk=emit_text_delta, **kwargs
             )
+            content = self._response_content(response)
+            await stream.finish(content)
+            return response
         except Exception as exc:
             await stream.fail(str(exc))
             raise
-        content = self._response_content(response)
-
-        await stream.finish(content)
-        return response
+        finally:
+            # Includes cancellation, which is not an Exception on Python 3.11+.
+            await stream.fail("Final answer stream abandoned")
 
     async def run_streaming_llm_call(
         self,
@@ -651,13 +653,17 @@ class PatternRuntime:
         if self.inline_file_delivery is not None:
             self._inline_stream_guards[message_id] = InlineFileStreamGuard()
         self.last_final_answer_stream_message_id = None
-        await self._emit_outbound(
-            {
-                "type": "final_answer_start",
-                "message_id": message_id,
-                "task_id": self.execution_id,
-            }
-        )
+        try:
+            await self._emit_outbound(
+                {
+                    "type": "final_answer_start",
+                    "message_id": message_id,
+                    "task_id": self.execution_id,
+                }
+            )
+        except BaseException:
+            self._inline_stream_guards.pop(message_id, None)
+            raise
         logger.info(
             "final_answer stream opened. task_id=%s step=%s turn=%s message_id=%s",
             self.execution_id,
@@ -688,8 +694,8 @@ class PatternRuntime:
         return await asyncio.to_thread(self.inline_file_delivery.transform, content)
 
     async def end_final_answer_stream(self, message_id: str, content: str) -> None:
-        content = await self.prepare_final_answer(content)
         guard = self._inline_stream_guards.pop(message_id, None)
+        content = await self.prepare_final_answer(content)
         if guard is not None:
             await self.emit_final_answer_delta(message_id, guard.flush())
         self.last_final_answer_stream_message_id = message_id
@@ -710,6 +716,10 @@ class PatternRuntime:
             message_id,
             len(content),
         )
+
+    def discard_inline_file_streams(self) -> None:
+        """Release per-run buffers even if a pattern abandoned a candidate."""
+        self._inline_stream_guards.clear()
 
     async def fail_final_answer_stream(self, message_id: str, error: str) -> None:
         self._inline_stream_guards.pop(message_id, None)

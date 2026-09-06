@@ -253,7 +253,7 @@ class AgentRunner:
                     workspace = await workspace
             runtime.context_ref_resolver = WorkspaceContextReferenceResolver(workspace)
         if workspace is not None and callable(
-            getattr(workspace, "register_file", None)
+            getattr(workspace, "register_delivery_file", None)
         ):
             runtime.inline_file_delivery = InlineFileDelivery(workspace)
         self._active_controls[execution_id] = ExecutionControl(
@@ -464,6 +464,7 @@ class AgentRunner:
             )
             return result
         finally:
+            runtime.discard_inline_file_streams()
             self._active_controls.pop(execution_id, None)
             exit_goal(goal_token)
 

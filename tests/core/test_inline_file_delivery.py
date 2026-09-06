@@ -1,6 +1,8 @@
 """Explicit encoded artifacts share real FileRef delivery, not text heuristics."""
 
+import asyncio
 import base64
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -17,7 +19,7 @@ class Workspace:
     def get_file_id_from_path(self, path):
         return self.files.get(path)
 
-    def register_file(self, path):
+    def register_delivery_file(self, path):
         file_id = f"registered-{len(self.files)}"
         self.files[path] = file_id
         return file_id
@@ -130,7 +132,7 @@ def test_registration_failure_is_logged_without_exposing_details(
     def fail(path):
         raise ValueError("server private detail")
 
-    monkeypatch.setattr(delivery.workspace, "register_file", fail)
+    monkeypatch.setattr(delivery.workspace, "register_delivery_file", fail)
     assert delivery.transform(link()) == "report.csv (attachment unavailable)"
     assert not list(delivery.workspace.output_dir.iterdir())
     assert caplog.records[-1].exc_info[1].args == ("server private detail",)
@@ -156,6 +158,68 @@ def test_incomplete_link_does_not_swallow_following_text_or_deliveries(delivery)
         delivery.transform(source)
         == "report.csv (attachment unavailable) See [second.csv](file:registered-0)"
     )
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+@pytest.mark.parametrize("closed", [True, False])
+def test_wrapped_data_link_consumes_encoded_continuations(delivery, newline, closed):
+    payload = base64.b64encode(b"some exact file bytes\n").decode()
+    wrapped = newline.join(textwrap.wrap(payload, 8))
+    source = f"Get [report.csv](data:text/csv;base64,{wrapped}"
+    if closed:
+        source += newline + ")"
+    source += newline + "Next paragraph: " + link(name="next.csv")
+    result = delivery.transform(source)
+    expected = (
+        "[report.csv](file:registered-0)"
+        if closed
+        else "report.csv (attachment unavailable)"
+    )
+    next_id = 1 if closed else 0
+    assert (
+        result
+        == f"Get {expected}{newline}Next paragraph: [next.csv](file:registered-{next_id})"
+    )
+    if closed:
+        assert (
+            Path(next(iter(delivery.workspace.files))).read_bytes()
+            == b"some exact file bytes\n"
+        )
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_budget_accepts_mime_wrapped_named_fence(delivery, monkeypatch, newline):
+    data = b"a" * (512 * 1024)
+    monkeypatch.setenv("XAGENT_INLINE_FILE_DELIVERY_MAX_BYTES", str(len(data)))
+    encoded = newline.join(textwrap.wrap(base64.b64encode(data).decode(), 76))
+    assert len(encoded) - len(encoded.replace(newline, "")) > 4096
+    source = f"```base64 filename=report.csv{newline}{encoded}{newline}```"
+    assert delivery.transform(source) == "[report.csv](file:registered-0)"
+    assert Path(next(iter(delivery.workspace.files))).read_bytes() == data
+
+
+def test_excessive_whitespace_remains_bounded(delivery, monkeypatch):
+    monkeypatch.setenv("XAGENT_INLINE_FILE_DELIVERY_MAX_BYTES", "10")
+    source = "```base64 filename=report.csv\n" + " " * 5000 + "YQ==\n```"
+    assert delivery.transform(source) == "report.csv (attachment unavailable)"
+    assert not delivery.workspace.files
+
+
+def test_legacy_registration_is_not_a_delivery_fallback(delivery, monkeypatch):
+    monkeypatch.setattr(delivery.workspace, "register_delivery_file", None)
+    legacy_calls = []
+    monkeypatch.setattr(
+        delivery.workspace, "register_file", legacy_calls.append, raising=False
+    )
+    assert delivery.transform(link()) == "report.csv (attachment unavailable)"
+    assert not legacy_calls
+    assert not list(delivery.workspace.output_dir.iterdir())
+
+
+def test_missing_delivery_file_id_does_not_fall_back(delivery, monkeypatch):
+    monkeypatch.setattr(delivery.workspace, "register_delivery_file", lambda path: None)
+    assert delivery.transform(link()) == "report.csv (attachment unavailable)"
+    assert not list(delivery.workspace.output_dir.iterdir())
 
 
 def test_every_possible_stream_split_withholds_encoded_tail():
@@ -214,6 +278,17 @@ def test_prose_markers_do_not_stall_stream(source):
         emitted = guard.feed(source[:offset]) + guard.feed(source[offset:])
         assert not guard.held
         assert len(emitted) >= len(source) - 6
+        assert emitted + guard.flush() == source
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~~"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_unnamed_base64_example_keeps_streaming(fence, newline):
+    source = f"Example:{newline}{fence}base64{newline}YSwK{newline}{fence}{newline}More prose."
+    for offset in range(len(source) + 1):
+        guard = InlineFileStreamGuard()
+        emitted = guard.feed(source[:offset]) + guard.feed(source[offset:])
+        assert not guard.held
         assert emitted + guard.flush() == source
 
 
@@ -294,3 +369,104 @@ async def test_runner_wires_delivery_and_normalizes_context(delivery):
     assert result["output"] == "[report.csv](file:registered-0)"
     assert result["context"].messages[-1].content == result["output"]
     assert len(delivery.workspace.files) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["llm", "finish", "cancel"])
+async def test_runtime_stream_failure_releases_guard_without_flushing_payload(
+    delivery, monkeypatch, failure
+):
+    from xagent.core.agent import PatternRuntime
+
+    events = []
+    runtime = PatternRuntime(
+        outbound_message_handler=events.append, inline_file_delivery=delivery
+    )
+    monkeypatch.setattr(runtime, "_has_native_stream_chat", lambda llm: True)
+    started = asyncio.Event()
+
+    async def stream_call(llm, *, on_chunk, **kwargs):
+        message_id = next(iter(runtime._inline_stream_guards))
+        await runtime.emit_final_answer_delta(message_id, link())
+        started.set()
+        if failure == "cancel":
+            await asyncio.Event().wait()
+        if failure == "llm":
+            raise RuntimeError("LLM failed")
+        return link()
+
+    async def fail_finish(content):
+        raise RuntimeError("Delivery failed")
+
+    monkeypatch.setattr(runtime, "run_streaming_llm_call", stream_call)
+    if failure == "finish":
+        monkeypatch.setattr(runtime, "prepare_final_answer", fail_finish)
+    task = asyncio.create_task(runtime.stream_final_answer(object()))
+    if failure == "cancel":
+        await started.wait()
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError if failure == "cancel" else RuntimeError):
+        await task
+    assert not runtime._inline_stream_guards
+    assert events[-1]["type"] == "final_answer_error"
+    assert not any("base64" in str(event) or "b3JkZX" in str(event) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_start_callback_failure_releases_guard(delivery):
+    from xagent.core.agent import PatternRuntime
+
+    def fail(event):
+        raise RuntimeError("Disconnected")
+
+    runtime = PatternRuntime(
+        outbound_message_handler=fail, inline_file_delivery=delivery
+    )
+    with pytest.raises(RuntimeError, match="Disconnected"):
+        await runtime.start_final_answer_stream()
+    assert not runtime._inline_stream_guards
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
+async def test_runner_releases_abandoned_candidate_guards(delivery, outcome):
+    from xagent.core.agent import Agent, PatternRuntime
+    from xagent.core.agent.runner import AgentRunner
+
+    events = []
+    runtime = PatternRuntime(
+        outbound_message_handler=events.append, inline_file_delivery=delivery
+    )
+    started = asyncio.Event()
+
+    class Pattern:
+        async def run(self, **kwargs):
+            # Two retries can leave distinct candidate IDs pending. Keep the
+            # keyed ownership model, but release all buffers at run teardown.
+            for _ in range(2):
+                message_id = await runtime.start_final_answer_stream()
+                await runtime.emit_final_answer_delta(message_id, link())
+            assert len(runtime._inline_stream_guards) == 2
+            started.set()
+            if outcome == "cancel":
+                await asyncio.Event().wait()
+            if outcome == "error":
+                raise RuntimeError("Candidate parse failed")
+            return {"success": True, "output": "Final answer"}
+
+    runner = AgentRunner(
+        Agent(name="inline-test", patterns=[Pattern()]), workspace_enabled=False
+    )
+    task = asyncio.create_task(
+        runner.run("Answer", execution_id="inline-test", runtime=runtime)
+    )
+    if outcome == "cancel":
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        result = await task
+        assert result["success"] == (outcome == "success")
+    assert not runtime._inline_stream_guards
+    assert not any("base64" in str(event) for event in events)

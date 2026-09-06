@@ -45,8 +45,9 @@ _DATA_LINK = re.compile(
 )
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)")
 _NAMED_BASE64 = re.compile(r"base64[ \t]+filename=([^\r\n]+)\Z", re.IGNORECASE)
-_STREAM_MARKER = re.compile(
-    r"\]\(data:|(?:^|\n) {0,3}(?:`{3,}|~{3,})[ \t]*base64", re.IGNORECASE
+_STREAM_MARKER = re.compile(r"\]\(data:", re.IGNORECASE)
+_DATA_CONTINUATION = re.compile(
+    r"[ \t]*(?P<payload>[A-Za-z0-9+/=]*)[ \t]*(?P<closed>\))?"
 )
 
 
@@ -62,8 +63,18 @@ class InlineFileStreamGuard:
             return ""
         self.pending += delta
         marker = _STREAM_MARKER.search(self.pending)
-        if marker:
-            prefix = self.pending[: marker.start()]
+        marker_start = marker.start() if marker else None
+        offset = 0
+        for line in self.pending.splitlines(keepends=True):
+            fence = _FENCE.match(line)
+            if fence and _NAMED_BASE64.fullmatch(fence.group(2).strip()):
+                marker_start = (
+                    min(marker_start, offset) if marker_start is not None else offset
+                )
+                break
+            offset += len(line)
+        if marker_start is not None:
+            prefix = self.pending[:marker_start]
             self.pending = ""
             self.held = True
             return prefix
@@ -184,15 +195,34 @@ class InlineFileDelivery:
                     else None
                 )
                 if match and (pos == 0 or line[pos - 1] != "\\"):
+                    payload = match["payload"]
+                    closed = bool(match["closed"])
+                    pos = match.end()
+                    # A reflowed payload is still one explicit delivery. Consume
+                    # only Base64 continuation lines, leaving following prose,
+                    # code blocks and independent links to the normal scanner.
+                    while not closed and not line[pos:].strip() and i + 1 < len(lines):
+                        following_line = lines[i + 1]
+                        continuation = _DATA_CONTINUATION.match(following_line)
+                        assert continuation is not None
+                        if not continuation["closed"] and (
+                            not continuation["payload"]
+                            or following_line[continuation.end() :].strip()
+                        ):
+                            break
+                        payload += continuation["payload"]
+                        closed = bool(continuation["closed"])
+                        i += 1
+                        line = following_line
+                        pos = continuation.end()
                     pieces.append(
                         self._deliver(
                             match["label"],
                             match["mime"].lower(),
-                            match["payload"] if match["closed"] else "",
+                            payload if closed else "",
                             image=bool(match["image"]),
                         )
                     )
-                    pos = match.end()
                 else:
                     pieces.append(line[pos])
                     pos += 1
@@ -225,10 +255,13 @@ class InlineFileDelivery:
             return unavailable
         try:
             limit = get_inline_file_delivery_max_bytes()
-            if limit <= 0 or len(encoded) > ((limit + 2) // 3) * 4 + 4096:
+            max_encoded = ((limit + 2) // 3) * 4
+            # Allow ordinary MIME wrapping (including CRLF) without removing
+            # the bound on whitespace-heavy input before normalization.
+            if limit <= 0 or len(encoded) > max_encoded + max_encoded // 16 + 4096:
                 return unavailable
             encoded = re.sub(r"[\r\n\t ]", "", encoded)
-            if len(encoded) > ((limit + 2) // 3) * 4:
+            if len(encoded) > max_encoded:
                 return unavailable
             data = base64.b64decode(encoded, validate=True)
             if not data or len(data) > limit:
@@ -251,11 +284,11 @@ class InlineFileDelivery:
                     register_delivery = getattr(
                         self.workspace, "register_delivery_file", None
                     )
-                    file_id = (
-                        register_delivery(str(path))
-                        if callable(register_delivery)
-                        else None
-                    )
+                    if not callable(register_delivery):
+                        raise ValueError("Workspace does not support durable delivery")
+                    file_id = register_delivery(str(path))
+                    if not file_id:
+                        raise ValueError("Attachment registration returned no file ID")
                     ref = build_workspace_file_ref(
                         workspace=self.workspace,
                         file_path=path,
