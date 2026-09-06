@@ -93,7 +93,13 @@ def validate_artifact(
         if not _slots.acquire(timeout=timeout):
             return unchecked("Validation capacity is busy; file has not been checked.")
         try:
-            return _validate_snapshot(path, filename, max_bytes, timeout)
+            try:
+                return _validate_snapshot(path, filename, max_bytes, timeout)
+            except Exception:
+                # Validation is advisory: snapshot/host failures must not turn
+                # a successfully registered output into a failed tool result.
+                logger.exception("Artifact snapshot validation failed unexpectedly")
+                return unchecked("File validation could not complete.")
         finally:
             _slots.release()
     finally:

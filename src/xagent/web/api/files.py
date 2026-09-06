@@ -1855,6 +1855,7 @@ async def preview_file(
                 file_id=file_id if is_valid_uuid(file_id) else None,
                 extra_headers=cache_headers,
                 validation_only=validation_only,
+                public_validation=via_stream_ticket,
             )
     else:
         # For legacy files without records, check ownership
@@ -1891,6 +1892,7 @@ async def preview_file(
         file_id=file_id if is_valid_uuid(file_id) else None,
         extra_headers=cache_headers,
         validation_only=validation_only,
+        public_validation=via_stream_ticket,
     )
 
 

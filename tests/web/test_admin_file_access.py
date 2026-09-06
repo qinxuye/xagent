@@ -192,7 +192,9 @@ def test_validation_preserves_private_and_widget_authority(
     validator.assert_not_called()
 
 
-@pytest.mark.parametrize("route,public", [("preview", False), ("public/preview", True)])
+@pytest.mark.parametrize(
+    "route,public", [("preview", False), ("public/preview", True), ("ticket", True)]
+)
 def test_validation_reports_format_support_and_public_capacity_class(
     test_db, temp_uploads_dir, monkeypatch, route, public
 ):
@@ -211,10 +213,17 @@ def test_validation_reports_format_support_and_public_capacity_class(
         return_value=unchecked("No validator is installed for this format.")
     )
     monkeypatch.setattr(files_module, "validate_artifact", validator)
-    response = TestClient(app).get(
-        f"/api/files/{route}/{file.file_id}?validation_only=true",
-        headers=create_auth_headers(owner),
-    )
+    client = TestClient(app)
+    headers = create_auth_headers(owner)
+    url = f"/api/files/{route}/{file.file_id}?validation_only=true"
+    if route == "ticket":
+        ticket = client.get(
+            f"/api/files/stream-tickets/{file.file_id}", headers=headers
+        )
+        assert ticket.status_code == 200
+        url = ticket.json()["path"] + "&validation_only=true"
+        headers = {}
+    response = client.get(url, headers=headers)
     assert response.status_code == 200
     assert response.json()["supported"] is False
     assert response.json()["status"] == "unchecked"

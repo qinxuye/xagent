@@ -443,6 +443,44 @@ def test_service_real_worker_and_same_name_rewrite(tmp_path):
     assert path.read_bytes() == b'a,b\n"broken'
 
 
+@pytest.mark.parametrize(
+    "error", [MemoryError("read failed"), RuntimeError("unexpected read failure")]
+)
+def test_snapshot_exception_does_not_drop_generated_attachment(
+    tmp_path, monkeypatch, caplog, error
+):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from xagent.core.tools.artifacts import build_generated_file_metadata
+
+    path = tmp_path / "output.csv"
+    path.write_bytes(b"a,b\n1,2\n")
+    original = service.os.fdopen
+
+    @contextmanager
+    def failing_open(*args, **kwargs):
+        with original(*args, **kwargs) as stream:
+            wrapped = Mock(wraps=stream)
+            wrapped.read.side_effect = error
+            yield wrapped
+
+    monkeypatch.setattr(service.os, "fdopen", failing_open)
+    workspace = SimpleNamespace(
+        workspace_dir=tmp_path, get_file_id_from_path=lambda _: "registered-file"
+    )
+    metadata = build_generated_file_metadata(workspace=workspace, file_paths=[path])
+    assert len(metadata["file_refs"]) == 1
+    assert metadata["file_refs"][0]["file_id"] == "registered-file"
+    assert metadata["file_refs"][0]["validation"]["status"] == "unchecked"
+    assert path.read_bytes() == b"a,b\n1,2\n"
+    assert "snapshot validation failed" in caplog.text
+    assert service._slots.acquire(blocking=False)
+    assert service._slots.acquire(blocking=False)
+    service._slots.release()
+    service._slots.release()
+
+
 def test_cache_is_byte_keyed_and_detects_mid_check_rewrite(tmp_path, monkeypatch):
     service._cache.clear()
     path = tmp_path / "test.csv"
@@ -589,8 +627,7 @@ def test_public_validation_releases_capacity_on_unexpected_failure(
     monkeypatch.setattr(
         service, "_validate_snapshot", Mock(side_effect=RuntimeError("failed"))
     )
-    with pytest.raises(RuntimeError, match="failed"):
-        validate_artifact(tmp_path / "data.csv", public=True)
+    assert validate_artifact(tmp_path / "data.csv", public=True).status == "unchecked"
     assert public.acquire(blocking=False)
     public.release()
 

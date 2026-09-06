@@ -495,11 +495,14 @@ class SandboxedToolWrapper(AbstractBaseTool):
         result = await self._run_json_in_sandbox(args)
         # Guest metadata is not evidence about persisted host bytes. Only the
         # host rebuild below can attach an authoritative validation report.
-        if isinstance(result, dict):
-            for field in ("file_refs", "artifacts"):
-                for ref in result.get(field) or []:
-                    if isinstance(ref, dict):
-                        ref.pop("validation", None)
+        pending = [result]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                value.pop("validation", None)
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
         try:
             return await self._register_sandbox_outputs(result)
         except Exception:
