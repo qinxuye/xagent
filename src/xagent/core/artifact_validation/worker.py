@@ -14,12 +14,12 @@ def main() -> None:
     if sys.platform == "linux":
         import resource
 
-        existing = resource.getrlimit(resource.RLIMIT_AS)
+        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
         resource.setrlimit(
             resource.RLIMIT_AS,
-            tuple(
-                1024**3 if limit == resource.RLIM_INFINITY else min(limit, 1024**3)
-                for limit in existing
+            (
+                1024**3 if soft == resource.RLIM_INFINITY else min(soft, 1024**3),
+                1024**3 if hard == resource.RLIM_INFINITY else min(hard, 1024**3),
             ),
         )
     limits = ValidationLimits(max_bytes=int(sys.argv[2]))
