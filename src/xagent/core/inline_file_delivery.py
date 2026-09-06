@@ -1,6 +1,7 @@
 """Turn explicit encoded-file deliveries into registered workspace attachments.
 
-This is an output boundary, not a general Base64 detector or a format validator.
+This is a final-answer delivery boundary, not a general Base64 detector or a
+format validator. Intermediate messages and execution checkpoints are unchanged.
 Only data-URI Markdown links outside code and explicitly named Base64 fences
 opt in. Arbitrary prose, source code and unnamed encoded examples are preserved.
 """
@@ -44,8 +45,12 @@ _DATA_LINK = re.compile(
     re.IGNORECASE,
 )
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)")
+_STREAM_FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})([^\r\n]*)")
 _NAMED_BASE64 = re.compile(r"base64[ \t]+filename=([^\r\n]+)\Z", re.IGNORECASE)
-_STREAM_MARKER = re.compile(r"\]\(data:", re.IGNORECASE)
+_STREAM_MARKER = re.compile(
+    r"\]\(data:[\w.+/-]+(?:;charset=[\w-]+)?;base64,", re.IGNORECASE
+)
+_LIST_ITEM = re.compile(r"^( *)(?:[-+*]|\d{1,9}[.)])[ \t]+")
 _DATA_CONTINUATION = re.compile(
     r"[ \t]*(?P<payload>[A-Za-z0-9+/=]*)[ \t]*(?P<closed>\))?"
 )
@@ -57,6 +62,7 @@ class InlineFileStreamGuard:
     def __init__(self) -> None:
         self.pending = ""
         self.held = False
+        self._at_line_start = True
 
     def feed(self, delta: str) -> str:
         if self.held:
@@ -66,7 +72,7 @@ class InlineFileStreamGuard:
         marker_start = marker.start() if marker else None
         offset = 0
         for line in self.pending.splitlines(keepends=True):
-            fence = _FENCE.match(line)
+            fence = _STREAM_FENCE.match(line) if offset or self._at_line_start else None
             if fence and _NAMED_BASE64.fullmatch(fence.group(2).strip()):
                 marker_start = (
                     min(marker_start, offset) if marker_start is not None else offset
@@ -82,10 +88,22 @@ class InlineFileStreamGuard:
         keep = 6
         # A fence header can contain whitespace or a longer delimiter. Retain
         # its incomplete line until its language is known, not ordinary prose.
-        fence = re.search(r"(?:^|\n) {0,3}[`~][^\r\n]*$", self.pending)
-        if fence:
+        fence = re.search(
+            r"(?:^|\n)[ \t]*(?:`{1,2}|~{1,2}|`{3,}[^\r\n]*|~{3,}[^\r\n]*)$",
+            self.pending,
+        )
+        if fence and (
+            fence.start() or self._at_line_start or self.pending.startswith("\n")
+        ):
             keep = max(keep, len(self.pending) - fence.start())
+        # Retain a split data-URI header only until its comma disambiguates
+        # Base64 from ordinary data URLs. Non-Base64 URLs keep streaming.
+        header = re.search(r"\]\(data:[^,\s()\[\]]*$", self.pending, re.IGNORECASE)
+        if header:
+            keep = max(keep, len(self.pending) - header.start())
         prefix, self.pending = self.pending[:-keep], self.pending[-keep:]
+        if prefix:
+            self._at_line_start = prefix.endswith("\n")
         return prefix
 
     def flush(self) -> str:
@@ -113,11 +131,22 @@ class InlineFileDelivery:
         output: list[str] = []
         i = 0
         inline_ticks = 0
+        list_indents: list[int] = []
         while i < len(lines):
             line = lines[i]
             if not line.strip():
                 inline_ticks = 0
-            fence = _FENCE.match(line) if not inline_ticks else None
+            indent = len(line) - len(line.lstrip(" "))
+            if line.strip() and not inline_ticks:
+                while list_indents and indent < list_indents[-1]:
+                    list_indents.pop()
+                item = _LIST_ITEM.match(line)
+                parent_indent = list_indents[-1] if list_indents else 0
+                if item and indent < parent_indent + 4:
+                    list_indents.append(item.end())
+            content_indent = list_indents[-1] if list_indents else 0
+            fence_indent = content_indent if indent >= content_indent else 0
+            fence = _FENCE.match(line[fence_indent:]) if not inline_ticks else None
             if fence:
                 marker, info = fence.groups()
                 end = i + 1
@@ -128,7 +157,9 @@ class InlineFileDelivery:
                     + str(len(marker))
                     + r",}[ \t]*(?:\r?\n)?$"
                 )
-                while end < len(lines) and not closing.fullmatch(lines[end]):
+                while end < len(lines) and not closing.fullmatch(
+                    lines[end][fence_indent:]
+                ):
                     end += 1
                 named = _NAMED_BASE64.fullmatch(info.strip())
                 if named:
@@ -144,7 +175,8 @@ class InlineFileDelivery:
                         "".join(lines[i + 1 : end]) if end < len(lines) else "",
                     )
                     output.append(
-                        replacement
+                        line[:fence_indent]
+                        + replacement
                         + (
                             "\n"
                             if end < len(lines) and lines[end].endswith("\n")
@@ -155,7 +187,11 @@ class InlineFileDelivery:
                     output.extend(lines[i : min(end + 1, len(lines))])
                 i = end + 1
                 continue
-            if line.startswith(("    ", "\t")) or re.match(r"^ {0,3}>", line):
+            if (
+                indent >= content_indent + 4
+                or line.startswith("\t")
+                or re.match(r"^\s*>", line)
+            ):
                 # Decline indented code/quoted examples, including nested fences.
                 output.append(line)
                 i += 1
@@ -276,6 +312,8 @@ class InlineFileDelivery:
                 if not output.is_relative_to(root):
                     return unavailable
                 output.mkdir(parents=True, exist_ok=True)
+                # These are durable workspace outputs, not disposable temp
+                # files. A unique directory avoids overwriting earlier runs.
                 directory = Path(tempfile.mkdtemp(prefix="inline-", dir=output))
                 path = directory / name
                 try:

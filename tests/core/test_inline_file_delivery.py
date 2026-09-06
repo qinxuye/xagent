@@ -80,6 +80,36 @@ def test_does_not_turn_code_or_ambiguous_text_into_files(delivery, source):
     assert not delivery.workspace.files
 
 
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "- Files:\n    - ",
+        "1. Files:\n    1. ",
+        "- Files:\n  - More:\n      - ",
+        "- Files:\n\n    ",
+    ],
+)
+def test_nested_list_deliveries_are_not_indented_code(delivery, prefix):
+    assert (
+        delivery.transform(prefix + link())
+        == prefix + "[report.csv](file:registered-0)"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "    - " + link(),
+        "- Example:\n\n      " + link(),
+        "- Example:\n    ```markdown\n    " + link() + "\n    ```",
+        "- Example:\n    > " + link(),
+    ],
+)
+def test_nested_code_and_quotes_stay_literal(delivery, source):
+    assert delivery.transform(source) == source
+    assert not delivery.workspace.files
+
+
 @pytest.mark.parametrize("payload", ["not-base64!!!", "Y", "YQ=", "", "YQ==garbage"])
 def test_malformed_payload_has_no_raw_blob_or_fake_file(delivery, payload):
     result = delivery.transform(f"[report.csv](data:text/csv;base64,{payload})")
@@ -281,6 +311,24 @@ def test_prose_markers_do_not_stall_stream(source):
         assert emitted + guard.flush() == source
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        "Use `df` to inspect the result. " * 10,
+        "`df` is the result. " * 10,
+        "An unmatched ` tick followed by prose. " * 10,
+        "Read [text](data:text/plain,hello) then continue. " * 10,
+    ],
+)
+def test_prose_backticks_and_plain_data_urls_keep_streaming(source):
+    for chunks in ([source], list(source), [source[:20], source[20:]]):
+        guard = InlineFileStreamGuard()
+        emitted = "".join(guard.feed(chunk) for chunk in chunks)
+        assert not guard.held
+        assert len(guard.pending) <= 6
+        assert emitted + guard.flush() == source
+
+
 @pytest.mark.parametrize("fence", ["```", "~~~~"])
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 def test_unnamed_base64_example_keeps_streaming(fence, newline):
@@ -302,6 +350,17 @@ def test_named_fence_stream_splits_withhold_payload(fence):
         )
         assert "YSwK" not in emitted
         assert source.startswith(emitted)
+
+
+def test_nested_named_fence_is_delivered_without_streaming_payload(delivery):
+    source = "- Files:\n    ```base64 filename=report.csv\n    YSwK\n    ```\n"
+    for offset in range(len(source) + 1):
+        guard = InlineFileStreamGuard()
+        emitted = (
+            guard.feed(source[:offset]) + guard.feed(source[offset:]) + guard.flush()
+        )
+        assert "YSwK" not in emitted
+    assert delivery.transform(source) == "- Files:\n  [report.csv](file:registered-0)\n"
 
 
 def test_long_unicode_filename_fits_byte_budget(delivery):
@@ -346,8 +405,9 @@ async def test_runtime_stream_end_and_buffered_result_share_registered_file(
 
 
 @pytest.mark.asyncio
-async def test_runner_wires_delivery_and_normalizes_context(delivery):
-    from xagent.core.agent import Agent
+@pytest.mark.parametrize("restored", [False, True])
+async def test_runner_wires_delivery_and_normalizes_context(delivery, restored):
+    from xagent.core.agent import Agent, ExecutionContext
     from xagent.core.agent.runner import AgentRunner
 
     class Manager:
@@ -359,13 +419,25 @@ async def test_runner_wires_delivery_and_normalizes_context(delivery):
 
     class Pattern:
         async def run(self, context, **kwargs):
+            if restored:
+                assert context.messages[-1].content == link()
             context.add_assistant_message(link())
             return {"success": True, "output": link()}
 
     runner = AgentRunner(
         Agent(name="inline-test", patterns=[Pattern()]), workspace_manager=Manager()
     )
-    result = await runner.run("Create a CSV", execution_id="inline-test")
+    checkpoint = None
+    if restored:
+        saved_context = ExecutionContext(execution_id="inline-test")
+        saved_context.add_assistant_message(link())
+        checkpoint = {"context": saved_context.to_dict()}
+    result = await runner.run(
+        "Create a CSV",
+        execution_id="inline-test",
+        resume=restored,
+        checkpoint=checkpoint,
+    )
     assert result["output"] == "[report.csv](file:registered-0)"
     assert result["context"].messages[-1].content == result["output"]
     assert len(delivery.workspace.files) == 1
