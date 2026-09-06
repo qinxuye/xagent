@@ -194,7 +194,7 @@ body .hover\:\text-\[\#E6EDF3\]:hover {
 }
 
 /* Keep wide Markdown tables inside the conversation, with readable columns.
-   Scope this to the Markdown wrapper; file previews own their table layout. */
+   Also applies to Markdown file previews; other file renderers own their layout. */
 .prose .markdown-table-scroll {
   max-width: 100%;
   overflow-x: auto;

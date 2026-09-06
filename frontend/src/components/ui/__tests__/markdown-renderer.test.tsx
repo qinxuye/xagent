@@ -333,10 +333,18 @@ describe('MarkdownRenderer', () => {
       '| Valid | Table |', '| --- | --- |', '| yes | $15 |', '', 'After table.',
     ].join('\n')} />)
     expect(container.querySelector('blockquote pre code')?.textContent).toBe(source.slice(2) + '\n')
-    expect(container.querySelector('li pre code')?.textContent).toContain('| x | y | z |')
+    expect(container.querySelector('li pre code')?.textContent).toBe('| A | B |\n  | --- | --- |\n  | x | y | z |\n')
     expect(screen.getAllByRole('table')).toHaveLength(1)
     expect(screen.getByText('After table.')).toBeInTheDocument()
     expect(container.querySelector('strong')?.textContent).toBe('table')
+  })
+
+  it('preserves surplus cells from CRLF input and renders valid CRLF tables', () => {
+    const header = '| A | B |\r\n| --- | --- |\r\n'
+    const { container, rerender } = render(<MarkdownRenderer content={header + '| x | y | z |'} />)
+    expect(container.querySelector('pre code')?.textContent).toBe(header + '| x | y | z |\n')
+    rerender(<MarkdownRenderer content={header + '| x | y |'} />)
+    expect(screen.getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['x', 'y'])
   })
 
   it('switches safely between incomplete, valid and overflowing streamed rows', () => {
