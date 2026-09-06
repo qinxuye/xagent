@@ -3,7 +3,8 @@ import type { Plugin } from 'unified'
 
 /**
  * GFM parses surplus cells, but the HTML conversion silently discards them.
- * Preserve a mismatched table as inert source before that conversion. Do not
+ * Preserve a table with surplus cells as inert source before that conversion.
+ * Under-filled rows are losslessly padded by GFM and remain tables. Do not
  * infer which pipes were intended as text or shift values between columns.
  */
 export const remarkPreserveTableContent: Plugin<[], Root> = () => (tree, file) => {
@@ -12,8 +13,8 @@ export const remarkPreserveTableContent: Plugin<[], Root> = () => (tree, file) =
   function walk(parent: Parents) {
     parent.children.forEach((node, index) => {
       if (node.type === 'table') {
-        const columns = node.children[0]?.children.length
-        if (node.children.some((row) => row.children.length !== columns)) {
+        const columns = node.children[0]?.children.length ?? 0
+        if (node.children.some((row) => row.children.length > columns)) {
           const start = node.position?.start.offset
           const end = node.position?.end.offset
           // Parsed Markdown always has offsets; leave synthetic plugin nodes

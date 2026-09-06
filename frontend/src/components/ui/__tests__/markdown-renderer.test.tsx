@@ -300,10 +300,11 @@ describe('MarkdownRenderer', () => {
 
   it('keeps the table and scroll wrapper stable while a streamed row grows', () => {
     const header = '| Plan | Price |\n| --- | --- |\n'
-    const { rerender } = render(<MarkdownRenderer content={header + '| SIMBA | $'} />)
+    const { rerender } = render(<MarkdownRenderer content={header + '| SIMBA |'} />)
     const table = screen.getByRole('table')
     const wrapper = table.parentElement
-    for (const row of ['| SIMBA | $', '| SIMBA | $15', '| SIMBA | $15–$25 |']) {
+    expect(screen.getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['SIMBA', ''])
+    for (const row of ['| SIMBA |', '| SIMBA | $', '| SIMBA | $15', '| SIMBA | $15–$25 |']) {
       rerender(<MarkdownRenderer content={header + row} />)
       expect(screen.getByRole('table')).toBe(table)
       expect(table.parentElement).toBe(wrapper)
@@ -313,7 +314,6 @@ describe('MarkdownRenderer', () => {
 
   it.each([
     '| SIMBA | $15 | never discard this |',
-    '| SIMBA |',
     '| Jack | TEST | $1,909.81 |',
     '| `a|b` | $15 |',
     '| <img src=x onerror=alert(1)> | $15 | private value |',
@@ -342,7 +342,8 @@ describe('MarkdownRenderer', () => {
   it('switches safely between incomplete, valid and overflowing streamed rows', () => {
     const header = '| Campaign | Spend |\n| --- | --- |\n'
     const { container, rerender } = render(<MarkdownRenderer content={header + '| Jack |'} />)
-    expect(container.querySelector('pre code')?.textContent).toBe(header + '| Jack |\n')
+    expect(screen.getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['Jack', ''])
+    expect(container.querySelector('pre')).toBeNull()
     rerender(<MarkdownRenderer content={header + '| Jack | $15 |'} />)
     expect(screen.getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['Jack', '$15'])
     const overflow = header + '| Jack | TEST | $15 |'
@@ -360,6 +361,19 @@ describe('MarkdownRenderer', () => {
     ].join('\n')} />)
     expect(screen.getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['one', '', '', 'two'])
     expect(container.querySelector('pre code')?.textContent).toBe('| A | B |\n| --- | --- |\n| x | y | z |\n')
+  })
+
+  it.each([
+    ['| A | B |\n| --- | --- |', 2, []],
+    ['| A |\n| --- |\n| one |', 1, ['one']],
+    ['| A |\n| --- |', 1, []],
+    ['| A | B | C |\n| --- | --- | --- |\n| one |\n| two | three |', 3, ['one', '', '', 'two', 'three', '']],
+  ])('keeps lossless GFM tables rendered: %s', (source, columns, cells) => {
+    const { container } = render(<MarkdownRenderer content={source} />)
+    expect(screen.getByRole('table')).toBeInTheDocument()
+    expect(screen.getAllByRole('columnheader')).toHaveLength(columns)
+    expect(screen.queryAllByRole('cell').map((cell) => cell.textContent)).toEqual(cells)
+    expect(container.querySelector('pre')).toBeNull()
   })
 
   it('replays the plan comparison table captured from the original TC6 task', () => {
