@@ -13,11 +13,6 @@ def check_package(content: ArtifactContent) -> None:
     from defusedxml.common import DefusedXmlException
     from defusedxml.ElementTree import fromstring
 
-    roots = {
-        ".xlsx": "xl/workbook.xml",
-        ".docx": "word/document.xml",
-        ".pptx": "ppt/presentation.xml",
-    }
     try:
         with ZipFile(BytesIO(content.data)) as archive:
             entries = archive.infolist()
@@ -32,11 +27,10 @@ def check_package(content: ArtifactContent) -> None:
                 for n in names
             ):
                 raise InvalidArtifact("Office package contains ambiguous member paths.")
-            required = {
-                "[Content_Types].xml",
-                "_rels/.rels",
-                roots[Path(content.filename).suffix.lower()],
-            }
+            # Main-part locations come from content types and relationships,
+            # not conventional filenames. The format reader resolves them
+            # after this package-wide safety preflight has passed.
+            required = {"[Content_Types].xml", "_rels/.rels"}
             if not required.issubset(names):
                 raise InvalidArtifact(
                     "Office package is missing required document parts."

@@ -1,6 +1,7 @@
 """Independent format checks; no business-content or minimum-size heuristics."""
 
 import csv
+import zlib
 from io import BytesIO, StringIO
 
 from .models import ArtifactContent, InvalidArtifact, UncheckedArtifact
@@ -35,12 +36,17 @@ def check_csv(content: ArtifactContent) -> None:
         # Ragged rows, an empty file, or a single column can all be legitimate.
         # Schema/business expectations belong to additional explicit checks.
     except csv.Error as exc:
-        raise InvalidArtifact("CSV quoting or record structure is malformed.") from exc
+        # Lenient readers may recover nonstandard quoting, but can also merge
+        # truncated records silently. Neither corruption nor validity is proven.
+        raise UncheckedArtifact(
+            "CSV quoting or record structure is ambiguous."
+        ) from exc
 
 
 def check_pdf(content: ArtifactContent) -> None:
     from pypdf import PdfReader
     from pypdf.errors import PdfReadError
+    from pypdf.generic import ArrayObject, EncodedStreamObject
 
     if not content.data.lstrip().startswith(b"%PDF-"):
         raise InvalidArtifact("PDF header is missing.")
@@ -54,6 +60,42 @@ def check_pdf(content: ArtifactContent) -> None:
             raise UncheckedArtifact("PDF exceeds the page budget.")
         expanded = 0
         for page in reader.pages:
+            raw_contents = page.get("/Contents")
+            if raw_contents is not None:
+                raw_contents = raw_contents.get_object()
+                parts = (
+                    raw_contents
+                    if isinstance(raw_contents, ArrayObject)
+                    else [raw_contents]
+                )
+                for part in parts:
+                    part = part.get_object()
+                    if not isinstance(part, EncodedStreamObject):
+                        continue
+                    filters = part.get("/Filter")
+                    if filters not in (
+                        "/FlateDecode",
+                        "/Fl",
+                        ["/FlateDecode"],
+                        ["/Fl"],
+                    ):
+                        continue
+                    # pypdf's recovery decoder can silently return empty bytes
+                    # for an unreadable FlateDecode stream. Distinguish that
+                    # from a genuinely empty compressed stream, without treating
+                    # successful nonempty recovery as strict-conformance failure.
+                    if not part.get_data():
+                        try:
+                            decoder = zlib.decompressobj()
+                            decoded = decoder.decompress(part._data, 1)
+                        except zlib.error as exc:
+                            raise UncheckedArtifact(
+                                "PDF content stream recovery could not be verified."
+                            ) from exc
+                        if decoded or not decoder.eof:
+                            raise UncheckedArtifact(
+                                "PDF content stream recovery could not be verified."
+                            )
             stream = page.get_contents()
             if stream is not None:
                 expanded += len(stream.get_data())

@@ -206,6 +206,7 @@ def build_workspace_file_ref(
 
     ``validate`` checks a completed output snapshot without changing registration
     or tool success. Call from a worker thread, as with other blocking file I/O.
+    It applies only to user-visible outputs; internal scratch files are not checked.
     """
     resolved_path = Path(file_path).resolve()
     if not resolved_path.exists() or not resolved_path.is_file():

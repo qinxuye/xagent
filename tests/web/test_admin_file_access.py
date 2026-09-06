@@ -149,7 +149,7 @@ def test_validation_uses_current_bytes_and_keeps_raw_download(
     assert first.json()["supported"] is True
     path.write_text('a,b\n"broken')
     second = client.get(url, params={"validation_only": "true"}, headers=headers)
-    assert second.json()["status"] == "invalid"
+    assert second.json()["status"] == "unchecked"
     assert second.json()["sha256"] != first.json()["sha256"]
     raw = client.get(url, headers=headers)
     assert raw.content == path.read_bytes()

@@ -37,7 +37,9 @@ def test_corrupt_formats_are_invalid(extension):
     assert check(b"not a document", f"report.{extension}").status == "invalid"
 
 
-@pytest.mark.parametrize("extension", ["xlsx", "docx", "pptx", "pdf", "png"])
+@pytest.mark.parametrize(
+    "extension", ["xlsx", "docx", "pptx", "pdf", "png", "bmp", "tif", "tiff"]
+)
 def test_real_readers_accept_minimal_documents(extension):
     stream = BytesIO()
     if extension == "xlsx":
@@ -61,9 +63,92 @@ def test_real_readers_accept_minimal_documents(extension):
     else:
         from PIL import Image
 
-        Image.new("RGB", (4, 4)).save(stream, format="PNG")
+        Image.new("RGB", (4, 4)).save(
+            stream,
+            format={"tif": "TIFF", "tiff": "TIFF"}.get(extension, extension.upper()),
+        )
     result = check(stream.getvalue(), f"file.{extension}")
     assert result.status == "valid", result
+
+
+@pytest.mark.parametrize(
+    "extension,part",
+    [
+        ("xlsx", "xl/workbook.xml"),
+        ("docx", "word/document.xml"),
+        ("pptx", "ppt/presentation.xml"),
+    ],
+)
+@pytest.mark.parametrize("missing", [False, True])
+def test_office_reader_resolves_main_part(extension, part, missing):
+    from xagent.core.artifact_validation.office import check_office_document
+
+    original = BytesIO()
+    if extension == "xlsx":
+        from openpyxl import Workbook
+
+        Workbook().save(original)
+    elif extension == "docx":
+        from docx import Document
+
+        Document().save(original)
+    else:
+        from pptx import Presentation
+
+        Presentation().save(original)
+    renamed = part.replace(".xml", "-renamed.xml")
+    old_rels = part.rsplit("/", 1)[0] + "/_rels/" + part.rsplit("/", 1)[1] + ".rels"
+    new_rels = old_rels.replace(".xml.rels", "-renamed.xml.rels")
+    rewritten = BytesIO()
+    with ZipFile(original) as source, ZipFile(rewritten, "w", ZIP_DEFLATED) as target:
+        for entry in source.infolist():
+            if missing and entry.filename == part:
+                continue
+            data = source.read(entry)
+            name = entry.filename
+            if not missing:
+                if name in ("[Content_Types].xml", "_rels/.rels"):
+                    data = data.replace(part.encode(), renamed.encode())
+                name = {part: renamed, old_rels: new_rels}.get(name, name)
+            target.writestr(name, data)
+    data = rewritten.getvalue()
+    if not missing:
+        # Prove that the installed format reader accepts the renamed package.
+        check_office_document(
+            ArtifactContent("file." + extension, data, ValidationLimits())
+        )
+    report = check(data, "file." + extension)
+    assert [c.status for c in report.checks] == [
+        "valid",
+        "invalid" if missing else "valid",
+    ]
+
+
+@pytest.mark.parametrize("extension,format_name", [("gif", "GIF"), ("tiff", "TIFF")])
+def test_image_checks_all_frames(extension, format_name, monkeypatch):
+    from PIL import Image
+
+    stream = BytesIO()
+    Image.new("RGB", (4, 4), "red").save(
+        stream,
+        format=format_name,
+        save_all=True,
+        append_images=[Image.new("RGB", (4, 4), "blue")],
+    )
+    data = stream.getvalue()
+    assert check(data, "frames." + extension).status == "valid"
+    assert check(data, "frames." + extension, max_pixels=31).status == "unchecked"
+    with Image.open(BytesIO(data)) as image:
+        reader_class = type(image)
+    original_load = reader_class.load
+
+    def fail_second_frame(self, *args, **kwargs):
+        if self.tell() == 1:
+            raise OSError("second frame cannot decode")
+        return original_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(reader_class, "load", fail_second_frame)
+    assert check(data, "frames." + extension).status == "invalid"
 
 
 def test_read_only_xlsx_checks_cells_beyond_stale_dimensions():
@@ -112,12 +197,54 @@ def test_csv_does_not_impose_business_schema(data):
 
 
 def test_csv_malformed_encoding_and_budget():
-    assert check(b'a,b\n"unterminated,2', "data.csv").status == "invalid"
+    assert check(b'a,b\n"unterminated,2', "data.csv").status == "unchecked"
     assert check(b"\xff\x98", "data.csv").status == "unchecked"
     assert check(b"a,\x00", "data.csv").status == "invalid"
     assert check(b"a\nb", "data.csv", max_units=1).status == "unchecked"
     assert check(b"one", "data.csv", max_bytes=2).status == "unchecked"
     assert check(b"whatever", "data.unknown").status == "unchecked"
+
+
+def test_csv_lenient_reader_recovery_is_not_reported_as_corruption():
+    import csv
+
+    data = b'a,b\n1,"he said "hi" there"\n'
+    assert len(list(csv.reader(data.decode().splitlines()))) == 2
+    assert check(data, "data.csv").status == "unchecked"
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [(-1, -1), (512 * 1024**2, 512 * 1024**2), (256 * 1024**2, 512 * 1024**2)],
+)
+def test_worker_keeps_stricter_address_space_limits(existing, monkeypatch):
+    from io import StringIO
+    from types import SimpleNamespace
+
+    from xagent.core.artifact_validation import worker
+
+    resource = pytest.importorskip("resource")
+    monkeypatch.setattr(resource, "RLIM_INFINITY", -1)
+    applied = []
+
+    def set_limit(kind, limits):
+        assert kind == resource.RLIMIT_AS
+        if existing[1] != -1 and limits[1] > existing[1]:
+            raise ValueError("cannot raise the hard limit")
+        applied.append(limits)
+
+    monkeypatch.setattr(resource, "getrlimit", lambda _: existing)
+    monkeypatch.setattr(resource, "setrlimit", set_limit)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "argv", ["worker", "data.csv", "1024"])
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(b"a,b\n1,2\n")))
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    worker.main()
+    assert applied == [
+        tuple(1024**3 if limit == -1 else min(limit, 1024**3) for limit in existing)
+    ]
+    assert json.loads(output.getvalue())["status"] == "valid"
 
 
 def test_archive_budgets_and_unsafe_xml():
@@ -159,9 +286,7 @@ def test_office_package_rejects_ambiguous_members(suffix, root, bad_member):
     assert "ambiguous member paths" in report.checks[0].message
 
 
-@pytest.mark.parametrize(
-    "missing", ["[Content_Types].xml", "_rels/.rels", "xl/workbook.xml"]
-)
+@pytest.mark.parametrize("missing", ["[Content_Types].xml", "_rels/.rels"])
 def test_office_package_rejects_missing_required_parts(missing):
     stream = BytesIO()
     with ZipFile(stream, "w") as archive:
@@ -190,6 +315,40 @@ def test_office_package_entry_count_and_encrypted_member_guards():
     report = check(bytes(data), "file.xlsx")
     assert report.status == "unchecked"
     assert "Encrypted Office" in report.checks[0].message
+
+
+@pytest.mark.parametrize(
+    "payload,expected", [(b"", "valid"), (b"q Q\n", "valid"), (None, "unchecked")]
+)
+@pytest.mark.parametrize("array", [False, True])
+def test_pdf_does_not_certify_silently_discarded_flate_content(
+    payload, expected, array
+):
+    import zlib
+
+    from pypdf import PdfWriter
+    from pypdf.generic import ArrayObject, EncodedStreamObject, NameObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=100, height=100)
+    stream = EncodedStreamObject()
+    stream[NameObject("/Filter")] = NameObject("/FlateDecode")
+    stream._data = (
+        zlib.compress(payload) if payload is not None else b"not compressed data"
+    )
+    # A checksum defect can still recover every original content byte. Do not
+    # reject successful nonempty recovery just for strict zlib conformance.
+    if payload:
+        stream._data = stream._data[:-1] + bytes([stream._data[-1] ^ 1])
+        assert stream.get_data() == payload
+    ref = writer._add_object(stream)
+    page[NameObject("/Contents")] = ArrayObject([ref]) if array else ref
+    output = BytesIO()
+    writer.write(output)
+    report = check(output.getvalue(), "content.pdf")
+    assert report.status == expected
+    if expected == "unchecked":
+        assert "stream recovery" in report.checks[0].message
 
 
 def test_readable_pdf_with_recoverable_xref_is_not_invalid():
@@ -279,7 +438,7 @@ def test_service_real_worker_and_same_name_rewrite(tmp_path):
     assert first.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
     path.write_bytes(b'a,b\n"broken')
     second = validate_artifact(path)
-    assert second.status == "invalid"
+    assert second.status == "unchecked"
     assert second.sha256 != first.sha256
     assert path.read_bytes() == b'a,b\n"broken'
 

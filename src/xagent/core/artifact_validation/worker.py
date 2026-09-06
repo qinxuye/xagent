@@ -14,7 +14,14 @@ def main() -> None:
     if sys.platform == "linux":
         import resource
 
-        resource.setrlimit(resource.RLIMIT_AS, (1024**3, 1024**3))
+        existing = resource.getrlimit(resource.RLIMIT_AS)
+        resource.setrlimit(
+            resource.RLIMIT_AS,
+            tuple(
+                1024**3 if limit == resource.RLIM_INFINITY else min(limit, 1024**3)
+                for limit in existing
+            ),
+        )
     limits = ValidationLimits(max_bytes=int(sys.argv[2]))
     # Parser libraries may write warnings to stdout. Keep the protocol output
     # separate from their diagnostics.
