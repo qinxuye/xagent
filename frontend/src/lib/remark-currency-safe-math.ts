@@ -5,7 +5,14 @@ const DOLLAR_CODE = '$'.charCodeAt(0)
 const ZERO_CODE = '0'.charCodeAt(0)
 const NINE_CODE = '9'.charCodeAt(0)
 
-/** Keep ordinary prices from opening math while retaining $math$ and $$math$$. */
+/**
+ * Exclude common price-pair delimiters while retaining explicit $math$.
+ * This is not a semantic currency classifier: ambiguous $...$ pairs (including
+ * $10$ and math followed by punctuation) remain math. Escape literal dollars
+ * in ambiguous prose, or use code spans for expressions such as $X+$Y.
+ * Tight single-dollar delimiters exclude all whitespace, including tabs and
+ * Unicode spaces; explicit multi-dollar math retains its padding behavior.
+ */
 export const remarkCurrencySafeMath: Plugin = function () {
   const extensionStart = this.data().micromarkExtensions?.length ?? 0
   remarkMath.call(this)

@@ -283,7 +283,11 @@ describe('MarkdownRenderer', () => {
 
   it.each([
     ['Number: $10$.', '10'],
+    ['The $x$-axis.', 'x'],
+    ['Coordinate ($x$).', 'x'],
+    ['At end $x$', 'x'],
     ['Inline $$ x + y $$ math.', 'x + y'],
+    ['Inline $$\tx\t$$ math.', '\tx\t'],
     ['$$\nE = mc^2\n$$', 'E = mc^2'],
     ['Formula: $x_1 + \\frac{1}{2}$.', 'x_1 + \\frac{1}{2}'],
   ])('preserves explicit math delimiters: %s', (content, formula) => {
@@ -293,7 +297,7 @@ describe('MarkdownRenderer', () => {
     expect(container.querySelector('annotation')?.textContent).toBe(formula)
   })
 
-  it.each(['$ x$', '$x $', '$x$2'])(
+  it.each(['$ x$', '$x $', '$x$2', '$\tx\t$', '$\u00a0x\u00a0$'])(
     'requires tight single-dollar delimiters and a non-digit after the closer: %s',
     (content) => {
       const { container } = render(<MarkdownRenderer content={content} />)
@@ -303,7 +307,19 @@ describe('MarkdownRenderer', () => {
     },
   )
 
-  it('leaves escaped dollars and code containing prices unchanged', () => {
+  it.each([
+    [String.raw`It costs \$20 (USD\$).`, 'It costs $20 (USD$).'],
+    [String.raw`Cost \$5, currency USD\$`, 'Cost $5, currency USD$'],
+    [String.raw`\$X+\$Y`, '$X+$Y'],
+    [String.raw`\$10\$`, '$10$'],
+  ])('supports explicit literal dollars in ambiguous prose: %s', (content, expected) => {
+    const { container } = render(<MarkdownRenderer content={content} />)
+
+    expect(container.querySelector('p')?.textContent).toBe(expected)
+    expect(container.querySelector('.katex')).toBeNull()
+  })
+
+  it('preserves existing escaped-dollar and code behavior', () => {
     const { container } = render(<MarkdownRenderer content={[
       String.raw`Prices: \$15 and \$25.`,
       '`$15 and $25`',

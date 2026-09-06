@@ -88,6 +88,24 @@ describe('currency-safe math registration', () => {
     expect(getMathText(extensions[2]).tokenize).not.toBe(newTokenizer)
     expect(getMathText(existing).tokenize).toBe(existingTokenizer)
     expect(otherDollar.tokenize).toBe(otherTokenizer)
+
+    // Exercise the selected tokenizer, not just its identity. Isolate it from
+    // the deliberately unguarded older parser fixtures; this is a registration
+    // contract test, not a claim that remark-math currently emits this shape.
+    const parser = unified().use(remarkParse).data({
+      ...processor.data(),
+      micromarkExtensions: [{ text: { [DOLLAR_CODE]: getMathText(extensions[2]) } }],
+    })
+    expect(parser.parse('Budget $10–$25; $x^2$.')).toMatchObject({
+      children: [{
+        type: 'paragraph',
+        children: [
+          { type: 'text', value: 'Budget $10–$25; ' },
+          { type: 'inlineMath', value: 'x^2' },
+          { type: 'text', value: '.' },
+        ],
+      }],
+    })
   })
 
   it('keeps currency literal and math enabled with the real dependency', () => {
