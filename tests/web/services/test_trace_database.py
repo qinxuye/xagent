@@ -203,6 +203,20 @@ def test_sync_shared_pool_headroom_and_async_backend_validation():
         engine.dispose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pool_size,expected", [(1, 1), (3, 2), (10, 8)])
+async def test_sync_postgresql_pool_reserves_headroom(pool_size, expected):
+    # Engine construction does not connect: exercise the real QueuePool and
+    # PostgreSQL dialect without requiring a PostgreSQL server.
+    source = create_engine("postgresql+psycopg2://", pool_size=pool_size)
+    runtime = TraceDatabaseRuntime(source, use_async=False, limit=8)
+    try:
+        assert runtime.limit == expected
+    finally:
+        await runtime.close()
+        source.dispose()
+
+
 def test_runtime_is_owned_by_loop(monkeypatch):
     monkeypatch.setenv("XAGENT_ASYNC_TRACE_DB_ENABLED", "false")
     runtimes = []

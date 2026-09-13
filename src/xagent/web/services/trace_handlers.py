@@ -1044,12 +1044,11 @@ class DatabaseTraceHandler(BaseTraceHandler):
             timestamp = _convert_float_to_datetime(event.timestamp)
 
             # Serialize data to ensure JSON compatibility
-            with observe_duration("xagent.trace.database.serialization.duration"):
-                data = (
-                    prepared.data
-                    if prepared is not None
-                    else self._serialize_data_for_json(event.data or {})
-                )
+            if prepared is not None:
+                data = prepared.data
+            else:
+                with observe_duration("xagent.trace.database.serialization.duration"):
+                    data = self._serialize_data_for_json(event.data or {})
             lease = current_task_lease() if self.build_id is None else None
             is_legacy_checkpoint = (
                 event_type_str == "system_update_general"

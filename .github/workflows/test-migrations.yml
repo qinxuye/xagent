@@ -75,6 +75,8 @@ on:
       - 'src/xagent/web/services/trace_message_storage.py'
       - 'tests/web/services/test_trace_blob_upsert_postgresql.py'
       - 'src/xagent/web/services/trace_database.py'
+      - 'src/xagent/web/services/trace_event_staging.py'
+      - 'src/xagent/config.py'
       - 'src/xagent/web/services/trace_handlers.py'
       - 'tests/web/services/test_trace_database_postgresql.py'
   pull_request:
@@ -188,6 +190,8 @@ jobs:
             src/xagent/web/services/trace_message_storage.py
             tests/web/services/test_trace_blob_upsert_postgresql.py
             src/xagent/web/services/trace_database.py
+            src/xagent/web/services/trace_event_staging.py
+            src/xagent/config.py
             src/xagent/web/services/trace_handlers.py
             tests/web/services/test_trace_database_postgresql.py
           )
