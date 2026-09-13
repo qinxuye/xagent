@@ -81,6 +81,8 @@ async def test_broadcast_records_one_payload_for_multiple_connections(
 
 @pytest.mark.asyncio
 async def test_database_trace_handler_emits_write_outcome(monkeypatch, metric_reader):
+    # This test intercepts the synchronous writer, independent of backend default.
+    monkeypatch.setenv("XAGENT_ASYNC_TRACE_DB_ENABLED", "false")
     from xagent.core.agent.trace import TASK_START_GENERAL, TraceEvent
     from xagent.web.services.trace_handlers import DatabaseTraceHandler
 

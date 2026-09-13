@@ -14,6 +14,19 @@ from packaging.version import Version
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+def test_postgresql_dependency_groups_include_async_trace_driver():
+    """Default-on async trace writes require Psycopg 3 in image and CI installs."""
+    project = tomllib.loads(read_repo_file("pyproject.toml"))
+    for group in ("backend-image", "test"):
+        requirements = {
+            Requirement(item).name
+            for item in project["dependency-groups"][group]
+            if isinstance(item, str)
+        }
+        assert {"psycopg2-binary", "psycopg"} <= requirements
+
+
 # Distribution names and import names are separate interfaces. Keep the mapping
 # explicit so packages such as pydantic-settings are checked without guessing
 # their import name from punctuation.

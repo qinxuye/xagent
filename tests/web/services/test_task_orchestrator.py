@@ -4350,6 +4350,9 @@ async def test_leased_auto_failure_preserves_client_classification(db_session) -
 async def test_cancelled_runner_drains_persistence_before_settlement(
     db_session, monkeypatch, kind, write_fails
 ):
+    # This barrier exercises a synchronous Session's commit/close contract.
+    # Async driver cancellation is covered by the trace database backend tests.
+    monkeypatch.setenv("XAGENT_ASYNC_TRACE_DB_ENABLED", "false")
     from xagent.core.agent.checkpoint import CHECKPOINT_EVENT_TYPE
     from xagent.core.agent.trace import TraceEvent as CoreTraceEvent
     from xagent.web.api import websocket
