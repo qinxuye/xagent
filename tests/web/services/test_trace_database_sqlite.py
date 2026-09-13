@@ -20,9 +20,12 @@ from xagent.web.services.trace_database import TraceDatabaseRuntime
         contracts.test_checkpoint_retention_dedup_pointer_and_required_data,
         contracts.test_stale_lease_rolls_back_staged_checkpoint_and_blobs,
         contracts.test_commit_failure_rolls_back_and_subsequent_write_works,
+        contracts.test_large_checkpoint_preparation_keeps_loop_responsive,
     ],
 )
-async def test_checkpoint_contracts(tmp_path, monkeypatch, contract):
+@pytest.mark.parametrize("encoding_v2", ["true", "false"])
+async def test_checkpoint_contracts(tmp_path, monkeypatch, contract, encoding_v2):
+    monkeypatch.setenv("XAGENT_CHECKPOINT_ENCODING_V2", encoding_v2)
     source = create_engine(f"sqlite:///{tmp_path / 'checkpoints.db'}")
     apply_sqlite_concurrency_pragmas(source)
     contracts.Base.metadata.create_all(source)

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -59,6 +60,7 @@ from ...web.services.task_lease_service import (
 )
 from ...web.services.trace_database import get_trace_database_runtime
 from ...web.services.trace_event_staging import (
+    PreparedTracePayload,
     checkpoint_run_partition_filter,
     failed_checkpoint_row_conditions,
     stage_trace_event_row,
@@ -233,6 +235,7 @@ class DatabaseTraceHandler(BaseTraceHandler):
                 get_trace_database_runtime().run(
                     lambda: self._sync_save_to_database(event),
                     lambda db: self._save_trace_event(db, event),
+                    prepare=lambda: self._prepare_async_trace_transaction(event),
                 )
             )
             await drain_async_task_cancellation_safe(worker)
@@ -1000,7 +1003,36 @@ class DatabaseTraceHandler(BaseTraceHandler):
         finally:
             db.close()
 
-    def _save_trace_event(self, db: Session, event: CoreTraceEvent) -> None:
+    def _prepare_async_trace_transaction(
+        self, event: CoreTraceEvent
+    ) -> Callable[[Session], None]:
+        from .task_event_trace_handler import get_event_type_mapping
+        from .trace_event_staging import prepare_trace_payload
+
+        event_type = get_event_type_mapping(event)
+        with observe_duration("xagent.trace.database.serialization.duration"):
+            data = self._serialize_data_for_json(event.data or {})
+        if event_type in {
+            "tool_execution_start",
+            "tool_execution_end",
+            "tool_execution_failed",
+        }:
+            data = redact_runtime_sensitive_payload(data)
+        prepared = prepare_trace_payload(
+            task_id=self.task_id,
+            event_type=event_type,
+            data=data,
+            checkpoint_lease=current_task_lease() if self.build_id is None else None,
+        )
+        return lambda db: self._save_trace_event(db, event, prepared=prepared)
+
+    def _save_trace_event(
+        self,
+        db: Session,
+        event: CoreTraceEvent,
+        *,
+        prepared: PreparedTracePayload | None = None,
+    ) -> None:
         """Save trace event in unified format to database."""
         from .task_event_trace_handler import get_event_type_mapping
 
@@ -1013,7 +1045,11 @@ class DatabaseTraceHandler(BaseTraceHandler):
 
             # Serialize data to ensure JSON compatibility
             with observe_duration("xagent.trace.database.serialization.duration"):
-                data = self._serialize_data_for_json(event.data or {})
+                data = (
+                    prepared.data
+                    if prepared is not None
+                    else self._serialize_data_for_json(event.data or {})
+                )
             lease = current_task_lease() if self.build_id is None else None
             is_legacy_checkpoint = (
                 event_type_str == "system_update_general"
@@ -1037,7 +1073,7 @@ class DatabaseTraceHandler(BaseTraceHandler):
                             return
                         raise RuntimeError(f"Task {self.task_id} no longer exists")
                     raise RuntimeError("Trace event producer lost its task lease")
-            if event_type_str in {
+            if prepared is None and event_type_str in {
                 "tool_execution_start",
                 "tool_execution_end",
                 "tool_execution_failed",
@@ -1072,6 +1108,7 @@ class DatabaseTraceHandler(BaseTraceHandler):
                 parent_event_id=str(event.parent_id) if event.parent_id else None,
                 data=data,
                 checkpoint_lease=checkpoint_lease,
+                prepared=prepared,
             )
             data = staged.stored_data
 

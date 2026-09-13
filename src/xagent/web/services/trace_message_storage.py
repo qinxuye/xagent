@@ -58,6 +58,99 @@ class BlobCandidate:
 
 
 @dataclass(frozen=True)
+class PreparedJSON:
+    """Owned JSON bind value encoded before opening the async transaction."""
+
+    encoded: str
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> PreparedJSON:
+        return self
+
+
+def trace_json_dumps(value: Any) -> str:
+    return value.encoded if isinstance(value, PreparedJSON) else json.dumps(value)
+
+
+@dataclass(frozen=True)
+class PreparedCheckpoint:
+    data: Any
+    messages: dict[str, BlobCandidate]
+    blobs: dict[tuple[str, str], BlobCandidate]
+
+
+def prepare_checkpoint_data(task_id: int, data: Any) -> PreparedCheckpoint:
+    """Pure preparation: never accepts a Session or touches the database."""
+    encoded = copy.deepcopy(data)
+    messages: dict[str, BlobCandidate] = {}
+    blobs: dict[tuple[str, str], BlobCandidate] = {}
+    if _resolve_use_v2(None):
+        payloads = _find_v2_encodable_payloads(encoded)
+        for payload in payloads:
+            if payload.kind == "messages":
+                payload.parent[payload.kind] = _encode_messages_payload(
+                    payload.value, task_id=task_id, message_blobs=messages
+                )
+            elif payload.kind == "tool_ledger":
+                payload.parent[payload.kind] = _encode_ledger_payload(
+                    payload.value, task_id=task_id, blob_candidates=blobs
+                )
+            else:
+                payload.parent[payload.kind] = _encode_blob_ref_payload(
+                    payload.value,
+                    task_id=task_id,
+                    blob_candidates=blobs,
+                    kind=CONTEXT_SYSTEM_PROMPT_KIND
+                    if payload.kind == "system_prompt"
+                    else CONTEXT_METADATA_KIND,
+                )
+    else:
+        if get_checkpoint_messages_storage_state(encoded) == "inline":
+            encoded["snapshot"]["context"]["messages"] = _encode_messages_payload(
+                _get_checkpoint_messages_payload(encoded),
+                task_id=task_id,
+                message_blobs=messages,
+            )
+        for field, value in _checkpoint_blob_fields_to_encode(encoded):
+            _set_nested(
+                encoded,
+                field.path,
+                _encode_blob_ref_payload(
+                    value, kind=field.kind, task_id=task_id, blob_candidates=blobs
+                ),
+            )
+    # Prevent the async driver's JSON bind and the insert's defensive deepcopy
+    # from repeating bulk payload work on the event-loop thread.
+    return PreparedCheckpoint(
+        encoded,
+        {
+            key: BlobCandidate(
+                PreparedJSON(json.dumps(value.data)), value.payload_bytes
+            )
+            for key, value in messages.items()
+        },
+        {
+            key: BlobCandidate(
+                PreparedJSON(json.dumps(value.data)), value.payload_bytes
+            )
+            for key, value in blobs.items()
+        },
+    )
+
+
+def store_prepared_checkpoint(
+    db: Session, *, task_id: int, prepared: PreparedCheckpoint
+) -> Any:
+    execution_id = checkpoint_execution_id(prepared.data)
+    _upsert_message_blobs(
+        db, task_id=task_id, execution_id=execution_id, blobs_by_hash=prepared.messages
+    )
+    _upsert_checkpoint_blobs(
+        db, task_id=task_id, execution_id=execution_id, blobs_by_ref=prepared.blobs
+    )
+    return prepared.data
+
+
+@dataclass(frozen=True)
 class TraceBlobLookup:
     message_data_by_hash: dict[str, Any]
     checkpoint_data_by_ref: dict[tuple[str, str], Any]

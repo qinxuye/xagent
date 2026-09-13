@@ -3,6 +3,7 @@
 import asyncio
 import os
 import threading
+import time
 import uuid
 
 import pytest
@@ -104,6 +105,58 @@ def checkpoint(task_id, step=0):
     )
 
 
+async def test_large_checkpoint_preparation_keeps_loop_responsive(storage):
+    source, runtime, handler, task_id = storage
+    if runtime.engine is None:
+        return  # This contract targets the default async implementation.
+    # Warm the mapper/import path before measuring the checkpoint itself.
+    with bind_task_lease_context(TaskLease(task_id, "runner", "run", "attempt")):
+        await handler._save_to_database(checkpoint(task_id))
+    event = checkpoint(task_id, 1)
+    event.data["snapshot"]["context"]["messages"] = [
+        {"role": "user", "content": "large payload " * 160, "index": index}
+        for index in range(3000)
+    ]
+    loop_thread = threading.get_ident()
+    prepare = handler._prepare_async_trace_transaction
+    seen = []
+
+    def checked_prepare(event):
+        seen.append(threading.get_ident())
+        assert seen[-1] != loop_thread
+        return prepare(event)
+
+    handler._prepare_async_trace_transaction = checked_prepare
+    gaps = []
+    done = asyncio.Event()
+
+    async def heartbeat():
+        previous = time.perf_counter()
+        while not done.is_set():
+            await asyncio.sleep(0.001)
+            now = time.perf_counter()
+            gaps.append(now - previous)
+            previous = now
+
+    monitor = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)
+    try:
+        with bind_task_lease_context(TaskLease(task_id, "runner", "run", "attempt")):
+            await handler._save_to_database(event)
+    finally:
+        done.set()
+        await monitor
+    assert seen and len(gaps) > 2
+    assert max(gaps) < 0.25, f"large checkpoint blocked loop for {max(gaps):.3f}s"
+    with Session(source) as db:
+        task = db.get(Task, task_id)
+        row = db.get(TraceEvent, task.last_checkpoint_trace_event_id)
+        restored = decode_trace_event_data(
+            db, task_id=task_id, data=row.data, strict=True, verify_blob_hashes=True
+        )
+        assert restored["snapshot"] == event.data["snapshot"]
+
+
 async def test_checkpoint_retention_dedup_pointer_and_required_data(
     storage, monkeypatch
 ):
@@ -203,10 +256,10 @@ async def test_cancel_during_database_wait_drains_transaction_before_next_write(
     original = handler._save_trace_event
     saved = []
 
-    def blocked(db, trace):
+    def blocked(db, trace, **kwargs):
         entered.set()
         db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
-        original(db, trace)
+        original(db, trace, **kwargs)
         saved.append(trace.id)
 
     monkeypatch.setattr(handler, "_save_trace_event", blocked)

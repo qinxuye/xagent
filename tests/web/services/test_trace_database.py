@@ -132,6 +132,64 @@ async def test_failed_write_returns_permit():
     await runtime.close()
 
 
+@pytest.mark.asyncio
+async def test_preparation_is_bounded_drained_and_precedes_connection(
+    tmp_path, monkeypatch
+):
+    source = create_engine(f"sqlite:///{tmp_path / 'prepare.db'}")
+    runtime = TraceDatabaseRuntime(source, use_async=True, limit=4)
+    monkeypatch.setattr(trace_handlers, "get_trace_database_runtime", lambda: runtime)
+    from sqlalchemy import event
+
+    from xagent.core.agent.trace import TASK_START_GENERAL, TraceEvent
+
+    checkouts = []
+    event.listen(
+        runtime.engine.sync_engine, "checkout", lambda *args: checkouts.append(1)
+    )
+    started, release = threading.Event(), threading.Event()
+    prepared = []
+    context = ContextVar("preparation_context", default="missing")
+    token = context.set("lease")
+    handler = trace_handlers.DatabaseTraceHandler(1)
+
+    def prepare(trace):
+        prepared.append(context.get())
+        started.set()
+        assert release.wait(3)
+        return lambda db: None
+
+    monkeypatch.setattr(handler, "_prepare_async_trace_transaction", prepare)
+    callers = [
+        asyncio.create_task(
+            handler._save_to_database(TraceEvent(TASK_START_GENERAL, task_id="1"))
+        )
+        for _ in range(3)
+    ]
+    closing = None
+    try:
+        await wait_until(started.is_set)
+        callers[0].cancel()
+        await asyncio.sleep(0)
+        callers[0].cancel()
+        closing = asyncio.create_task(runtime.close())
+        await asyncio.sleep(0.02)
+        assert prepared == ["lease"]
+        assert not checkouts
+        assert not callers[0].done() and not closing.done()
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: 42), 1) == 42
+    finally:
+        release.set()
+        outcomes = await asyncio.gather(*callers, return_exceptions=True)
+        await runtime.close()
+        if closing is not None:
+            await closing
+        source.dispose()
+        context.reset(token)
+    assert isinstance(outcomes[0], asyncio.CancelledError)
+    assert prepared == ["lease"] * 3
+
+
 def test_sync_shared_pool_headroom_and_async_backend_validation():
     engine = create_engine("sqlite://", poolclass=QueuePool, pool_size=3)
     try:

@@ -5,12 +5,16 @@ wait; they are not dropped. The handler owns cancellation-safe draining through
 session close and retention cleanup, so a permit cannot be reused while an
 abandoned worker still owns a transaction. AsyncSession.run_sync bridges the
 existing ORM transaction to async driver I/O, not the default thread pool.
-SQLite's aiosqlite driver uses a dedicated thread per connection. Python
-encoding/ORM work still runs on the loop; this is not CPU isolation.
+SQLite's aiosqlite driver uses a dedicated thread per connection. Bulk payload
+preparation and JSON encoding run in a bounded dedicated worker before Session
+creation. ORM bookkeeping and retention still run on the loop; threads share
+the GIL, so this does not replace process isolation for arbitrary CPU load.
 """
 
 import asyncio
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 
 from sqlalchemy import Engine
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
@@ -26,6 +30,7 @@ from ...core.runtime_performance import observe_duration, run_in_thread_with_tel
 from ...db.sqlite import apply_sqlite_concurrency_pragmas
 from ..models.database import get_engine
 from .db_runtime import drain_async_task_cancellation_safe
+from .trace_message_storage import trace_json_dumps
 
 _LOOP_ATTRIBUTE = "_xagent_trace_database_runtime"
 
@@ -75,6 +80,7 @@ class TraceDatabaseRuntime:
                     poolclass=AsyncAdaptedQueuePool,
                     hide_parameters=True,
                     execution_options=source.get_execution_options(),
+                    json_serializer=trace_json_dumps,
                 )
             except ModuleNotFoundError as exc:
                 raise RuntimeError(
@@ -89,6 +95,11 @@ class TraceDatabaseRuntime:
             # outside this budget and can still exhaust database capacity.
             limit = min(limit, max(1, source.pool.size() - 1))
         self.limit = limit
+        # One dedicated CPU preparation worker, never the API default executor.
+        # Admission above bounds queued preparation as well as active writes.
+        self._preparation_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="trace-prepare"
+        )
         self._slots = asyncio.Semaphore(limit)
         self._operations: set[asyncio.Task[None]] = set()
         self._closing = False
@@ -98,6 +109,7 @@ class TraceDatabaseRuntime:
         self,
         sync_write: Callable[[], None],
         transaction: Callable[[Session], None],
+        prepare: Callable[[], Callable[[Session], None]] | None = None,
     ) -> None:
         """Called inside the handler's cancellation-drained owned task."""
         if self._closing:
@@ -114,6 +126,16 @@ class TraceDatabaseRuntime:
                         "trace_database_write", sync_write
                     )
                 else:
+                    if prepare is not None:
+                        context = copy_context()
+                        with observe_duration(
+                            "xagent.trace.database.preparation.duration"
+                        ):
+                            transaction = (
+                                await asyncio.get_running_loop().run_in_executor(
+                                    self._preparation_pool, context.run, prepare
+                                )
+                            )
                     async with AsyncSession(self.engine, autoflush=False) as db:
                         await db.run_sync(transaction)
             finally:
@@ -130,6 +152,7 @@ class TraceDatabaseRuntime:
                 await asyncio.gather(*self._operations, return_exceptions=True)
                 if self.engine is not None:
                     await self.engine.dispose()
+                self._preparation_pool.shutdown(wait=True)
 
             self._close_task = asyncio.create_task(finish())
         await drain_async_task_cancellation_safe(self._close_task)
