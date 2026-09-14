@@ -74,6 +74,10 @@ from ...web.services.trace_message_storage import (
 
 logger = logging.getLogger(__name__)
 
+_REDACTED_TOOL_EVENT_TYPES = frozenset(
+    {"tool_execution_start", "tool_execution_end", "tool_execution_failed"}
+)
+
 # Preserve the existing control-character policy without a Python iteration
 # for every character in LLM/tool output. JSONB-specific normalization still
 # belongs to stage_trace_event_row, after this serializer.
@@ -1012,11 +1016,7 @@ class DatabaseTraceHandler(BaseTraceHandler):
         event_type = get_event_type_mapping(event)
         with observe_duration("xagent.trace.database.serialization.duration"):
             data = self._serialize_data_for_json(event.data or {})
-        if event_type in {
-            "tool_execution_start",
-            "tool_execution_end",
-            "tool_execution_failed",
-        }:
+        if event_type in _REDACTED_TOOL_EVENT_TYPES:
             data = redact_runtime_sensitive_payload(data)
         prepared = prepare_trace_payload(
             task_id=self.task_id,
@@ -1072,11 +1072,7 @@ class DatabaseTraceHandler(BaseTraceHandler):
                             return
                         raise RuntimeError(f"Task {self.task_id} no longer exists")
                     raise RuntimeError("Trace event producer lost its task lease")
-            if prepared is None and event_type_str in {
-                "tool_execution_start",
-                "tool_execution_end",
-                "tool_execution_failed",
-            }:
+            if prepared is None and event_type_str in _REDACTED_TOOL_EVENT_TYPES:
                 data = redact_runtime_sensitive_payload(data)
             if self._is_duplicate_user_message_turn(db, event_type_str, data):
                 logger.debug(

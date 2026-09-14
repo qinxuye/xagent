@@ -75,6 +75,10 @@ async def test_file_database_transactions_and_pragmas(tmp_path):
     runtime = TraceDatabaseRuntime(source, use_async=True, limit=8)
     assert runtime.limit == 1
     assert runtime.engine is not None
+    assert runtime.engine.pool._pre_ping is False
+    assert runtime.engine.pool._recycle == -1
+    assert runtime.engine.pool.size() == 1
+    assert runtime.engine.pool._max_overflow == 0
     try:
         async with runtime.engine.connect() as db:
             assert await db.scalar(text("PRAGMA foreign_keys")) == 1
@@ -147,6 +151,79 @@ async def test_lock_wait_cancellation_and_loop_responsiveness(tmp_path):
         await runtime.close()
         with source.connect() as db:
             assert db.scalar(text("SELECT count(*) FROM items")) == 1
+        source.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["start", "end", "error"])
+async def test_async_tool_trace_redacts_before_storage(tmp_path, monkeypatch, action):
+    import json
+
+    from xagent.core.agent.trace import (
+        TraceAction,
+        TraceCategory,
+        TraceEvent,
+        TraceEventType,
+        TraceScope,
+    )
+    from xagent.core.tools.adapters.vibe.connector_runtime import (
+        REDACTED_RUNTIME_SECRET,
+    )
+    from xagent.web.models.task import TraceEvent as StoredTraceEvent
+
+    source = create_engine(f"sqlite:///{tmp_path / 'redaction.db'}")
+    contracts.Base.metadata.create_all(source)
+    with Session(source) as db:
+        user = contracts.User(username="redaction-test", password_hash="unused")
+        db.add(user)
+        db.flush()
+        task = contracts.Task(user_id=user.id, title="Trace", description="Trace")
+        db.add(task)
+        db.commit()
+        task_id = task.id
+    runtime = TraceDatabaseRuntime(source, use_async=True, limit=1)
+    monkeypatch.setattr(
+        contracts.trace_handlers, "get_trace_database_runtime", lambda: runtime
+    )
+    handler = contracts.trace_handlers.DatabaseTraceHandler(task_id)
+    event = TraceEvent(
+        TraceEventType(TraceScope.ACTION, TraceAction(action), TraceCategory.TOOL),
+        task_id=str(task_id),
+        step_id="tool-step",
+        data={
+            "tool_name": "shiftcare",
+            "tool_args": {
+                "headers": {
+                    "Authorization": "Bearer raw-runtime-token",
+                    "X-Account": "6185",
+                },
+                "connector_runtime": {
+                    "secrets": {"authorization": "Bearer raw-runtime-token"},
+                    "auth_selector": {"resource_owner_key": "xagent:user:1"},
+                },
+            },
+        },
+        require_persisted=True,
+    )
+    try:
+        await handler._save_to_database(event)
+        with Session(source) as db:
+            row = db.query(StoredTraceEvent).filter_by(task_id=task_id).one()
+            assert "raw-runtime-token" not in json.dumps(row.data)
+            assert "xagent:user:1" not in json.dumps(row.data)
+            args = row.data["tool_args"]
+            assert args["headers"]["Authorization"] == REDACTED_RUNTIME_SECRET
+            assert args["headers"]["X-Account"] == "6185"
+            assert (
+                args["connector_runtime"]["secrets"]["authorization"]
+                == REDACTED_RUNTIME_SECRET
+            )
+            assert (
+                args["connector_runtime"]["auth_selector"]["resource_owner_key"]
+                == REDACTED_RUNTIME_SECRET
+            )
+    finally:
+        await runtime.close()
         source.dispose()
 
 

@@ -69,6 +69,12 @@ class TraceDatabaseRuntime:
                 )
             # Psycopg preserves existing libpq URL options (SSL/search_path/etc.).
             # This is a SEPARATE bounded pool; include it in the process budget.
+            pool_kwargs = get_db_pool_kwargs()
+            if sqlite:
+                # Local file connections need no network liveness probes or
+                # periodic recycling; retain bounded checkout configuration.
+                pool_kwargs.pop("pool_pre_ping", None)
+                pool_kwargs.pop("pool_recycle", None)
             try:
                 self.engine = create_async_engine(
                     source.url.set(
@@ -76,7 +82,7 @@ class TraceDatabaseRuntime:
                         if sqlite
                         else "postgresql+psycopg"
                     ),
-                    **{**get_db_pool_kwargs(), "pool_size": limit, "max_overflow": 0},
+                    **{**pool_kwargs, "pool_size": limit, "max_overflow": 0},
                     poolclass=AsyncAdaptedQueuePool,
                     hide_parameters=True,
                     execution_options=source.get_execution_options(),
