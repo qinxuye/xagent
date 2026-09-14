@@ -1,6 +1,7 @@
 """Identical durable-write contracts for sync and native async PostgreSQL."""
 
 import asyncio
+import copy
 import os
 import threading
 import time
@@ -16,9 +17,16 @@ from xagent.core.agent.checkpoint import CHECKPOINT_EVENT_TYPE, CHECKPOINT_TYPE
 from xagent.core.agent.trace import TASK_START_GENERAL
 from xagent.core.agent.trace import TraceEvent as CoreTraceEvent
 from xagent.web.models.database import Base
-from xagent.web.models.task import Task, TaskStatus, TraceEvent, TraceMessageBlob
+from xagent.web.models.task import (
+    Task,
+    TaskStatus,
+    TraceCheckpointBlob,
+    TraceEvent,
+    TraceMessageBlob,
+)
 from xagent.web.models.user import User
-from xagent.web.services import trace_handlers
+from xagent.web.services import trace_event_staging, trace_handlers
+from xagent.web.services import trace_message_storage as codec
 from xagent.web.services.task_lease_service import TaskLease, bind_task_lease_context
 from xagent.web.services.trace_database import TraceDatabaseRuntime
 from xagent.web.services.trace_message_storage import decode_trace_event_data
@@ -296,3 +304,98 @@ async def test_cancel_during_database_wait_drains_transaction_before_next_write(
         assert runtime.engine.pool.checkedout() == 0
     with Session(source) as db:
         assert db.get(Task, task_id).last_checkpoint_event_id == events[-1].id
+
+
+@pytest.mark.parametrize("storage", [True], indirect=True, ids=["async"])
+@pytest.mark.parametrize("use_v2", [False, True], ids=["v1", "v2"])
+async def test_async_candidates_materialize_only_after_metadata_filtering(
+    storage, monkeypatch, use_v2
+):
+    source, runtime, handler, task_id = storage
+    monkeypatch.setenv("XAGENT_CHECKPOINT_ENCODING_V2", str(use_v2).lower())
+    first = checkpoint(task_id)
+    first.data["snapshot"]["context"]["metadata"] = {"value": "元数据" * 1000}
+    first.data["snapshot"]["context"]["system_prompt"] = "系统提示" * 1000
+    first.data["snapshot"]["pattern_state"]["tool_ledger"] = {
+        "old": {"result": "old result" * 1000}
+    }
+    second = checkpoint(task_id, 1)
+    second.data["snapshot"] = copy.deepcopy(first.data["snapshot"])
+    second.data["snapshot"]["context"]["messages"].append(
+        {"role": "assistant", "content": "新消息" * 1000}
+    )
+    second.data["snapshot"]["pattern_state"]["tool_ledger"]["new"] = {
+        "result": "new result" * 1000
+    }
+    candidates = []
+    prepare = codec.prepare_checkpoint_data
+
+    def checked_prepare(*args):
+        prepared = prepare(*args)
+        values = list(prepared.messages.values()) + list(prepared.blobs.values())
+        # Preparation owns canonical strings, with no decoded object trees or
+        # eagerly prepared binds, for both reused and missing candidates.
+        assert all(isinstance(value.data, codec.CanonicalJSON) for value in values)
+        candidates.append({value.data.encoded for value in values})
+        return prepared
+
+    materialized = []
+    materialize = codec._materialize_blob_data
+
+    def checked_materialize(data):
+        assert isinstance(data, codec.CanonicalJSON)
+        materialized.append(data.encoded)
+        return materialize(data)
+
+    monkeypatch.setattr(trace_event_staging, "prepare_checkpoint_data", checked_prepare)
+    monkeypatch.setattr(codec, "_materialize_blob_data", checked_materialize)
+    with bind_task_lease_context(TaskLease(task_id, "runner", "run", "attempt")):
+        await handler._save_to_database(first)
+        assert set(materialized) == candidates[0]
+        materialized.clear()
+        await handler._save_to_database(second)
+        assert candidates[0] & candidates[1]
+        misses = candidates[1] - candidates[0]
+        assert misses
+        assert set(materialized) == misses
+        assert len(materialized) == len(misses)
+    with Session(source) as db:
+        task = db.get(Task, task_id)
+        row = db.get(TraceEvent, task.last_checkpoint_trace_event_id)
+        restored = decode_trace_event_data(
+            db, task_id=task_id, data=row.data, strict=True, verify_blob_hashes=True
+        )
+        assert restored["snapshot"] == second.data["snapshot"]
+
+
+@pytest.mark.parametrize("storage", [True], indirect=True, ids=["async"])
+@pytest.mark.parametrize("kind", ["message", "checkpoint"])
+async def test_async_existing_size_mismatch_precedes_materialization(
+    storage, monkeypatch, kind
+):
+    source, runtime, handler, task_id = storage
+    trace = checkpoint(task_id)
+    trace.data["snapshot"]["context"]["metadata"] = {"value": "metadata"}
+    with bind_task_lease_context(TaskLease(task_id, "runner", "run", "attempt")):
+        await handler._save_to_database(trace)
+    with Session(source) as db:
+        if kind == "message":
+            db.query(TraceMessageBlob).filter_by(task_id=task_id).update(
+                {TraceMessageBlob.message_bytes: 0}
+            )
+        else:
+            db.query(TraceCheckpointBlob).filter_by(task_id=task_id).update(
+                {TraceCheckpointBlob.blob_bytes: 0}
+            )
+        db.commit()
+
+    def unexpected_materialization(data):
+        pytest.fail("Existing blobs must be size-checked before materialization")
+
+    monkeypatch.setattr(codec, "_materialize_blob_data", unexpected_materialization)
+    trace.id = "size-mismatch-checkpoint"
+    with bind_task_lease_context(TaskLease(task_id, "runner", "run", "attempt")):
+        with pytest.raises(ValueError, match="hash collision"):
+            await handler._save_to_database(trace)
+    with Session(source) as db:
+        assert db.query(TraceEvent).filter_by(task_id=task_id).count() == 1

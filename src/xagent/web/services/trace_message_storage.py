@@ -58,6 +58,13 @@ class BlobCandidate:
 
 
 @dataclass(frozen=True)
+class CanonicalJSON:
+    """Immutable candidate payload, retained until metadata filters out hits."""
+
+    encoded: str
+
+
+@dataclass(frozen=True)
 class PreparedJSON:
     """Owned JSON bind value encoded before opening the async transaction."""
 
@@ -88,17 +95,24 @@ def prepare_checkpoint_data(task_id: int, data: Any) -> PreparedCheckpoint:
         for payload in payloads:
             if payload.kind == "messages":
                 payload.parent[payload.kind] = _encode_messages_payload(
-                    payload.value, task_id=task_id, message_blobs=messages
+                    payload.value,
+                    task_id=task_id,
+                    message_blobs=messages,
+                    canonical=True,
                 )
             elif payload.kind == "tool_ledger":
                 payload.parent[payload.kind] = _encode_ledger_payload(
-                    payload.value, task_id=task_id, blob_candidates=blobs
+                    payload.value,
+                    task_id=task_id,
+                    blob_candidates=blobs,
+                    canonical=True,
                 )
             else:
                 payload.parent[payload.kind] = _encode_blob_ref_payload(
                     payload.value,
                     task_id=task_id,
                     blob_candidates=blobs,
+                    canonical=True,
                     kind=CONTEXT_SYSTEM_PROMPT_KIND
                     if payload.kind == "system_prompt"
                     else CONTEXT_METADATA_KIND,
@@ -109,32 +123,21 @@ def prepare_checkpoint_data(task_id: int, data: Any) -> PreparedCheckpoint:
                 _get_checkpoint_messages_payload(encoded),
                 task_id=task_id,
                 message_blobs=messages,
+                canonical=True,
             )
         for field, value in _checkpoint_blob_fields_to_encode(encoded):
             _set_nested(
                 encoded,
                 field.path,
                 _encode_blob_ref_payload(
-                    value, kind=field.kind, task_id=task_id, blob_candidates=blobs
+                    value,
+                    kind=field.kind,
+                    task_id=task_id,
+                    blob_candidates=blobs,
+                    canonical=True,
                 ),
             )
-    # Prevent the async driver's JSON bind and the insert's defensive deepcopy
-    # from repeating bulk payload work on the event-loop thread.
-    return PreparedCheckpoint(
-        encoded,
-        {
-            key: BlobCandidate(
-                PreparedJSON(json.dumps(value.data)), value.payload_bytes
-            )
-            for key, value in messages.items()
-        },
-        {
-            key: BlobCandidate(
-                PreparedJSON(json.dumps(value.data)), value.payload_bytes
-            )
-            for key, value in blobs.items()
-        },
-    )
+    return PreparedCheckpoint(encoded, messages, blobs)
 
 
 def store_prepared_checkpoint(
@@ -363,6 +366,7 @@ def _encode_messages_payload(
     *,
     task_id: int,
     message_blobs: dict[str, BlobCandidate],
+    canonical: bool = False,
 ) -> dict[str, Any]:
     refs: list[str] = []
     for message in messages:
@@ -371,10 +375,11 @@ def _encode_messages_payload(
         _remember_blob_candidate(
             message_blobs,
             blob_hash=message_hash,
-            # Parse the canonical bytes back so the candidate owns an
-            # independent copy: the snapshot tree may alias these objects
-            # and must never mutate what gets persisted.
-            data=json.loads(message_payload),
+            # Own the payload independently of aliases in the snapshot. Async
+            # candidates retain canonical JSON without decoding/re-encoding.
+            data=CanonicalJSON(message_payload.decode("utf-8"))
+            if canonical
+            else json.loads(message_payload),
             payload_bytes=len(message_payload),
             collision_message=(
                 f"trace message blob hash collision for task {task_id}: {message_hash}"
@@ -395,13 +400,16 @@ def _encode_blob_ref_payload(
     kind: str,
     task_id: int,
     blob_candidates: dict[tuple[str, str], BlobCandidate],
+    canonical: bool = False,
 ) -> dict[str, Any]:
     blob_payload = canonical_json_bytes(value)
     blob_hash = canonical_json_hash_from_bytes(blob_payload)
     _remember_blob_candidate(
         blob_candidates,
         blob_hash=(kind, blob_hash),
-        data=json.loads(blob_payload),
+        data=CanonicalJSON(blob_payload.decode("utf-8"))
+        if canonical
+        else json.loads(blob_payload),
         payload_bytes=len(blob_payload),
         collision_message=(
             f"trace checkpoint blob hash collision for task {task_id}: "
@@ -420,6 +428,7 @@ def _encode_ledger_payload(
     *,
     task_id: int,
     blob_candidates: dict[tuple[str, str], BlobCandidate],
+    canonical: bool = False,
 ) -> dict[str, Any]:
     records: list[list[str]] = []
     for key, record in ledger.items():
@@ -428,7 +437,9 @@ def _encode_ledger_payload(
         _remember_blob_candidate(
             blob_candidates,
             blob_hash=(TOOL_LEDGER_RECORD_KIND, record_hash),
-            data=json.loads(record_payload),
+            data=CanonicalJSON(record_payload.decode("utf-8"))
+            if canonical
+            else json.loads(record_payload),
             payload_bytes=len(record_payload),
             collision_message=(
                 f"trace checkpoint blob hash collision for task {task_id}: "
@@ -1374,6 +1385,14 @@ def _pending_message_hashes(
     return pending_hashes
 
 
+def _materialize_blob_data(data: Any) -> Any:
+    # Called only after PostgreSQL metadata filtering. Wrapping the worker's
+    # canonical string is constant-time; no bulk JSON work runs on the loop.
+    if isinstance(data, CanonicalJSON):
+        return PreparedJSON(data.encoded)
+    return copy.deepcopy(data)
+
+
 def _upsert_message_blobs(
     db: Session,
     *,
@@ -1416,7 +1435,7 @@ def _upsert_message_blobs(
                 "task_id": task_id,
                 "execution_id": execution_id,
                 "message_hash": message_hash,
-                "message_data": copy.deepcopy(candidate.data),
+                "message_data": _materialize_blob_data(candidate.data),
                 "message_bytes": candidate.payload_bytes,
             }
             for message_hash, candidate in candidates_to_insert.items()
@@ -1459,7 +1478,7 @@ def _upsert_message_blobs(
                 task_id=task_id,
                 execution_id=execution_id,
                 message_hash=message_hash,
-                message_data=copy.deepcopy(candidate.data),
+                message_data=_materialize_blob_data(candidate.data),
                 message_bytes=candidate.payload_bytes,
             )
         )
@@ -1582,7 +1601,7 @@ def _upsert_checkpoint_blobs(
                 "execution_id": execution_id,
                 "blob_kind": blob_kind,
                 "blob_hash": blob_hash,
-                "blob_data": copy.deepcopy(candidate.data),
+                "blob_data": _materialize_blob_data(candidate.data),
                 "blob_bytes": candidate.payload_bytes,
             }
             for (blob_kind, blob_hash), candidate in candidates_to_insert.items()
@@ -1640,7 +1659,7 @@ def _upsert_checkpoint_blobs(
                 execution_id=execution_id,
                 blob_kind=blob_kind,
                 blob_hash=blob_hash,
-                blob_data=copy.deepcopy(candidate.data),
+                blob_data=_materialize_blob_data(candidate.data),
                 blob_bytes=candidate.payload_bytes,
             )
         )
