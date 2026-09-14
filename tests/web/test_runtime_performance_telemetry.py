@@ -81,16 +81,28 @@ async def test_broadcast_records_one_payload_for_multiple_connections(
 
 @pytest.mark.asyncio
 async def test_database_trace_handler_emits_write_outcome(monkeypatch, metric_reader):
-    # This test intercepts the synchronous writer, independent of backend default.
-    monkeypatch.setenv("XAGENT_ASYNC_TRACE_DB_ENABLED", "false")
+    # Own the runtime as well as the writer: changing the backend flag alone
+    # still reads process-global DB state left by unrelated app/config tests.
     from xagent.core.agent.trace import TASK_START_GENERAL, TraceEvent
+    from xagent.web.services import trace_database, trace_handlers
+    from xagent.web.services.trace_database import TraceDatabaseRuntime
     from xagent.web.services.trace_handlers import DatabaseTraceHandler
 
+    runtime = TraceDatabaseRuntime(None, use_async=False, limit=1)
+    monkeypatch.setattr(trace_handlers, "get_trace_database_runtime", lambda: runtime)
+    # Reproduce the invalid ambient engine from the CI failure. This unit test
+    # must not inspect it or open any database connection.
+    monkeypatch.setattr(trace_database, "get_engine", lambda: object())
     handler = DatabaseTraceHandler(42)
     saved = []
     monkeypatch.setattr(handler, "_sync_save_to_database", saved.append)
-    event = TraceEvent(event_type=TASK_START_GENERAL, task_id="42", data={})
-    await handler.handle_event(event)
+    event = TraceEvent(
+        event_type=TASK_START_GENERAL, task_id="42", data={}, require_persisted=True
+    )
+    try:
+        await handler.handle_event(event)
+    finally:
+        await runtime.close()
     assert saved == [event]
     point = collected_metrics(metric_reader)[
         "xagent.trace.database.writes"
