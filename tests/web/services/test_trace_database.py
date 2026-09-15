@@ -190,7 +190,7 @@ async def test_preparation_is_bounded_drained_and_precedes_connection(
     assert prepared == ["lease"] * 3
 
 
-def test_sync_shared_pool_headroom_and_async_backend_validation():
+def test_sqlite_clamp_memory_fallback_and_positive_limit():
     engine = create_engine("sqlite://", poolclass=QueuePool, pool_size=3)
     try:
         assert TraceDatabaseRuntime(engine, use_async=False, limit=8).limit == 1
@@ -259,13 +259,38 @@ async def test_async_config_preserves_url_options_and_bounds_pool(monkeypatch):
     engine.dispose.assert_awaited_once()
 
 
-def test_missing_async_driver_fails_explicitly(monkeypatch):
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ModuleNotFoundError("psycopg"),
+        ImportError("driver unavailable"),
+        TypeError("invalid engine option"),
+        ValueError("invalid configuration"),
+    ],
+)
+def test_async_engine_construction_failure_is_actionable(monkeypatch, failure):
     source = Mock()
     source.dialect.name = "postgresql"
     monkeypatch.setattr(
         trace_database,
         "create_async_engine",
-        Mock(side_effect=ModuleNotFoundError("psycopg")),
+        Mock(side_effect=failure),
     )
-    with pytest.raises(RuntimeError, match="postgresql extra"):
+    with pytest.raises(
+        RuntimeError, match="XAGENT_ASYNC_TRACE_DB_ENABLED=false"
+    ) as raised:
         TraceDatabaseRuntime(source, use_async=True, limit=4)
+    assert raised.value.__cause__ is failure
+    assert "DATABASE_URL" in str(raised.value)
+    assert "postgresql extra" in str(raised.value)
+
+
+def test_unsupported_async_backend_fails_before_engine_construction(monkeypatch):
+    source = Mock()
+    source.dialect.name = "mysql"
+    create = Mock()
+    monkeypatch.setattr(trace_database, "create_async_engine", create)
+    with pytest.raises(ValueError, match="requires PostgreSQL or SQLite") as raised:
+        TraceDatabaseRuntime(source, use_async=True, limit=4)
+    assert "XAGENT_ASYNC_TRACE_DB_ENABLED=false" in str(raised.value)
+    create.assert_not_called()

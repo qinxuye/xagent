@@ -169,7 +169,8 @@ def stage_trace_event_row(
     # stored hash must be computed over what actually lands in the column.
     # PostgreSQL's jsonb rejects NUL and unpaired-surrogate code points at
     # INSERT (#1248); on other dialects the same cleaning keeps stored
-    # payloads identical across backends.
+    # payloads identical across backends. The prepared path already sanitized
+    # in prepare_trace_payload before encoding and hashing.
     data = prepared.data if prepared is not None else sanitize_json_payload(data)
 
     is_checkpoint = (

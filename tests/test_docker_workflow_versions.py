@@ -16,13 +16,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_postgresql_dependency_groups_include_async_trace_driver():
-    """Default-on async trace writes require Psycopg 3 in image and CI installs."""
+    """Default-on async writes need Psycopg 3 in image, CI and documented extras."""
     project = tomllib.loads(read_repo_file("pyproject.toml"))
-    for group in ("backend-image", "test"):
+    install_sets = [
+        project["dependency-groups"][group] for group in ("backend-image", "test")
+    ] + [
+        project["project"]["optional-dependencies"][extra]
+        for extra in ("postgresql", "all")
+    ]
+    for install_set in install_sets:
         requirements = {
-            Requirement(item).name
-            for item in project["dependency-groups"][group]
-            if isinstance(item, str)
+            Requirement(item).name for item in install_set if isinstance(item, str)
         }
         assert {"psycopg2-binary", "psycopg"} <= requirements
 

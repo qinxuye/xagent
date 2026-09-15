@@ -65,7 +65,8 @@ class TraceDatabaseRuntime:
         if use_async:
             if source is None or source.dialect.name not in {"postgresql", "sqlite"}:
                 raise ValueError(
-                    "Async trace persistence requires PostgreSQL or SQLite"
+                    "Async trace persistence requires PostgreSQL or SQLite; "
+                    "set XAGENT_ASYNC_TRACE_DB_ENABLED=false for bounded sync writes"
                 )
             # Psycopg preserves existing libpq URL options (SSL/search_path/etc.).
             # This is a SEPARATE bounded pool; include it in the process budget.
@@ -88,9 +89,11 @@ class TraceDatabaseRuntime:
                     execution_options=source.get_execution_options(),
                     json_serializer=trace_json_dumps,
                 )
-            except ModuleNotFoundError as exc:
+            except Exception as exc:
                 raise RuntimeError(
-                    "Async trace persistence requires aiosqlite or the postgresql extra"
+                    "Could not configure async trace persistence. Check DATABASE_URL "
+                    "and install aiosqlite or the postgresql extra, or set "
+                    "XAGENT_ASYNC_TRACE_DB_ENABLED=false for bounded sync writes."
                 ) from exc
             if sqlite:
                 apply_sqlite_concurrency_pragmas(self.engine.sync_engine)
@@ -174,7 +177,7 @@ def get_trace_database_runtime() -> TraceDatabaseRuntime:
         source = get_engine()
     except RuntimeError:
         # Custom hosts/tests can provide their own synchronous session factory.
-        # Async mode still fails closed without a configured PostgreSQL engine.
+        # Without a shared engine, retain that factory via bounded sync writes.
         source = None
     runtime = TraceDatabaseRuntime(
         source,
