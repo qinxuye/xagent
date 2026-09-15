@@ -4,7 +4,6 @@ import asyncio
 import copy
 import os
 import threading
-import time
 import uuid
 
 import pytest
@@ -113,11 +112,11 @@ def checkpoint(task_id, step=0):
     )
 
 
-async def test_large_checkpoint_preparation_keeps_loop_responsive(storage):
+async def test_large_checkpoint_preparation_offloads_payload_work(storage):
     source, runtime, handler, task_id = storage
     if runtime.engine is None:
         return  # This contract targets the default async implementation.
-    # Warm the mapper/import path before measuring the checkpoint itself.
+    # Initialize the database path before checking the large checkpoint.
     with bind_task_lease_context(TaskLease(task_id, "runner", "run", "attempt")):
         await handler._save_to_database(checkpoint(task_id))
     event = checkpoint(task_id, 1)
@@ -125,37 +124,56 @@ async def test_large_checkpoint_preparation_keeps_loop_responsive(storage):
         {"role": "user", "content": "large payload " * 160, "index": index}
         for index in range(3000)
     ]
+    loop = asyncio.get_running_loop()
     loop_thread = threading.get_ident()
     prepare = handler._prepare_async_trace_transaction
-    seen = []
+    prepared = asyncio.Event()
+    release = threading.Event()
+    encoded_messages = []
+    bound_messages = []
+    canonical = codec.canonical_json_bytes
+    materialize = codec._materialize_blob_data
+
+    def checked_canonical(value):
+        assert threading.get_ident() != loop_thread
+        if isinstance(value, dict) and "index" in value:
+            encoded_messages.append(value["index"])
+        return canonical(value)
+
+    def checked_materialize(value):
+        result = materialize(value)
+        # The async transaction must bind the worker's encoded string rather
+        # than decode/copy/re-encode the large message bodies on the loop.
+        assert isinstance(value, codec.CanonicalJSON)
+        assert isinstance(result, codec.PreparedJSON)
+        assert result.encoded is value.encoded
+        bound_messages.append(result)
+        return result
 
     def checked_prepare(event):
-        seen.append(threading.get_ident())
-        assert seen[-1] != loop_thread
-        return prepare(event)
+        assert threading.get_ident() != loop_thread
+        transaction = prepare(event)
+        loop.call_soon_threadsafe(prepared.set)
+        # A deadlock watchdog, not a machine-speed/runner-scheduling SLA.
+        assert release.wait(30), "event loop did not release preparation worker"
+        return transaction
 
-    handler._prepare_async_trace_transaction = checked_prepare
-    gaps = []
-    done = asyncio.Event()
-
-    async def heartbeat():
-        previous = time.perf_counter()
-        while not done.is_set():
-            await asyncio.sleep(0.001)
-            now = time.perf_counter()
-            gaps.append(now - previous)
-            previous = now
-
-    monitor = asyncio.create_task(heartbeat())
-    await asyncio.sleep(0)
-    try:
+    # Wall-clock heartbeat gaps include OS descheduling under parallel CI.
+    # Check actual payload work and a loop/worker rendezvous instead.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(handler, "_prepare_async_trace_transaction", checked_prepare)
+        patch.setattr(codec, "canonical_json_bytes", checked_canonical)
+        patch.setattr(codec, "_materialize_blob_data", checked_materialize)
         with bind_task_lease_context(TaskLease(task_id, "runner", "run", "attempt")):
-            await handler._save_to_database(event)
-    finally:
-        done.set()
-        await monitor
-    assert seen and len(gaps) > 2
-    assert max(gaps) < 0.25, f"large checkpoint blocked loop for {max(gaps):.3f}s"
+            write = asyncio.create_task(handler._save_to_database(event))
+        try:
+            await asyncio.wait_for(prepared.wait(), 30)
+            assert not write.done()
+        finally:
+            release.set()
+            await write
+    assert encoded_messages == list(range(3000))
+    assert len(bound_messages) == 3000
     with Session(source) as db:
         task = db.get(Task, task_id)
         row = db.get(TraceEvent, task.last_checkpoint_trace_event_id)

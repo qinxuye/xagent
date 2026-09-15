@@ -20,7 +20,7 @@ from xagent.web.services.trace_database import TraceDatabaseRuntime
         contracts.test_checkpoint_retention_dedup_pointer_and_required_data,
         contracts.test_stale_lease_rolls_back_staged_checkpoint_and_blobs,
         contracts.test_commit_failure_rolls_back_and_subsequent_write_works,
-        contracts.test_large_checkpoint_preparation_keeps_loop_responsive,
+        contracts.test_large_checkpoint_preparation_offloads_payload_work,
     ],
 )
 @pytest.mark.parametrize("encoding_v2", ["true", "false"])
