@@ -418,8 +418,6 @@ class OpenAICompatibleLLM(BaseLLM):
                     if task.cancelled():
                         raise
                     cancellation = exc
-                except Exception:
-                    break
             task.result()
         finally:
             if task.done() and self._client_init_task is task:
