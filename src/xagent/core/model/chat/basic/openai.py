@@ -411,6 +411,8 @@ class OpenAICompatibleLLM(BaseLLM):
 
         cancellation: asyncio.CancelledError | None = None
         try:
+            # Each caller cancellation interrupts its shielded wait, not the
+            # constructor. Re-shield until construction finishes, then re-raise.
             while not task.done():
                 try:
                     await asyncio.shield(task)
@@ -1612,10 +1614,13 @@ class OpenAICompatibleLLM(BaseLLM):
             if self._client_init_task is not None:
                 try:
                     await self._ensure_client_async()
-                except Exception:
+                except Exception as exc:
                     # The requesting caller receives the construction error;
                     # cleanup only owns any client that was actually created.
-                    pass
+                    logger.debug(
+                        "Client initialization failed during close (%s)",
+                        type(exc).__name__,
+                    )
         finally:
             if self._client is not None:
                 await self._client.close()

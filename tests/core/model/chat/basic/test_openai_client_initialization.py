@@ -137,3 +137,25 @@ async def test_failed_initialization_can_retry_and_preserves_provider_hook():
     assert all(thread_id != threading.get_ident() for thread_id in calls)
     assert llm._client is client
     await llm.close()
+
+
+async def test_close_logs_initialization_failure_without_sensitive_details(caplog):
+    llm = OpenAICompatibleLLM("test", base_url=None, api_key="test")
+
+    async def fail():
+        raise ValueError("private-api-key at https://private-endpoint.invalid")
+
+    llm._client_init_task = asyncio.create_task(fail())
+    logger_name = "xagent.core.model.chat.basic.openai"
+    with caplog.at_level("DEBUG", logger=logger_name):
+        await llm.close()
+
+    records = [record for record in caplog.records if record.name == logger_name]
+    assert len(records) == 1
+    assert records[0].getMessage() == (
+        "Client initialization failed during close (ValueError)"
+    )
+    assert records[0].exc_info is None
+    assert "private" not in caplog.text
+    assert llm._client is None
+    assert llm._client_init_task is None
