@@ -578,11 +578,16 @@ def main():
             cases.append(report)
             if not report["valid"]:
                 raise RuntimeError("Incomplete measurement; inspect the case report")
-    except BaseException as exc:
-        save(
-            args.output / "failure.json",
-            {"error": type(exc).__name__, "completed_cases": len(cases)},
-        )
+    except Exception as exc:
+        try:
+            save(
+                args.output / "failure.json",
+                {"error": type(exc).__name__, "completed_cases": len(cases)},
+            )
+        except OSError:
+            # Keep the safe failure exit even if reporting fails. Never
+            # overwrite an existing artifact to make room for this summary.
+            pass
         raise SystemExit(
             "Benchmark stopped; artifacts retained. Inspect tasks before rerunning."
         ) from None

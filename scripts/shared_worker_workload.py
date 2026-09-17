@@ -20,7 +20,7 @@ from datetime import timezone
 
 import httpx
 
-TERMINAL = {"completed", "failed", "cancelled", "paused", "waiting_for_user"}
+TERMINAL = frozenset({"completed", "failed", "cancelled", "paused", "waiting_for_user"})
 PROMPT = (
     "Controlled runtime benchmark: use ONLY execute_python_code. Make exactly "
     "ten sequential tool calls, one call per assistant turn, waiting for each "

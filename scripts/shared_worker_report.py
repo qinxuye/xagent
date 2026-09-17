@@ -136,7 +136,7 @@ def read_case(folder):
             observed = {
                 entry["pid"]
                 for key in tool_ids
-                for entry in entries[key]
+                for entry in entries.get(key, [])
                 if entry["time"] < manifest["workload_started_at"]
             }
             if observed != set(warm["expected_pids"]):

@@ -294,6 +294,59 @@ def test_owned_port_and_output_guards(tmp_path):
     assert json.loads(output.read_text()) == {"old": True}
 
 
+@pytest.fixture
+def main_args(tmp_path, monkeypatch):
+    args = SimpleNamespace(repo=tmp_path, output=tmp_path / "run", case="shared-1")
+    monkeypatch.setattr(benchmark, "parse_args", lambda: args)
+    monkeypatch.setattr(benchmark, "read_environment", lambda _: {})
+    monkeypatch.setattr(benchmark.shutil, "which", lambda _: "/unused/redis-server")
+    return args
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(7)])
+def test_main_preserves_process_control_exceptions(main_args, monkeypatch, error):
+    def fail(*args):
+        raise error
+
+    monkeypatch.setattr(benchmark, "run_case", fail)
+    with pytest.raises(type(error)) as caught:
+        benchmark.main()
+    assert caught.value is error
+    assert not (main_args.output / "comparison.json").exists()
+
+
+@pytest.mark.parametrize("write_error", [None, "exists", "denied"])
+def test_main_failure_reporting_preserves_safe_exit(
+    main_args, monkeypatch, write_error
+):
+    failure = main_args.output / "failure.json"
+    save = benchmark.save
+
+    def fail(*args):
+        if write_error == "exists":
+            save(failure, {"retained": True})
+        raise ValueError("private failure details")
+
+    def denied(*args):
+        raise PermissionError("private path")
+
+    monkeypatch.setattr(benchmark, "run_case", fail)
+    if write_error == "denied":
+        monkeypatch.setattr(benchmark, "save", denied)
+    with pytest.raises(SystemExit, match="Benchmark stopped") as caught:
+        benchmark.main()
+    assert "private" not in str(caught.value)
+    assert not (main_args.output / "comparison.json").exists()
+    if write_error == "denied":
+        assert not failure.exists()
+    else:
+        assert json.loads(failure.read_text()) == (
+            {"retained": True}
+            if write_error == "exists"
+            else {"error": "ValueError", "completed_cases": 0}
+        )
+
+
 def test_isolated_child_pool_configuration():
     args = SimpleNamespace(redis_port=6385)
     base = {"XAGENT_BENCH_PASSWORD": "private", "XAGENT_BENCH_USERNAME": "user"}
