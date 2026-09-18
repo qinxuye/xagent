@@ -2,8 +2,11 @@
 
 import asyncio
 import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -86,8 +89,9 @@ async def test_submit_retains_failures_without_sensitive_bodies(kind):
 
 
 @pytest.mark.asyncio
-async def test_workload_http_contract_and_complete_round(monkeypatch):
-    captured, task_ids = [], []
+@pytest.mark.parametrize("background", [2, 200])
+async def test_workload_http_contract_and_complete_round(monkeypatch, background):
+    captured, task_ids, connection_limits = [], [], []
     real_client = httpx.AsyncClient
     original_sleep = asyncio.sleep
 
@@ -130,26 +134,29 @@ async def test_workload_http_contract_and_complete_round(monkeypatch):
     monkeypatch.setattr(workload, "snapshot", state)
     monkeypatch.setattr(workload, "emit", captured.append)
     monkeypatch.setattr(workload.asyncio, "sleep", fast_sleep)
-    monkeypatch.setattr(
-        workload.httpx,
-        "AsyncClient",
-        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
-    )
+
+    def client(**kwargs):
+        connection_limits.append(kwargs["limits"].max_connections)
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(workload.httpx, "AsyncClient", client)
     await workload.run(
         SimpleNamespace(
             base_url="http://test",
             model_id=7,
-            background=2,
+            background=background,
             probes=2,
             probe_interval=2,
             spacing=0,
             task_timeout=5,
         )
     )
-    assert (
-        len(task_ids) == 15
-    )  # connectivity + two tools + ten initial + two continuous
-    assert benchmark.validate_prewarm(captured, 2) == {2, 3}
+    # Connectivity + background tools + ten initial + two continuous probes.
+    assert len(task_ids) == background + 13
+    assert connection_limits[0] >= background
+    assert benchmark.validate_prewarm(captured, background) == set(
+        range(2, background + 2)
+    )
     benchmark.validate_probes(
         next(row for row in captured if row["type"] == "probes"), 2
     )
@@ -179,6 +186,9 @@ def case_folder(tmp_path):
         "prompt_sha256": "prompt",
         "harness_sha256": {},
         "task_timeout_s": 600,
+        "source_head": "source",
+        "source_status": "",
+        "source_diff_sha256": "diff",
     }
     records = [
         {"type": "warm", "tasks": [{"id": 1, "status": "completed"}]},
@@ -269,9 +279,44 @@ def test_full_load_comparison_does_not_include_idle_tail(case_folder):
     second = report.read_case(case_folder)
     second["raw"]["continuous"][1]["active_background"] = 0
     comparison = report.compare_cases([first, second])
+    assert comparison["valid"]
     assert comparison["matched_full_load_ordinals"] == [0]
     assert comparison["matched_full_load"][0]["first_model_s"]["n"] == 1
     second["manifest"]["prewarm_requested"] = True
+    assert not report.compare_cases([first, second])["valid"]
+
+
+def test_comparison_requires_common_full_load_samples(case_folder):
+    first = report.read_case(case_folder)
+    second = report.read_case(case_folder)
+    first["raw"]["continuous"][0]["active_background"] = 0
+    second["raw"]["continuous"][1]["active_background"] = 0
+    comparison = report.compare_cases([first, second])
+    assert not comparison["valid"]
+    assert comparison["matched_full_load_ordinals"] == []
+    assert comparison["matched_full_load"][0]["first_model_s"] == {"n": 0}
+    assert not report.compare_cases([])["valid"]
+
+
+@pytest.mark.parametrize(
+    "field", ["source_head", "source_diff_sha256", "source_status"]
+)
+@pytest.mark.parametrize("fault", ["changed", "missing"])
+def test_comparison_requires_matching_source(case_folder, field, fault):
+    first = report.read_case(case_folder)
+    second = report.read_case(case_folder)
+    if fault == "changed":
+        second["manifest"][field] = "different"
+    else:
+        del second["manifest"][field]
+    assert not report.compare_cases([first, second])["valid"]
+
+
+def test_dirty_source_is_not_a_valid_comparison(case_folder):
+    first = report.read_case(case_folder)
+    second = report.read_case(case_folder)
+    for case in (first, second):
+        case["manifest"]["source_status"] = "?? untracked.py\n"
     assert not report.compare_cases([first, second])["valid"]
 
 
@@ -292,6 +337,109 @@ def test_owned_port_and_output_guards(tmp_path):
     with pytest.raises(FileExistsError):
         benchmark.save(output, {"new": True})
     assert json.loads(output.read_text()) == {"old": True}
+
+
+@pytest.mark.parametrize("unsettled", [0, 1])
+def test_idle_database_uses_persisted_statuses_and_closes_connection(
+    monkeypatch, unsettled
+):
+    from xagent.web.models.task import TaskStatus
+
+    db = MagicMock()
+    cursor = db.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = (unsettled,)
+    connect = MagicMock(return_value=db)
+    monkeypatch.setitem(sys.modules, "psycopg2", SimpleNamespace(connect=connect))
+    if unsettled:
+        with pytest.raises(RuntimeError, match="unsettled"):
+            benchmark.check_idle_database({"DATABASE_URL": "postgresql://test"})
+    else:
+        benchmark.check_idle_database({"DATABASE_URL": "postgresql://test"})
+    terminal = [
+        s for s in TaskStatus if s not in (TaskStatus.PENDING, TaskStatus.RUNNING)
+    ]
+    assert workload.TERMINAL == {s.value for s in terminal}
+    assert cursor.execute.call_args.args[1] == (sorted(s.name for s in terminal),)
+    db.close.assert_called_once_with()
+
+
+def test_run_case_retains_failure_and_logs_when_killed_host_does_not_exit(
+    tmp_path, monkeypatch
+):
+    args = parse_args(
+        [
+            "--repo",
+            str(tmp_path),
+            "--server-env",
+            str(tmp_path / "unused.env"),
+            "--output",
+            str(tmp_path),
+            "--model-id",
+            "7",
+            "--background",
+            "1",
+            "--probes",
+            "1",
+            "--no-prewarm",
+        ]
+    )
+    processes, handles, commands = [], [], []
+    wait_for = benchmark.wait_for
+
+    def ready(check, hosts, description, **kwargs):
+        if description == "workload":
+            wait_for(check, hosts, description, **kwargs)
+
+    def popen(command, **kwargs):
+        process = MagicMock(pid=len(processes) + 1, returncode=None)
+        processes.append(process)
+        commands.append(command)
+        handles.append(kwargs["stdout"])
+        process.poll.side_effect = lambda: process.returncode
+
+        def wait(timeout):
+            if process.pid == 2:  # The web host still cannot be reaped after kill.
+                raise subprocess.TimeoutExpired(command, timeout)
+            if process.returncode is None:
+                process.returncode = 0
+            return process.returncode
+
+        process.wait.side_effect = wait
+        if "scripts.shared_worker_workload" in command:
+            process.returncode = 1
+            handles.append(kwargs["stderr"])
+            kwargs["stdout"].write('{"type":"safety_stop"}\n')
+            kwargs["stdout"].flush()
+            kwargs["stderr"].write("diagnostic\n")
+            kwargs["stderr"].flush()
+        return process
+
+    monkeypatch.setattr(benchmark, "assert_free", lambda _: None)
+    monkeypatch.setattr(benchmark, "check_idle_database", lambda _: None)
+    monkeypatch.setattr(benchmark, "wait_for", ready)
+    monkeypatch.setattr(benchmark.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        benchmark.subprocess,
+        "check_output",
+        lambda command, **kwargs: "source"
+        if command[1] == "rev-parse"
+        else ("" if kwargs.get("text") else b""),
+    )
+    with pytest.raises(RuntimeError, match="workload failed"):
+        benchmark.run_case(args, {}, 1)
+    output = tmp_path / "shared-1"
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert not manifest["complete"]
+    assert manifest["error"] == "RuntimeError"
+    assert manifest["forced_shutdown_pids"] == [2]
+    assert manifest["client_exit_codes"] == [1]
+    assert benchmark.rows(output / "workload.jsonl") == [{"type": "safety_stop"}]
+    assert (output / "workload.stderr.log").read_text() == "diagnostic\n"
+    assert commands[-1] == benchmark.workload_command(args, 1, 1)
+    assert len(processes) == 4
+    assert all(process.wait.called for process in processes)
+    processes[1].kill.assert_called_once_with()
+    assert all(handle.closed for handle in handles)
 
 
 @pytest.fixture

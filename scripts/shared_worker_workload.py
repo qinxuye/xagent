@@ -20,7 +20,7 @@ from datetime import timezone
 
 import httpx
 
-TERMINAL = frozenset({"completed", "failed", "cancelled", "paused", "waiting_for_user"})
+TERMINAL = frozenset({"completed", "failed", "paused", "waiting_for_user"})
 PROMPT = (
     "Controlled runtime benchmark: use ONLY execute_python_code. Make exactly "
     "ten sequential tool calls, one call per assistant turn, waiting for each "
@@ -193,6 +193,7 @@ async def continuous(client, config, background, count, interval):
             state = await asyncio.to_thread(
                 snapshot, [r["id"] for r in background if r.get("id")]
             )
+            # RUNNING is admission state, not proof of concurrent execution.
             active = sum(r["status"] == "running" for r in state["tasks"])
 
             async def one(index=ordinal, running=active):
@@ -215,7 +216,9 @@ async def run(args):
     # consuming the continuous probe client's pool.
     async with (
         httpx.AsyncClient(
-            base_url=args.base_url, timeout=60, limits=httpx.Limits(max_connections=120)
+            base_url=args.base_url,
+            timeout=60,
+            limits=httpx.Limits(max_connections=max(120, args.background)),
         ) as client,
         httpx.AsyncClient(
             base_url=args.base_url,

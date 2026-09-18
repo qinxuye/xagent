@@ -42,7 +42,9 @@ latencies, per-worker distribution, failed/unknown requests and missing evidence
 The model clock is not network send time or llm_call_start. Timestamps are from
 the same host; this launcher is NOT a distributed clock-synchronized benchmark.
 Continuous full-load comparisons match probe ordinals only when all background
-tasks were RUNNING in every case. This is not identical wall-clock exposure.
+tasks were RUNNING in every case. RUNNING includes admitted tasks awaiting
+execution; it does not prove simultaneous execution or identical time exposure.
+Comparisons require matching clean source revisions and nonempty matched samples.
 Repeat runs, retain failures, and report sample counts; no single run proves an
 SLO, cold-start fix or fair load balancing. Loop/GIL/CPU diagnosis remains a
 separate OTel/profiler concern; this script does not enable worker loop sampling.
@@ -70,7 +72,7 @@ from pathlib import Path
 import httpx
 
 from scripts.shared_worker_report import compare_cases, read_case
-from scripts.shared_worker_workload import PROMPT
+from scripts.shared_worker_workload import PROMPT, TERMINAL
 
 HARNESS = Path(__file__).resolve().parents[1]
 
@@ -309,7 +311,12 @@ def stop_owned(processes, forced):
         except subprocess.TimeoutExpired:
             forced.append(process.pid)
             process.kill()
-            process.wait(timeout=10)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                # Already marked invalid above; still clean up the other hosts
+                # and retain the manifest even if this child cannot be reaped.
+                pass
 
 
 def check_idle_database(base):
@@ -326,8 +333,8 @@ def check_idle_database(base):
     ) as db:
         with db.cursor() as cursor:
             cursor.execute(
-                "SELECT count(*) FROM tasks WHERE status::text NOT IN "
-                "('COMPLETED','FAILED','CANCELLED','PAUSED')"
+                "SELECT count(*) FROM tasks WHERE NOT (status::text = ANY(%s))",
+                (sorted(status.upper() for status in TERMINAL),),
             )
             if cursor.fetchone()[0]:
                 raise RuntimeError(
@@ -389,12 +396,14 @@ def run_case(args, base, workers):
         path = output / (name + ".jsonl")
         log = path.open("x")
         files.append(log)
+        stderr = (output / (name + ".stderr.log")).open("x")
+        files.append(stderr)
         process = subprocess.Popen(
             workload_command(args, background, probes, spacing),
             env=base,
             cwd=output,
             stdout=log,
-            stderr=subprocess.STDOUT,
+            stderr=stderr,
         )
         clients.append(process)
         wait_for(

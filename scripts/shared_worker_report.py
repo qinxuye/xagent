@@ -185,10 +185,18 @@ def compare_cases(cases):
         "prompt_sha256",
         "harness_sha256",
         "task_timeout_s",
+        "source_head",
+        "source_diff_sha256",
+        "source_status",
     )
     if cases:
         compatible = compatible and all(
-            all(case["manifest"][key] == cases[0]["manifest"][key] for key in fields)
+            not case["manifest"].get("source_status")
+            and all(
+                key in case["manifest"]
+                and case["manifest"][key] == cases[0]["manifest"].get(key)
+                for key in fields
+            )
             for case in cases
         )
     common = (
@@ -206,7 +214,7 @@ def compare_cases(cases):
         else set()
     )
     return {
-        "valid": compatible,
+        "valid": compatible and bool(common),
         "matched_full_load_ordinals": sorted(common),
         "matched_full_load": [
             metrics(
@@ -220,7 +228,9 @@ def compare_cases(cases):
             "No enforced CPU quota; multiple workers can use more host cores.",
             "Warmup does not fix production cold starts or guarantee fair assignment.",
             "First-model means adapter entry, not network send or first token.",
+            "Full load means all background tasks are marked RUNNING (admitted), not concurrent execution.",
             "Full-load matching is by submission ordinal, not identical wall-clock exposure.",
+            "Comparison requires matching clean source revisions and nonempty matched samples.",
             "A completed run is not a production timeout SLO pass.",
         ],
     }
