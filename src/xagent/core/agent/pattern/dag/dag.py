@@ -1491,13 +1491,12 @@ class DAGPattern(AgentPattern):
         )
         # Reuse the final-answer scope/language/evidence payload, but never send
         # raw exceptions or planner prose as facts for the handoff.
-        messages = self._completion_assessment_messages(context)
-        payload = json.loads(messages[1]["content"])
+        payload = self._delivery_evidence_payload(context)
         payload.update(
             failed_step_id=failure.get("failed_step_id"),
             failed_step_evidence=self.failed_step_evidence,
         )
-        messages[0]["content"] = (
+        system_prompt = (
             "DAG execution stopped because a step failed. No further work or "
             "verification is possible in this run. Call final_answer exactly "
             "once to hand over useful existing results and trusted deliverable "
@@ -1513,11 +1512,15 @@ class DAGPattern(AgentPattern):
             f"{final_deliverable_file_reference_instructions(can_lookup=False)}\n\n"
             f"{final_answer_language_rule(subject='output_language_policy field')}"
         )
-        messages[1]["content"] = json.dumps(payload, ensure_ascii=False) + (
+        user_prompt = json.dumps(payload, ensure_ascii=False) + (
             "\n\nRuntime notice: work has stopped. Call only final_answer to "
             "hand over existing results and explain what was not done. "
             "No other tools are available."
         )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
         schema = {
             "type": "function",
             "function": {
@@ -1801,7 +1804,8 @@ class DAGPattern(AgentPattern):
             await final_answer_stream.finish(assessment.answer)
         return assessment
 
-    def _completion_assessment_messages(self, context: Any) -> list[dict[str, Any]]:
+    def _delivery_evidence_payload(self, context: Any) -> dict[str, Any]:
+        """Shared scope, language, and evidence for completed or stopped DAGs."""
         request = top_level_user_request(context)
         pending_response = latest_pending_user_response(context)
         latest_messages = [
@@ -1814,7 +1818,7 @@ class DAGPattern(AgentPattern):
             for message in getattr(context, "messages", [])
             if getattr(message, "role", None) == "user"
         ]
-        payload = {
+        return {
             "independent_user_request": request.language_text,
             "pending_response": (
                 serialize_pending_user_response(pending_response)
@@ -1828,9 +1832,8 @@ class DAGPattern(AgentPattern):
             ),
             "authoritative_user_requests": authoritative_user_requests,
             "messages": latest_messages,
-            # This call writes the user-facing answer, so it gets structure
-            # only: planner prose is never a fact source here, and `status`
-            # is always "completed" -- its sole entry requires that.
+            # Delivery gets plan structure and actual execution status only:
+            # planner prose must never become a fact source in the answer.
             "plan": (
                 {
                     "steps": [
@@ -1849,6 +1852,9 @@ class DAGPattern(AgentPattern):
             "candidate_output": self._final_output(),
             "previous_completion_feedback": self.completion_feedback,
         }
+
+    def _completion_assessment_messages(self, context: Any) -> list[dict[str, Any]]:
+        payload = self._delivery_evidence_payload(context)
         # This call writes the answer the user receives, with no tool to fetch
         # anything back, and its payload filters out system messages -- so the
         # compaction summary never reaches it and this is the only place the

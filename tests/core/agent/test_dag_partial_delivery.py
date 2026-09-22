@@ -54,6 +54,47 @@ def failed_pattern() -> DAGPattern:
 
 
 @pytest.mark.asyncio
+async def test_failure_delivery_builds_messages_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pattern = failed_pattern()
+    ctx = context()
+    completion_payload = json.loads(
+        pattern._completion_assessment_messages(ctx)[1]["content"]
+    )
+
+    def unexpected_completion_messages(_: Any) -> list[dict[str, Any]]:
+        pytest.fail("Failure delivery must not depend on completion message layout")
+
+    monkeypatch.setattr(
+        pattern, "_completion_assessment_messages", unexpected_completion_messages
+    )
+    llm = SequenceLLM(
+        [
+            call(
+                "final_answer",
+                answer="Report saved, verification unfinished.",
+                outcome="partial",
+            )
+        ]
+    )
+
+    result = await pattern.run(context=ctx, tools=[], llm=llm)
+
+    assert result["completion_outcome"] == "partial"
+    messages = llm.call_kwargs[-1]["messages"]
+    assert [message["role"] for message in messages] == ["system", "user"]
+    payload, _ = json.JSONDecoder().raw_decode(messages[1]["content"])
+    assert payload == {
+        **completion_payload,
+        "failed_step_id": "bad",
+        "failed_step_evidence": pattern.failed_step_evidence,
+    }
+    assert "DAG execution stopped" in messages[0]["content"]
+    assert "Runtime notice: work has stopped" in messages[1]["content"]
+
+
+@pytest.mark.asyncio
 async def test_delivers_evidence_without_unlocking_failed_dependencies() -> None:
     plan = build_plan(
         PlanStep(id="done", task="Initial finding"),
