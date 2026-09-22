@@ -212,6 +212,48 @@ async def test_iteration_limit_cancellation_during_delivery_propagates() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["prepare", "trace"])
+async def test_iteration_limit_setup_interrupt_does_not_start_provider(
+    phase: str,
+) -> None:
+    runtime = PatternRuntime()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    provider = FakeLLM(
+        [tool_call("final_answer", {"answer": "Must not deliver"}, "late")]
+    )
+
+    async def pause_setup(**_: Any) -> None:
+        started.set()
+        await release.wait()
+
+    class PreparedLLM:
+        async def prepare_for_call(self, *_: Any, **__: Any) -> Any:
+            if phase == "prepare":
+                await pause_setup()
+            return provider
+
+    if phase == "trace":
+        runtime.on_llm_start = AsyncMock(side_effect=pause_setup)
+    pattern = ReActPattern(max_iterations=1)
+    pattern.current_iteration = 1
+    context = ExecutionContext(execution_id="stop-during-delivery-setup")
+    context.add_user_message("Continue.")
+    task = asyncio.create_task(
+        pattern.run(context=context, tools=[], llm=PreparedLLM(), runtime=runtime)
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    runtime.request_interrupt("stop during delivery setup")
+    release.set()
+    result = await task
+
+    assert result["status"] == "interrupted"
+    assert "output" not in result
+    assert not provider.calls
+    assert not runtime._active_llm_tasks
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("during_call", [False, True])
 async def test_iteration_limit_respects_user_stop(during_call: bool) -> None:
     runtime = PatternRuntime()

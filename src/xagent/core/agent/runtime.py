@@ -377,6 +377,11 @@ class PatternRuntime:
             kwargs=kwargs,
             resolver=self.context_ref_resolver,
         )
+        # Setup may yield before a provider task exists for cancellation.
+        if self._interrupt_requested:
+            raise LLMCallInterrupted(
+                self.interrupt_reason or "interrupted before LLM call"
+            )
         call = llm.chat(**kwargs)
         if not inspect.isawaitable(call):
             return call
