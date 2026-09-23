@@ -1168,7 +1168,7 @@ class DAGPattern(AgentPattern):
         except Exception as exc:
             step.status = "failed"
             step.error = str(exc)
-            self._retain_failed_step_evidence(step.id, child_context)
+            self._retain_failed_step_evidence(step.id, child_context, react_pattern)
             self._clear_active_step(step.id)
             await runtime.on_dag_step_end(
                 context=root_context,
@@ -1234,7 +1234,7 @@ class DAGPattern(AgentPattern):
         if not result.get("success"):
             step.status = "failed"
             step.error = result.get("error", f"Step {step.id} failed.")
-            self._retain_failed_step_evidence(step.id, child_context)
+            self._retain_failed_step_evidence(step.id, child_context, react_pattern)
             await runtime.on_dag_step_end(
                 context=root_context,
                 step_id=step.id,
@@ -1454,14 +1454,26 @@ class DAGPattern(AgentPattern):
             metadata=metadata,
         ).to_dict()
 
-    def _retain_failed_step_evidence(self, step_id: str, context: Any) -> None:
+    def _retain_failed_step_evidence(
+        self, step_id: str, context: Any, pattern: ReActPattern
+    ) -> None:
+        # Child contexts inherit root messages, but their durable tool ledger
+        # belongs to this step. Keep only its observations, using the latest
+        # visible result when a provider reuses an inherited tool-call id.
+        tool_call_ids = {
+            record.tool_call_id
+            for record in pattern.tool_ledger.values()
+            if record.status == "completed"
+        }
+        observations = {
+            message["tool_call_id"]: message["content"]
+            for message in context.get_messages_for_llm()
+            if message.get("role") == "tool"
+            and message.get("tool_call_id") in tool_call_ids
+        }
         self.failed_step_evidence[step_id] = {
             "evidence_state": evidence_facts(tool_evidence_state(context)),
-            "observations": [
-                message["content"]
-                for message in context.get_messages_for_llm()
-                if message.get("role") == "tool"
-            ],
+            "observations": list(observations.values()),
         }
 
     async def _deliver_after_step_failure(
@@ -1568,7 +1580,7 @@ class DAGPattern(AgentPattern):
                 },
             )
             return failure
-        outcome = "blocked" if args.get("outcome") == "blocked" else "partial"
+        outcome = args["outcome"]
         answer = (
             "DAG execution stopped after a step failed; this is not a completed task."
             f"\n\n{args['answer']}"

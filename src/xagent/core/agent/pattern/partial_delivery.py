@@ -4,6 +4,8 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
+
 from ...model.chat.tool_protocol import get_tool_protocol_error
 from ..runtime import (
     ExecutionInterrupted,
@@ -51,6 +53,10 @@ async def request_partial_delivery(
             if get_tool_protocol_error(response) is None
             else None
         )
+        if args is not None and not Draft202012Validator(
+            schema["function"]["parameters"]
+        ).is_valid(args):
+            args = None
         await runtime.on_llm_end(
             context=context,
             response=response,

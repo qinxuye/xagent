@@ -1252,12 +1252,17 @@ class ReActPattern(AgentPattern):
                 return dict(calls[0]["args"])
             return None
 
+        schema = self._final_answer_tool_schema()
+        schema["function"]["parameters"]["properties"]["outcome"]["enum"] = [
+            "partial",
+            "blocked",
+        ]
         args = await request_partial_delivery(
             context=context,
             llm=llm,
             runtime=runtime,
             messages=messages,
-            schema=self._final_answer_tool_schema(),
+            schema=schema,
             parse_response=parse_response,
             metadata={
                 "iteration": self.current_iteration,
@@ -1273,7 +1278,7 @@ class ReActPattern(AgentPattern):
         )
         if interrupted is not None:
             return interrupted
-        outcome = "blocked" if args.get("outcome") == "blocked" else "partial"
+        outcome = args["outcome"]
         answer = (
             "Execution stopped at the iteration limit; this is not a completed task."
             f"\n\n{self._final_answer_text(args)}"

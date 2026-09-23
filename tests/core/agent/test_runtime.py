@@ -628,10 +628,26 @@ class PatternWithState:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("during_materialization", [False, True])
+@pytest.mark.parametrize("via_checker", [False, True])
 async def test_runtime_does_not_start_llm_after_interrupt(
-    monkeypatch: pytest.MonkeyPatch, during_materialization: bool
+    monkeypatch: pytest.MonkeyPatch, during_materialization: bool, via_checker: bool
 ) -> None:
     runtime = PatternRuntime()
+    checker_requested = False
+
+    async def checker() -> str | None:
+        return "stop before provider" if checker_requested else None
+
+    if via_checker:
+        runtime.interrupt_checker = checker
+
+    def stop() -> None:
+        nonlocal checker_requested
+        if via_checker:
+            checker_requested = True
+        else:
+            runtime.request_interrupt("stop before provider")
+
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -644,14 +660,37 @@ async def test_runtime_does_not_start_llm_after_interrupt(
     monkeypatch.setattr(runtime_module, "materialize_llm_kwargs", materialize)
     llm = type("LLM", (), {"chat": AsyncMock(return_value="must not call")})()
     if not during_materialization:
-        runtime.request_interrupt("stop before provider")
+        stop()
     task = asyncio.create_task(runtime.run_llm_call(llm))
     if during_materialization:
         await asyncio.wait_for(started.wait(), timeout=1)
-        runtime.request_interrupt("stop before provider")
+        stop()
         release.set()
 
     with pytest.raises(LLMCallInterrupted, match="stop before provider"):
+        await task
+    llm.chat.assert_not_called()
+    assert not runtime._active_llm_tasks
+
+
+@pytest.mark.asyncio
+async def test_runtime_respects_explicit_stop_while_checker_returns_false() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def checker() -> bool:
+        started.set()
+        await release.wait()
+        return False
+
+    runtime = PatternRuntime(interrupt_checker=checker)
+    llm = type("LLM", (), {"chat": AsyncMock()})()
+    task = asyncio.create_task(runtime.run_llm_call(llm))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    runtime.request_interrupt("stop during checker")
+    release.set()
+
+    with pytest.raises(LLMCallInterrupted, match="stop during checker"):
         await task
     llm.chat.assert_not_called()
     assert not runtime._active_llm_tasks

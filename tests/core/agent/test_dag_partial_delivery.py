@@ -110,7 +110,7 @@ async def test_delivers_evidence_without_unlocking_failed_dependencies() -> None
             call(
                 "final_answer",
                 answer="Saved [report.csv](file:report-id); verification and publishing not done.",
-                outcome="completed",
+                outcome="partial",
             ),
         ]
     )
@@ -161,6 +161,78 @@ async def test_invalid_handoff_keeps_failure_without_more_work(response: Any) ->
     assert llm.calls == 1
     assert not tool.calls
     assert runtime.last_checkpoint["label"] == "dag_failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"outcome": "partial"},
+        {"answer": 42, "outcome": "partial"},
+        {"answer": "Useful result"},
+        {"answer": "Useful result", "outcome": "completed"},
+        {"answer": "Useful result", "outcome": "unknown"},
+        {"answer": "Useful result", "outcome": []},
+    ],
+)
+async def test_schema_invalid_handoff_keeps_step_failure(args: dict[str, Any]) -> None:
+    llm = SequenceLLM([call("final_answer", **args)])
+    result = await failed_pattern().run(context=context(), tools=[], llm=llm)
+
+    assert result["success"] is False
+    assert result["failure_reason"] == "step_failed"
+    assert "output" not in result
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current_observation", [False, True])
+async def test_failed_step_does_not_inherit_root_tool_evidence(
+    current_observation: bool,
+) -> None:
+    ctx = context()
+    ctx.add_assistant_message(
+        "", tool_calls=call("calculator", expression="1+1")["tool_calls"]
+    )
+    ctx.add_tool_result(
+        "calculator", {"result": "stale-root-only"}, tool_call_id="call"
+    )
+    plan = build_plan(PlanStep(id="bad", task="Current work"))
+    pattern = DAGPattern(lambda **_: plan, react_max_iterations=2)
+
+    class FailingStepLLM(SequenceLLM):
+        async def chat(self, **kwargs: Any) -> Any:
+            names = [tool["function"]["name"] for tool in kwargs["tools"]]
+            if names == ["final_answer"]:
+                self.call_kwargs.append(kwargs)
+                self.calls += 1
+                return call(
+                    "final_answer", answer="Available results", outcome="partial"
+                )
+            if current_observation and not self.calls:
+                return await super().chat(**kwargs)
+            self.call_kwargs.append(kwargs)
+            self.calls += 1
+            raise RuntimeError("current provider failed")
+
+    llm = FailingStepLLM([call("calculator", expression="2+2")])
+    result = await pattern.run(context=ctx, tools=[ReportTool()], llm=llm)
+
+    observations = pattern.failed_step_evidence["bad"]["observations"]
+    assert "stale-root-only" not in str(observations)
+    if current_observation:
+        assert "file:report-id" in str(observations)
+        assert result["completion_outcome"] == "partial"
+        assert llm.calls == 3
+        payload, _ = json.JSONDecoder().raw_decode(
+            llm.call_kwargs[-1]["messages"][1]["content"]
+        )
+        # Root history remains available as history, never as step-owned evidence.
+        assert "stale-root-only" not in str(payload["failed_step_evidence"])
+    else:
+        assert observations == []
+        assert result["failure_reason"] == "step_failed"
+        assert llm.calls == 1
 
 
 @pytest.mark.asyncio

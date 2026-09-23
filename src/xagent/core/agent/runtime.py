@@ -378,6 +378,7 @@ class PatternRuntime:
             resolver=self.context_ref_resolver,
         )
         # Setup may yield before a provider task exists for cancellation.
+        await self.should_interrupt()
         if self._interrupt_requested:
             raise LLMCallInterrupted(
                 self.interrupt_reason or "interrupted before LLM call"

@@ -32,7 +32,8 @@ async def test_iteration_limit_delivers_existing_result_without_more_work() -> N
                 "final_answer",
                 {
                     "answer": "2+2 = 4. The remaining calculations were not run.",
-                    "outcome": "completed",
+                    "outcome": "partial",
+                    "response_language": "en",
                 },
                 "delivery",
             ),
@@ -60,6 +61,9 @@ async def test_iteration_limit_delivers_existing_result_without_more_work() -> N
         "function": {"name": "final_answer"},
     }
     assert [t["function"]["name"] for t in llm.calls[-1]["tools"]] == ["final_answer"]
+    assert llm.calls[-1]["tools"][0]["function"]["parameters"]["properties"]["outcome"][
+        "enum"
+    ] == ["partial", "blocked"]
     assert any(
         m["role"] == "tool" and "4" in m["content"] for m in llm.calls[-1]["messages"]
     )
@@ -70,7 +74,13 @@ async def test_iteration_limit_delivers_existing_result_without_more_work() -> N
 async def test_iteration_limit_preserves_file_links_and_outcome(outcome: str) -> None:
     answer = "Saved [report.csv](file:registered-report). Analysis is unfinished."
     llm = FakeLLM(
-        [tool_call("final_answer", {"answer": answer, "outcome": outcome}, "end")]
+        [
+            tool_call(
+                "final_answer",
+                {"answer": answer, "outcome": outcome, "response_language": "en"},
+                "end",
+            )
+        ]
     )
     context = ExecutionContext(execution_id="delivery")
     context.add_user_message("Create a report and analyze it.")
@@ -136,6 +146,41 @@ async def test_iteration_limit_never_retries_or_executes_extra_tools(
     assert "output" not in result
     assert tool.calls == [{"expression": "2+2"}]
     assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("answer", None),
+        ("answer", 42),
+        ("outcome", None),
+        ("outcome", "completed"),
+        ("outcome", "unknown"),
+        ("outcome", []),
+        ("response_language", None),
+        ("response_language", 42),
+        ("extra", "not allowed"),
+    ],
+)
+async def test_iteration_limit_rejects_schema_invalid_delivery(
+    field: str, value: Any
+) -> None:
+    args = {"answer": "Useful result", "outcome": "partial", "response_language": "en"}
+    if value is None:
+        args.pop(field)
+    else:
+        args[field] = value
+    llm = FakeLLM([tool_call("final_answer", args, "delivery")])
+    pattern = ReActPattern(max_iterations=1)
+    pattern.current_iteration = 1
+
+    result = await pattern.run(context=ExecutionContext(), tools=[], llm=llm)
+
+    assert result["success"] is False
+    assert result["status"] == "max_iterations"
+    assert "output" not in result
+    assert len(llm.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -213,10 +258,19 @@ async def test_iteration_limit_cancellation_during_delivery_propagates() -> None
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["prepare", "trace"])
+@pytest.mark.parametrize("via_checker", [False, True])
 async def test_iteration_limit_setup_interrupt_does_not_start_provider(
     phase: str,
+    via_checker: bool,
 ) -> None:
     runtime = PatternRuntime()
+    checker_requested = False
+
+    async def checker() -> bool:
+        return checker_requested
+
+    if via_checker:
+        runtime.interrupt_checker = checker
     started = asyncio.Event()
     release = asyncio.Event()
     provider = FakeLLM(
@@ -243,7 +297,10 @@ async def test_iteration_limit_setup_interrupt_does_not_start_provider(
         pattern.run(context=context, tools=[], llm=PreparedLLM(), runtime=runtime)
     )
     await asyncio.wait_for(started.wait(), timeout=1)
-    runtime.request_interrupt("stop during delivery setup")
+    if via_checker:
+        checker_requested = True
+    else:
+        runtime.request_interrupt("stop during delivery setup")
     release.set()
     result = await task
 
@@ -332,7 +389,11 @@ async def test_iteration_limit_delivery_reaches_execution_adapter(
             tool_call("calculator", {"expression": "2+2"}, "work"),
             tool_call(
                 "final_answer",
-                {"answer": "4; second calculation not run.", "outcome": "partial"},
+                {
+                    "answer": "4; second calculation not run.",
+                    "outcome": "partial",
+                    "response_language": "en",
+                },
                 "delivery",
             ),
         ]
@@ -357,4 +418,6 @@ async def test_iteration_limit_delivery_reaches_execution_adapter(
     assert result["completion_outcome"] == "partial"
     assert result["metadata"]["completion_outcome"] == "partial"
     assert result["agent_result"]["termination_reason"] == "max_iterations"
+    assert result["termination_reason"] == "max_iterations"
+    assert result["metadata"]["termination_reason"] == "max_iterations"
     assert "4; second calculation not run." in result["output"]
