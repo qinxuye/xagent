@@ -176,3 +176,108 @@ describe("ExcelPreviewRenderer formula results", () => {
     expect(JSON.stringify(sheet)).toBe(original)
   })
 })
+
+describe("ExcelPreviewRenderer HTML safety", () => {
+  afterEach(cleanup)
+
+  it.each([false, true])("sanitizes cell values from real XLSX bytes (cached formula=%s)", (cached) => {
+    const values = [
+      '\"><img src=x onerror=alert(1)>',
+      '\"><svg onload=alert(1)>',
+      '\" onmouseover=\"alert(1)',
+    ]
+    const sheet: XLSX.WorkSheet = { "!ref": "A1:A3" }
+    values.forEach((value, index) => {
+      sheet[`A${index + 1}`] = { t: "s", v: value, ...(cached ? { f: '"cached"' } : {}) }
+    })
+    const { container } = render(preview(workbookContent({ Values: sheet })))
+
+    expect(container.querySelector("img, svg, script, [onerror], [onload], [onmouseover]")).toBeNull()
+    values.forEach((value, index) => {
+      expect(cell(container, `A${index + 1}`)).toHaveTextContent(value)
+    })
+    expect(screen.queryByRole("status")).not.toBeInTheDocument()
+  })
+
+  it.each([false, true])("sanitizes CSV cells (base64=%s)", (base64) => {
+    const value = '\"><img src=x onerror=alert(1)>'
+    const csv = `note,amount\n"${value.replace(/"/g, '""')}",7`
+    const { container } = render(preview(base64 ? btoa(csv) : csv))
+
+    expect(container.querySelector("img, [onerror]")).toBeNull()
+    expect(container).toHaveTextContent(value)
+    expect(cell(container, "B2")).toHaveTextContent(/^7$/)
+  })
+
+  it.each([
+    "javascript:alert(1)",
+    "JaVaScRiPt:alert(1)",
+    "java\tscript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "vbscript:msgbox(1)",
+  ])("removes unsafe hyperlink targets: %s", (target) => {
+    const content = workbookContent({ Links: {
+      A1: { t: "s", v: "Link label", l: { Target: target } },
+      "!ref": "A1",
+    } })
+    const { container } = render(preview(content))
+
+    expect(cell(container, "A1")).toHaveTextContent("Link label")
+    expect(container.querySelector("a[href]")).toBeNull()
+  })
+
+  it("removes attributes injected through hyperlink targets", () => {
+    const content = workbookContent({ Links: {
+      A1: { t: "s", v: "Link label", l: { Target: 'https://example.com/\" onclick=\"alert(1)' } },
+      "!ref": "A1",
+    } })
+    const { container } = render(preview(content))
+
+    expect(container.querySelector("[onclick]")).toBeNull()
+    expect(cell(container, "A1")).toHaveTextContent("Link label")
+  })
+
+  it("preserves merged cells, formatted values, safe links and formula warnings", () => {
+    const content = workbookContent({ Report: {
+      A1: { t: "s", v: "Report & totals" },
+      A2: { t: "n", v: 12.5, z: "$0.00" },
+      B2: { t: "n", v: 0.25, z: "0.0%" },
+      A3: { t: "s", v: "Source", l: { Target: "https://example.com/report?a=1&b=2" } },
+      B3: { t: "s", v: "Contact", l: { Target: "mailto:reports@example.com" } },
+      A4: { t: "n", f: "SUM(A2:B2)" },
+      "!ref": "A1:B4",
+      "!merges": [XLSX.utils.decode_range("A1:B1")],
+    } })
+    const { container } = render(preview(content))
+
+    expect(cell(container, "A1")).toHaveAttribute("colspan", "2")
+    expect(cell(container, "A1")).toHaveTextContent("Report & totals")
+    expect(cell(container, "A2")).toHaveAttribute("data-t", "n")
+    expect(cell(container, "A2")).toHaveTextContent("$12.50")
+    expect(cell(container, "B2")).toHaveTextContent("25.0%")
+    expect(screen.getByRole("link", { name: "Source" })).toHaveAttribute("href", "https://example.com/report?a=1&b=2")
+    expect(screen.getByRole("link", { name: "Contact" })).toHaveAttribute("href", "mailto:reports@example.com")
+    expect(cell(container, "A4")).toHaveTextContent("=SUM(A2:B2)")
+    expect(screen.getByRole("status")).toHaveTextContent("Missing formula results on this sheet: 1")
+  })
+
+  it("cleans rich HTML and keeps text formatting without mutating the worksheet", () => {
+    const sheet: XLSX.WorkSheet = {
+      A1: {
+        t: "s", v: "Rich text",
+        h: '<b>Rich</b> <i>text</i><style>body{display:none}</style><img src=x onerror=alert(1)><svg onload=alert(1)></svg><iframe srcdoc="bad"></iframe><form><input autofocus onfocus=alert(1)></form><span style="position:fixed" onclick="alert(1)"> label</span>',
+      },
+      "!ref": "A1",
+    }
+    const original = JSON.stringify(sheet)
+    const result = createExcelSheetPreview(sheet, "Not calculated")
+    const container = document.createElement("div")
+    container.innerHTML = result.html
+
+    expect(container.querySelector("b")).toHaveTextContent("Rich")
+    expect(container.querySelector("i")).toHaveTextContent("text")
+    expect(container.querySelector("style, img, svg, iframe, form, input, [style], [onclick]")).toBeNull()
+    expect(container).toHaveTextContent("label")
+    expect(JSON.stringify(sheet)).toBe(original)
+  })
+})
