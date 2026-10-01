@@ -9,13 +9,13 @@ import { I18nProvider } from "@/contexts/i18n-context"
 import { ExcelPreviewRenderer } from "./excel-preview-renderer"
 import { createExcelSheetPreview } from "./excel-sheet-preview"
 
-function workbookContent(sheets: Record<string, XLSX.WorkSheet>) {
+function workbookContent(sheets: Record<string, XLSX.WorkSheet>, bookSST = false) {
   const workbook = XLSX.utils.book_new()
   for (const [name, sheet] of Object.entries(sheets)) {
     XLSX.utils.book_append_sheet(workbook, sheet, name)
   }
   // Exercise real XLSX bytes and the real reader, not a mocked parsed workbook.
-  return XLSX.write(workbook, { type: "base64", bookType: "xlsx" }) as string
+  return XLSX.write(workbook, { type: "base64", bookType: "xlsx", bookSST }) as string
 }
 
 function preview(content: string, locale: "en" | "zh" = "en") {
@@ -279,5 +279,41 @@ describe("ExcelPreviewRenderer HTML safety", () => {
     expect(container.querySelector("style, img, svg, iframe, form, input, [style], [onclick]")).toBeNull()
     expect(container).toHaveTextContent("label")
     expect(JSON.stringify(sheet)).toBe(original)
+  })
+
+  it.each([false, true])("keeps rich-text table markup inside its cell from real XLSX bytes (shared strings=%s)", async (shared) => {
+    const content = workbookContent({ Report: XLSX.utils.aoa_to_sheet([
+      ["Rich text", "Neighbor"],
+      ["Lower", 7],
+    ]) }, shared)
+    const zip = await JSZip.loadAsync(content, { base64: true })
+    const payload = '</td><td id="forged-cell">Injected</td><td><table><tr><td>Nested</td></tr></table>'
+    const escapedPayload = payload.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    const richText = `<r><rPr><b/></rPr><t>Rich text</t></r><r><t>${escapedPayload}</t></r>`
+    if (shared) {
+      const path = "xl/sharedStrings.xml"
+      const xml = await zip.file(path)!.async("string")
+      zip.file(path, xml.replace("<si><t>Rich text</t></si>", `<si>${richText}</si>`))
+    } else {
+      const path = "xl/worksheets/sheet1.xml"
+      const xml = await zip.file(path)!.async("string")
+      zip.file(path, xml.replace(/<c\b[^>]*\br="A1"[^>]*>[\s\S]*?<\/c>/, `<c r="A1" t="inlineStr"><is>${richText}</is></c>`))
+    }
+    const maliciousContent = await zip.generateAsync({ type: "base64" })
+    // Verify that the actual reader, not a hand-built cell.h, emits the markup.
+    const parsed = XLSX.read(maliciousContent, { type: "base64", sheetStubs: true })
+    expect(parsed.Sheets.Report.A1.h).toContain(payload)
+    const { container } = render(preview(maliciousContent))
+
+    expect(container.querySelectorAll("table")).toHaveLength(1)
+    expect(container.querySelectorAll("tr")).toHaveLength(2)
+    expect(container.querySelectorAll("td")).toHaveLength(4)
+    expect(container.querySelector("#forged-cell")).toBeNull()
+    expect(cell(container, "A1")?.querySelector("b")).toHaveTextContent("Rich text")
+    expect(cell(container, "A1")).toHaveTextContent("Injected")
+    expect(cell(container, "A1")).toHaveTextContent("Nested")
+    expect(cell(container, "B1")).toHaveTextContent(/^Neighbor$/)
+    expect(cell(container, "A2")).toHaveTextContent(/^Lower$/)
+    expect(cell(container, "B2")).toHaveTextContent(/^7$/)
   })
 })

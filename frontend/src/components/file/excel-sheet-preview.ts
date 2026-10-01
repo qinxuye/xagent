@@ -6,6 +6,8 @@ export interface ExcelSheetPreview {
   missingFormulaResults: number
 }
 
+const INLINE_TAGS = ["a", "b", "strong", "i", "em", "u", "s", "sub", "sup", "span", "br"]
+
 function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;")
@@ -24,7 +26,17 @@ export function createExcelSheetPreview(
     // Format a copy before removing raw attribute values. SheetJS interpolates
     // v/z/l.Target without escaping, so merely sanitizing its malformed HTML
     // can lose cell text or table structure before the sanitizer sees it.
-    let html = cell.v == null ? "" : (cell.h || escapeHtml(XLSX.utils.format_cell({ ...cell })))
+    let html = ""
+    if (cell.v != null) {
+      // Rich-text runs can contain table markup. Keep them inline before
+      // insertion so they cannot close a cell or inject rows into the sheet.
+      html = cell.h ? DOMPurify.sanitize(cell.h, {
+        ALLOWED_TAGS: INLINE_TAGS,
+        ALLOWED_ATTR: ["href", "title"],
+        ALLOW_DATA_ATTR: false,
+        ALLOW_ARIA_ATTR: false,
+      }) : escapeHtml(XLSX.utils.format_cell({ ...cell }))
+    }
     // With sheetStubs enabled, SheetJS represents an uncached XLSX formula as
     // a type-z cell with v: 0. That is not a calculated zero. Empty strings,
     // false, zero and cached errors on other cell types are actual results.
@@ -52,7 +64,7 @@ export function createExcelSheetPreview(
   const html = DOMPurify.sanitize(XLSX.utils.sheet_to_html(preview), {
     ALLOWED_TAGS: [
       "table", "thead", "tbody", "tfoot", "tr", "th", "td",
-      "a", "b", "strong", "i", "em", "u", "s", "sub", "sup", "span", "br",
+      ...INLINE_TAGS,
     ],
     ALLOWED_ATTR: ["id", "colspan", "rowspan", "href", "title", "data-t"],
     ALLOW_DATA_ATTR: false,
