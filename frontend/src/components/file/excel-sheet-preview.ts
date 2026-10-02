@@ -35,7 +35,7 @@ export function createExcelSheetPreview(
         ALLOWED_ATTR: ["href", "title"],
         ALLOW_DATA_ATTR: false,
         ALLOW_ARIA_ATTR: false,
-      }) : escapeHtml(XLSX.utils.format_cell({ ...cell }))
+      }) : escapeHtml(XLSX.utils.format_cell({ ...cell })).replace(/\r?\n/g, "<br/>")
     }
     // With sheetStubs enabled, SheetJS represents an uncached XLSX formula as
     // a type-z cell with v: 0. That is not a calculated zero. Empty strings,

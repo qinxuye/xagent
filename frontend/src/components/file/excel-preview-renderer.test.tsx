@@ -210,6 +210,37 @@ describe("ExcelPreviewRenderer HTML safety", () => {
   })
 
   it.each([
+    { base64: false, lineBreak: "\n" },
+    { base64: true, lineBreak: "\n" },
+    { base64: false, lineBreak: "\r\n" },
+    { base64: true, lineBreak: "\r\n" },
+  ])("preserves line breaks in escaped CSV values (%j)", ({ base64, lineBreak }) => {
+    const csv = `address,amount\n"Office <HQ>${lineBreak}Floor 2 & reception",7`
+    const { container } = render(preview(base64 ? btoa(csv) : csv))
+
+    expect(cell(container, "A2")?.querySelectorAll("br")).toHaveLength(1)
+    expect(cell(container, "A2")).toHaveTextContent("Office <HQ>")
+    expect(cell(container, "A2")).toHaveTextContent("Floor 2 & reception")
+    expect(container.querySelector("hq")).toBeNull()
+    expect(cell(container, "B2")).toHaveTextContent(/^7$/)
+  })
+
+  it("preserves line breaks in cached XLSX string formula results", () => {
+    const content = workbookContent({ Notes: {
+      A1: { t: "s", f: '"Office"&CHAR(10)&"Floor 2"', v: "Office\nFloor 2" },
+      "!ref": "A1",
+    } })
+    const parsed = XLSX.read(content, { type: "base64", sheetStubs: true })
+    expect(parsed.Sheets.Notes.A1.h).toContain("<br/>")
+    const { container } = render(preview(content))
+
+    expect(cell(container, "A1")?.querySelectorAll("br")).toHaveLength(1)
+    expect(cell(container, "A1")).toHaveTextContent("Office")
+    expect(cell(container, "A1")).toHaveTextContent("Floor 2")
+    expect(screen.queryByRole("status")).not.toBeInTheDocument()
+  })
+
+  it.each([
     "javascript:alert(1)",
     "JaVaScRiPt:alert(1)",
     "java\tscript:alert(1)",
@@ -227,14 +258,17 @@ describe("ExcelPreviewRenderer HTML safety", () => {
   })
 
   it("removes attributes injected through hyperlink targets", () => {
+    const target = 'https://example.com/\" onclick=\"alert(1)'
     const content = workbookContent({ Links: {
-      A1: { t: "s", v: "Link label", l: { Target: 'https://example.com/\" onclick=\"alert(1)' } },
+      A1: { t: "s", v: "Link label", l: { Target: target } },
       "!ref": "A1",
     } })
     const { container } = render(preview(content))
 
     expect(container.querySelector("[onclick]")).toBeNull()
     expect(cell(container, "A1")).toHaveTextContent("Link label")
+    // The payload stays inert URL text, not a separate event-handler attribute.
+    expect(cell(container, "A1")?.querySelector("a[href]")).toHaveAttribute("href", target)
   })
 
   it("preserves merged cells, formatted values, safe links and formula warnings", () => {
