@@ -518,12 +518,21 @@ describe("AgentBuilder preview", () => {
 
   describe("configuration completion", () => {
     const configStep = () => screen.getByRole("button", { name: /builds.editor.stepGuide.configure/ })
+    const expectSectionHighlighted = (section: string, highlighted: boolean) => {
+      const label = section === "mcp" ? "tools.mcp.dialog.connector" : `builds.configForm.${section}.label`
+      const element = screen.getByText(label, { selector: "label" }).closest(".transition-all")
+      expect(element).not.toBeNull()
+      expect(element?.classList.contains("border-primary/30")).toBe(highlighted)
+    }
 
     it("allows a model-only agent without optional tools, skills, or connections", async () => {
       storedToolCategories = []
       render(<AgentBuilder agentId="42" />)
       await screen.findByDisplayValue("Existing SSH agent")
       await waitFor(() => expect(configStep().querySelector("svg")).not.toBeNull())
+      for (const section of ["model", "knowledgeBase", "skills", "tools", "mcp"]) {
+        expectSectionHighlighted(section, false)
+      }
     })
 
     it("does not complete configuration just because a tool is selected without a model", async () => {
@@ -538,6 +547,10 @@ describe("AgentBuilder preview", () => {
       render(<AgentBuilder agentId="42" />)
       await screen.findByDisplayValue("Existing SSH agent")
       expect(configStep().querySelector("svg")).toBeNull()
+      expectSectionHighlighted("model", true)
+      for (const section of ["knowledgeBase", "skills", "tools", "mcp"]) {
+        expectSectionHighlighted(section, false)
+      }
     })
 
     it.each(["knowledge", "mcp:missing-connector"])("still requires the template's %s capability", async (category) => {
@@ -555,6 +568,11 @@ describe("AgentBuilder preview", () => {
       render(<AgentBuilder />)
       await screen.findByDisplayValue("Template agent")
       expect(configStep().querySelector("svg")).toBeNull()
+      expectSectionHighlighted("model", false)
+      expectSectionHighlighted("knowledgeBase", category === "knowledge")
+      expectSectionHighlighted("mcp", category === "mcp:missing-connector")
+      expectSectionHighlighted("skills", false)
+      expectSectionHighlighted("tools", false)
     })
   })
 
