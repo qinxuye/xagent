@@ -1896,16 +1896,13 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   const useTemplateSpecificHighlights =
     templateMissingKb || templateMissingSkills || templateMissingTools || templateMissingMcp
   const describeStepCompleted = Boolean(name.trim() && description.trim() && instructions.trim())
-  const configStepCompleted = isTemplateRequirementsPending
-    ? false
-    : isTemplateBuildFlow
-      ? !templateMissingKb && !templateMissingSkills && !templateMissingTools && !templateMissingMcp
-      : (
-        selectedKbs.length > 0 ||
-        selectedSkills.length > 0 ||
-        selectedToolCategories.length > 0 ||
-        selectedMcpServers.length > 0
-      )
+  // Plain agents need a model, not an arbitrary optional tool or connector.
+  // Templates still require their declared capabilities before this step completes.
+  const configStepCompleted = Boolean(modelConfig.general)
+    && !isTemplateRequirementsPending
+    && (!isTemplateBuildFlow || (
+      !templateMissingKb && !templateMissingSkills && !templateMissingTools && !templateMissingMcp
+    ))
   const previewStepCompleted = previewCompletionTaskId !== null
     && state.taskId === previewCompletionTaskId
     && state.currentTask?.id === String(previewCompletionTaskId)
@@ -2098,6 +2095,17 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
                     {t("builds.editor.header.publish")}
                   </Button>
                 )
+              )}
+              {isEditMode && originalData?.status === "published" && (
+                <Button
+                  variant="secondary"
+                  onClick={() => router.push(`/agent/${localAgentId}`)}
+                  disabled={isCreating || loadingAgent || isDirty || failedStagedTriggers.length > 0 || createdWebhookSecrets.length > 0}
+                  title={isDirty ? t("builds.editor.header.saveBeforeChat") : undefined}
+                >
+                  <MessageSquare className="mr-2 h-4 w-4" />
+                  {t("builds.editor.header.startChat")}
+                </Button>
               )}
             </>
           )}
@@ -3079,7 +3087,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           <DialogFooter className="gap-2 sm:justify-end">
             <div className="flex w-full sm:w-auto gap-2 justify-end">
               <Button variant="outline" onClick={handleDialogClose}>
-                {t("common.cancel")}
+                {t("builds.editor.success.keepEditing")}
               </Button>
               <Button onClick={handleDialogPublish}>
                 {t("builds.editor.header.publish")}
