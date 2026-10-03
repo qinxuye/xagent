@@ -204,6 +204,67 @@ async def test_concurrent_same_name_uploads_reserve_distinct_paths_and_contents(
 
 
 @pytest.mark.asyncio
+async def test_same_name_upload_preserves_registered_file_after_cache_eviction(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_upload_storage,
+) -> None:
+    """An absent local cache is not an unclaimed upload path."""
+
+    upload_root, _object_root = isolated_upload_storage
+    user_id = _admin_user_id()
+    monkeypatch.setattr(
+        files_api, "get_upload_path", _stage_path_in(upload_root, user_id)
+    )
+
+    async def upload(payload: bytes):
+        return await files_api.store_uploaded_files(
+            upload_items=[
+                UploadFile(filename="same-name.txt", file=io.BytesIO(payload))
+            ],
+            task_type="general",
+            task_id=None,
+            folder=None,
+            user_id=user_id,
+            single_file_mode=True,
+        )
+
+    originals = []
+    for payload in (b"first contents", b"second contents"):
+        result = await upload(payload)
+        with _direct_db_session() as db:
+            record = (
+                db.query(UploadedFile)
+                .filter(UploadedFile.file_id == result["file_id"])
+                .one()
+            )
+            original_path = Path(record.storage_path)
+        originals.append((result["file_id"], original_path, payload))
+        original_path.unlink()
+
+    new_upload = await upload(b"new contents")
+    with _direct_db_session() as db:
+        new_record = (
+            db.query(UploadedFile)
+            .filter(UploadedFile.file_id == new_upload["file_id"])
+            .one()
+        )
+        new_path = Path(new_record.storage_path)
+        assert db.query(UploadedFile).count() == 3
+    assert new_path not in [path for _, path, _ in originals]
+    assert new_path.read_bytes() == b"new contents"
+
+    headers = _admin_headers()
+    for file_id, original_path, payload in originals:
+        assert file_id != new_upload["file_id"]
+        assert not original_path.exists()
+        response = client.get(f"/api/files/download/{file_id}", headers=headers)
+        assert response.status_code == 200
+        assert response.content == payload
+        assert original_path.read_bytes() == payload
+    assert new_path.read_bytes() == b"new contents"
+
+
+@pytest.mark.asyncio
 async def test_staging_copy_reads_off_loop_with_no_database_checkout(
     monkeypatch: pytest.MonkeyPatch,
     isolated_upload_storage,
