@@ -204,16 +204,28 @@ async def test_concurrent_same_name_uploads_reserve_distinct_paths_and_contents(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path_spelling", ["plain", "symlink", "parent-components"])
 async def test_same_name_upload_preserves_registered_file_after_cache_eviction(
     monkeypatch: pytest.MonkeyPatch,
     isolated_upload_storage,
+    path_spelling: str,
 ) -> None:
     """An absent local cache is not an unclaimed upload path."""
 
     upload_root, _object_root = isolated_upload_storage
+    staging_root = upload_root
+    if path_spelling == "symlink":
+        staging_root = upload_root.with_name("upload-alias")
+        staging_root.symlink_to(upload_root, target_is_directory=True)
+    elif path_spelling == "parent-components":
+        intermediate = upload_root / "nested"
+        intermediate.mkdir()
+        staging_root = intermediate / ".."
+    if path_spelling != "plain":
+        assert str(staging_root) != str(staging_root.resolve())
     user_id = _admin_user_id()
     monkeypatch.setattr(
-        files_api, "get_upload_path", _stage_path_in(upload_root, user_id)
+        files_api, "get_upload_path", _stage_path_in(staging_root, user_id)
     )
 
     async def upload(payload: bytes):
@@ -238,6 +250,8 @@ async def test_same_name_upload_preserves_registered_file_after_cache_eviction(
                 .one()
             )
             original_path = Path(record.storage_path)
+        # Registration preserves the same spelling used by the reservation check.
+        assert original_path.parent == staging_root / f"user_{user_id}"
         originals.append((result["file_id"], original_path, payload))
         original_path.unlink()
 
