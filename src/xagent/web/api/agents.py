@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Literal, Optional, cast
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import String
+from sqlalchemy import cast as sql_cast
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -857,10 +859,15 @@ async def get_agent_preview_task(
         .filter(
             Task.user_id == user_id,
             Task.is_visible.is_(False),
-            Task.agent_config["is_preview"].as_boolean().is_(True),
+            # Compare serialized JSON scalars, never cast client JSON to an
+            # integer/bool: malformed legacy values must not break PostgreSQL
+            # history reads. SQLite serializes JSON true as 1.
+            sql_cast(Task.agent_config["is_preview"], String).in_(("true", "1")),
             or_(
-                Task.agent_config["preview_agent_id"].as_integer() == agent_id,
-                Task.agent_config["preview_history_agent_id"].as_integer() == agent_id,
+                sql_cast(Task.agent_config["preview_agent_id"], String)
+                == str(agent_id),
+                sql_cast(Task.agent_config["preview_history_agent_id"], String)
+                == str(agent_id),
             ),
         )
         .order_by(Task.id.desc())
@@ -879,7 +886,8 @@ async def get_agent_preview_task(
     return AgentPreviewTaskResponse(
         task_id=int(task.id),
         config_key=key if isinstance(key, str) else None,
-        # Without an accepted first turn, we cannot safely reconstruct its files.
+        # Retry the original submitted sample even if delivery failed or is
+        # unknown. Without a persisted first turn, its files cannot be restored.
         message=str(sample.content) if sample is not None else "",
         attachments=(sample.attachments or []) if sample is not None else [],
     )

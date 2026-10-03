@@ -1,9 +1,22 @@
 """Builder history reuses owner-scoped tasks and their persisted transcript."""
 
-import pytest
+import asyncio
 
+import pytest
+from sqlalchemy.orm import Session
+
+from tests.shared.postgres_disposable import disposable_database_factory
+from xagent.web.api.agents import get_agent_preview_task
+from xagent.web.models.agent import Agent
 from xagent.web.models.chat_message import TaskChatMessage
+from xagent.web.models.database import Base
 from xagent.web.models.task import Task, TaskStatus
+from xagent.web.models.user import User
+from xagent.web.services import agent_team_scope
+from xagent.web.services.chat_history_service import (
+    DELIVERY_FAILED,
+    DELIVERY_OUTCOME_UNKNOWN,
+)
 
 from .conftest import (
     _admin_headers,
@@ -168,6 +181,138 @@ def test_cross_user_tasks_are_private_even_for_admin():
         ).status_code
         == 404
     )
+    # The task belongs to the caller, but the target agent is not editable.
+    assert (
+        client.put(bob_url, headers=admin, json={"task_id": admin_task}).status_code
+        == 404
+    )
+
+
+def test_runtime_preview_cannot_be_read_or_bound_as_another_agent():
+    headers = _admin_headers()
+    first = create_agent(headers, "First")
+    second = create_agent(headers, "Second")
+    task_id = create_preview(first["user_id"], first["id"])
+    url = f"/api/agents/{second['id']}/preview-task"
+    assert client.get(url, headers=headers).json() is None
+    assert (
+        client.put(url, headers=headers, json={"task_id": task_id}).status_code == 409
+    )
+
+
+def test_team_co_editors_only_see_and_bind_their_own_previews(monkeypatch):
+    admin = _admin_headers()
+    bob = _register_second_user()
+    agent = create_agent(admin)
+    bob_agent = create_agent(bob)
+    user_ids = {agent["user_id"], bob_agent["user_id"]}
+    monkeypatch.setattr(
+        agent_team_scope,
+        "_agent_team_scope_hook",
+        lambda _db, uid: (
+            agent_team_scope.AgentTeamScope(team_id=100, is_team_admin=False)
+            if uid in user_ids
+            else None
+        ),
+    )
+    with _direct_db_session() as db:
+        db.get(Agent, agent["id"]).team_id = 100
+        db.commit()
+    assert client.get(f"/api/agents/{agent['id']}", headers=bob).json()["can_edit"]
+    url = f"/api/agents/{agent['id']}/preview-task"
+    admin_task = create_preview(agent["user_id"], agent["id"])
+    assert client.get(url, headers=bob).json() is None
+    bob_task = create_preview(bob_agent["user_id"])
+    assert client.put(url, headers=bob, json={"task_id": bob_task}).status_code == 204
+    assert client.get(url, headers=admin).json()["task_id"] == admin_task
+    assert client.get(url, headers=bob).json()["task_id"] == bob_task
+    assert client.put(url, headers=bob, json={"task_id": admin_task}).status_code == 404
+
+
+@pytest.mark.parametrize("delivery_status", [DELIVERY_FAILED, DELIVERY_OUTCOME_UNKNOWN])
+def test_original_failed_or_unknown_sample_can_be_retried(delivery_status):
+    headers = _admin_headers()
+    agent = create_agent(headers)
+    task_id = create_preview(agent["user_id"], agent["id"], status=TaskStatus.FAILED)
+    with _direct_db_session() as db:
+        sample = db.query(TaskChatMessage).filter_by(task_id=task_id).one()
+        sample.delivery_status = delivery_status
+        db.commit()
+    response = client.get(f"/api/agents/{agent['id']}/preview-task", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["message"] == "Original sample"
+    assert response.json()["attachments"][0]["file_id"] == "sample-id"
+
+
+def malformed_preview_configs(agent_id):
+    return [
+        {"is_preview": "abc", "preview_agent_id": agent_id},
+        {"is_preview": "true", "preview_agent_id": agent_id},
+        {"is_preview": True, "preview_agent_id": "abc"},
+        {"is_preview": True, "preview_history_agent_id": "abc"},
+        {"is_preview": True, "preview_agent_id": "9" * 100},
+        {"is_preview": True, "preview_agent_id": {"id": agent_id}},
+        {"is_preview": True, "preview_agent_id": [agent_id]},
+        {"is_preview": True, "preview_agent_id": None},
+    ]
+
+
+def test_malformed_preview_metadata_does_not_break_history():
+    headers = _admin_headers()
+    agent = create_agent(headers)
+    task_id = create_preview(agent["user_id"], agent["id"])
+    for config in malformed_preview_configs(agent["id"]):
+        create_preview(agent["user_id"], agent_config=config)
+    response = client.get(f"/api/agents/{agent['id']}/preview-task", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["task_id"] == task_id
+
+
+@pytest.mark.postgresql
+def test_postgresql_preview_query_ignores_malformed_metadata():
+    with disposable_database_factory("preview_history") as make_database:
+        engine = make_database("metadata")
+        Base.metadata.create_all(engine)
+        with Session(engine) as db:
+            user = User(username="preview-history-test", password_hash="unused")
+            db.add(user)
+            db.flush()
+            agent = Agent(user_id=user.id, name="Preview history")
+            db.add(agent)
+            db.flush()
+            task = Task(
+                user_id=user.id,
+                title="Valid preview",
+                is_visible=False,
+                agent_config={"is_preview": True, "preview_agent_id": agent.id},
+            )
+            db.add(task)
+            db.flush()
+            for config in malformed_preview_configs(agent.id):
+                db.add(
+                    Task(
+                        user_id=user.id,
+                        title="Malformed metadata",
+                        is_visible=False,
+                        agent_config=config,
+                    )
+                )
+            db.commit()
+            result = asyncio.run(get_agent_preview_task(agent.id, user, db))
+            assert result is not None
+            assert result.task_id == task.id
+            assert result.message == ""
+            assert result.attachments == []
+            # Binding metadata uses the same safe predicate as runtime metadata.
+            task.agent_config = {
+                "is_preview": True,
+                "preview_history_agent_id": agent.id,
+            }
+            db.commit()
+            assert (
+                asyncio.run(get_agent_preview_task(agent.id, user, db)).task_id
+                == task.id
+            )
 
 
 def test_legacy_preview_without_snapshot_is_not_current_config():

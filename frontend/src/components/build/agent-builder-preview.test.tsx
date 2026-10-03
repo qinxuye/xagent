@@ -2,10 +2,12 @@ import React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Task } from "@/contexts/app-context-chat"
+import { toast } from "sonner"
 
 const apiRequestMock = vi.hoisted(() => vi.fn())
 const setTaskIdMock = vi.hoisted(() => vi.fn())
 const sendMessageMock = vi.hoisted(() => vi.fn())
+const previewSendErrorMock = vi.hoisted(() => vi.fn())
 const dispatchMock = vi.hoisted(() => vi.fn())
 const taskConversationPanelMock = vi.hoisted(() => vi.fn())
 const closeFilePreviewMock = vi.hoisted(() => vi.fn())
@@ -96,10 +98,10 @@ vi.mock("@/components/layout/resizable-three-column-layout", () => ({
 }))
 
 vi.mock("@/components/task/task-conversation-panel", () => ({
-  TaskConversationPanel: (props: { onSend?: (message: string, config?: any, files?: File[]) => void }) => {
+  TaskConversationPanel: (props: { onSend?: (message: string, config?: any, files?: File[]) => Promise<void> }) => {
     taskConversationPanelMock(props)
     return (
-      <button type="button" onClick={() => props.onSend?.("Preview this")}>
+      <button type="button" onClick={() => props.onSend?.("Preview this").catch(previewSendErrorMock)}>
         send-preview-message
       </button>
     )
@@ -197,6 +199,8 @@ describe("AgentBuilder preview", () => {
     apiRequestMock.mockReset()
     setTaskIdMock.mockReset()
     sendMessageMock.mockReset()
+    previewSendErrorMock.mockReset()
+    vi.mocked(toast.error).mockClear()
     dispatchMock.mockReset()
     taskConversationPanelMock.mockReset()
     sendMessageMock.mockResolvedValue(undefined)
@@ -584,6 +588,78 @@ describe("AgentBuilder preview", () => {
     })
   })
 
+  describe("binding pre-save previews", () => {
+    beforeEach(() => {
+      MockWebSocket.instances = []
+      globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
+      const base = apiRequestMock.getMockImplementation()!
+      apiRequestMock.mockImplementation((url, init) => {
+        if (url.endsWith("/api/agents") && init?.method === "POST") {
+          return Promise.resolve(new Response(JSON.stringify({
+            ...JSON.parse(init.body), id: 42, team_id: null, can_edit: true, status: "draft",
+          })))
+        }
+        return base(url, init)
+      })
+    })
+
+    it.each(["manual", "chat"])("keeps an edited preview visible after %s creation", async (mode) => {
+      render(<AgentBuilder />)
+      fireEvent.change(await screen.findByPlaceholderText("builds.configForm.name.placeholder"), { target: { value: "New agent" } })
+      const editor = document.querySelector("[contenteditable]") as HTMLElement
+      editor.textContent = "Saved instructions"
+      fireEvent.input(editor)
+      if (mode === "chat") {
+        // Start chat first: its response must bind the latest preview, not the
+        // empty record captured when this WebSocket callback was installed.
+        fireEvent.click(screen.getByText("send-chat-input"))
+        act(() => MockWebSocket.instances[0].open())
+        await waitFor(() => expect(MockWebSocket.instances[0].sentMessages).toHaveLength(1))
+      }
+      await waitFor(() => {
+        if (!sendMessageMock.mock.calls.length) fireEvent.click(screen.getByText("send-preview-message"))
+        expect(sendMessageMock).toHaveBeenCalled()
+      })
+      fireEvent.click(screen.getByText("builds.configForm.executionMode.think.title"))
+      setTaskIdMock.mockClear()
+      if (mode === "manual") {
+        fireEvent.click(screen.getByText("builds.editor.header.create"))
+      } else {
+        act(() => MockWebSocket.instances[0].onmessage?.({ data: JSON.stringify({
+          type: "trace_event", event_id: "created", event_type: "tool_execution_end",
+          data: { tool_name: "create_agent", tool_params: { name: "New agent" }, result: { status: "success", agent_id: 42 } },
+        }) }))
+      }
+      await screen.findByDisplayValue("Existing SSH agent")
+      await waitFor(() => expect(apiRequestMock).toHaveBeenCalledWith("http://api.local/api/agents/42/preview-task", expect.objectContaining({
+        method: "PUT", body: JSON.stringify({ task_id: 123 }),
+      })))
+      expect(apiRequestMock.mock.calls.filter(([url, init]) => url.endsWith("/preview-task") && !init?.method)).toHaveLength(0)
+      expect(setTaskIdMock).not.toHaveBeenCalled()
+      expect(screen.getByText("builds.preview.configChanged")).toBeInTheDocument()
+    })
+
+    it("reports binding failure without rolling back the saved draft", async () => {
+      const base = apiRequestMock.getMockImplementation()!
+      apiRequestMock.mockImplementation((url, init) => url.endsWith("/preview-task") && init?.method === "PUT"
+        ? Promise.resolve(new Response("unavailable", { status: 503 })) : base(url, init))
+      render(<AgentBuilder />)
+      fireEvent.change(await screen.findByPlaceholderText("builds.configForm.name.placeholder"), { target: { value: "New agent" } })
+      const editor = document.querySelector("[contenteditable]") as HTMLElement
+      editor.textContent = "Saved instructions"
+      fireEvent.input(editor)
+      await waitFor(() => {
+        if (!sendMessageMock.mock.calls.length) fireEvent.click(screen.getByText("send-preview-message"))
+        expect(sendMessageMock).toHaveBeenCalled()
+      })
+      fireEvent.click(screen.getByText("builds.editor.header.create"))
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("builds.preview.errors.linkFailed", { duration: 8000 }))
+      await screen.findByText("builds.editor.success.createdDesc")
+      expect(apiRequestMock.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false)
+      expect(apiRequestMock.mock.calls.some(([url]) => url.endsWith("/publish"))).toBe(false)
+    })
+  })
+
   describe("persisted preview", () => {
     const configKey = () => JSON.stringify({
       instructions: "Saved instructions", executionMode: "balanced",
@@ -665,6 +741,22 @@ describe("AgentBuilder preview", () => {
       })))
       expect(sendMessageMock).not.toHaveBeenCalled()
       expect(apiRequestMock.mock.calls.some(([url]) => url.endsWith("/api/chat/task/create"))).toBe(false)
+    })
+
+    it("rejects a panel send while rerun preparation holds the lock", async () => {
+      let finish!: (response: Response) => void
+      const base = apiRequestMock.getMockImplementation()!
+      apiRequestMock.mockImplementation((url, init) => url.endsWith("/api/chat/task/create")
+        ? new Promise<Response>(resolve => { finish = resolve }) : base(url, init))
+      render(<AgentBuilder agentId="42" />)
+      await screen.findByText("builds.preview.currentConfig")
+      fireEvent.click(screen.getByText("builds.preview.rerunSample"))
+      await waitFor(() => expect(finish).toBeDefined())
+      await expect(taskConversationPanelMock.mock.lastCall![0].onSend("Keep my draft", undefined, [new File(["sample"], "sample.csv")]))
+        .rejects.toMatchObject({ errorCode: "task_busy" })
+      expect(sendMessageMock).not.toHaveBeenCalled()
+      await act(async () => { finish(new Response(JSON.stringify({ task_id: 123 }))) })
+      expect(sendMessageMock).toHaveBeenCalledWith("Original sample", { force: true, targetTaskId: 123 }, [])
     })
 
     it.each(["clear", "send", "unmount"])("ignores late history after %s", async (action) => {
@@ -983,6 +1075,8 @@ describe("AgentBuilder preview", () => {
       const createCalls = () => apiRequestMock.mock.calls.filter(([url]) => String(url).endsWith("/api/chat/task/create"))
       expect(createCalls()).toHaveLength(1)
       expect(sendMessageMock).toHaveBeenCalledTimes(phase === "send" ? 1 : 0)
+      await waitFor(() => expect(previewSendErrorMock).toHaveBeenCalledTimes(2))
+      expect(previewSendErrorMock.mock.calls[0][0]).toMatchObject({ errorCode: "task_busy" })
 
       if (phase === "send") {
         await settle(acknowledgeSend)

@@ -735,11 +735,30 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   // Keep this reactive: invalidating the cached task must also remove its checkmark.
   const [previewCompletionTaskId, setPreviewCompletionTaskId] = useState<number | null>(null)
   const [lastPreview, setLastPreview] = useState<PreviewRecord | null>(null)
+  const lastPreviewRef = useRef<PreviewRecord | null>(null)
+  useEffect(() => { lastPreviewRef.current = lastPreview }, [lastPreview])
   const [previewHistoryLoading, setPreviewHistoryLoading] = useState(false)
   const [previewHistoryError, setPreviewHistoryError] = useState(false)
   const [previewHistoryRetry, setPreviewHistoryRetry] = useState(0)
   const [previewSending, setPreviewSending] = useState(false)
   const previewSendingRef = useRef(false)
+
+  const bindPreviewTask = async (agentId: string | number) => {
+    // Builder-chat callbacks can outlive the render that started the chat.
+    const record = lastPreviewRef.current
+    if (!record) return
+    try {
+      const binding = await apiRequest(`${getApiUrl()}/api/agents/${agentId}/preview-task`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task_id: record.taskId }),
+      })
+      if (!binding.ok) throw new Error("Preview association failed")
+    } catch (error) {
+      console.error("Failed to associate preview:", error)
+      toast.error(t("builds.preview.errors.linkFailed"))
+    }
+  }
 
   const resetPreviewSession = useCallback(() => {
     previewGenerationRef.current += 1
@@ -796,7 +815,10 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   useEffect(() => {
     if (!localAgentId || !isInitialDataLoaded || String(loadedAgentId) !== localAgentId || readOnly) return
     // Saving a new agent must not replace its currently visible preview.
-    if (previewTaskIdRef.current !== null) return
+    if (lastPreview !== null) {
+      setPreviewHistoryLoading(false)
+      return
+    }
     let active = true
     const generation = previewGenerationRef.current
     setPreviewHistoryLoading(true)
@@ -824,7 +846,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     }
     void load()
     return () => { active = false }
-  }, [localAgentId, isInitialDataLoaded, loadedAgentId, readOnly, previewHistoryRetry, openPreviewRecord])
+  }, [localAgentId, isInitialDataLoaded, loadedAgentId, readOnly, previewHistoryRetry, openPreviewRecord, lastPreview])
 
   // Fetch Data
   useEffect(() => {
@@ -1255,7 +1277,10 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   }
 
   const handlePreviewSendMessage = async (content: string, _config?: any, files?: Array<File | PreviewAttachment>, fresh = false) => {
-    if (previewSendingRef.current) return
+    if (previewSendingRef.current) {
+      // Reject, rather than acknowledge, so ChatInput retains its draft/files.
+      throw Object.assign(new Error("Preview send is already pending"), { errorCode: "task_busy" })
+    }
     previewSendingRef.current = true
     setPreviewSending(true)
     setPreviewHistoryError(false)
@@ -1741,19 +1766,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
         } else {
           const newAgent = await response.json()
           setCreatedAgent(newAgent)
-          if (lastPreview) {
-            try {
-              const binding = await apiRequest(`${getApiUrl()}/api/agents/${newAgent.id}/preview-task`, {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ task_id: lastPreview.taskId }),
-              })
-              if (!binding.ok) throw new Error("Preview association failed")
-            } catch (error) {
-              console.error("Failed to associate preview:", error)
-              toast.error(t("builds.preview.errors.linkFailed"))
-            }
-          }
+          await bindPreviewTask(newAgent.id)
 
           // Staged triggers (configured before the agent existed, #928) go
           // through the regular trigger API now that a real agent id exists.
@@ -3117,7 +3130,8 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
             )}
             <Button size="sm" variant="outline"
               disabled={previewSending || state.isProcessing || state.isHistoryLoading || previewHistoryLoading || loadingAgent || !modelConfig.general || !lastPreview.message}
-              onClick={() => void handlePreviewSendMessage(lastPreview.message, undefined, lastPreview.files, true)}>
+              onClick={() => void handlePreviewSendMessage(lastPreview.message, undefined, lastPreview.files, true)
+                .catch(() => toast.error(t("clientErrors.taskBusy")))}>
               {t("builds.preview.rerunSample")}
             </Button>
           </div>
@@ -3164,7 +3178,10 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
               modelConfig, selectedKbs, selectedSkills, selectedToolCategories
             }}
             onUpdateConfig={(updates) => {
-              if (updates.id !== undefined) setLocalAgentId(updates.id.toString());
+              if (updates.id !== undefined) {
+                if (!localAgentId) void bindPreviewTask(updates.id)
+                setLocalAgentId(updates.id.toString())
+              }
               if (updates.name !== undefined) setName(updates.name);
               if (updates.description !== undefined) setDescription(updates.description);
               if (updates.instructions !== undefined) setInstructions(updates.instructions);
