@@ -967,6 +967,39 @@ describe("AgentBuilder preview", () => {
       expectDropped(123)
     })
 
+    it.each(["create", "send"])("serializes sends across Clear while %s is pending", async (phase) => {
+      let acknowledgeSend!: () => void
+      if (phase === "send") {
+        sendMessageMock.mockReturnValueOnce(new Promise<void>((resolve) => { acknowledgeSend = resolve }))
+      }
+      render(<AgentBuilder />)
+      await sendPreview()
+      if (phase === "send") await resolveCreate(123)
+
+      // Neither a repeated click nor Clear releases the in-flight send's lock.
+      fireEvent.click(screen.getByText("send-preview-message"))
+      fireEvent.click(screen.getByTitle("common.clear"))
+      fireEvent.click(screen.getByText("send-preview-message"))
+      const createCalls = () => apiRequestMock.mock.calls.filter(([url]) => String(url).endsWith("/api/chat/task/create"))
+      expect(createCalls()).toHaveLength(1)
+      expect(sendMessageMock).toHaveBeenCalledTimes(phase === "send" ? 1 : 0)
+
+      if (phase === "send") {
+        await settle(acknowledgeSend)
+      } else {
+        await resolveCreate(123)
+        expectDropped(123)
+      }
+
+      // A fresh send can start only after the old operation has settled.
+      await sendPreview()
+      fireEvent.click(screen.getByText("send-preview-message"))
+      expect(createCalls()).toHaveLength(2)
+      await resolveCreate(456)
+      expect(sendMessageMock.mock.calls.map(([, config]) => config.targetTaskId))
+        .toEqual(phase === "send" ? [123, 456] : [456])
+    })
+
     it("drops a task that resolves after the builder unmounts", async () => {
       const { unmount } = render(<AgentBuilder />)
       await sendPreview()

@@ -87,6 +87,23 @@ def test_latest_preview_restores_original_sample_not_followup():
     }
 
 
+def test_attachment_only_sample_returns_empty_text_without_losing_files():
+    headers = _admin_headers()
+    agent = create_agent(headers)
+    task_id = create_preview(agent["user_id"], agent["id"])
+    with _direct_db_session() as db:
+        sample = db.query(TaskChatMessage).filter_by(task_id=task_id).one()
+        # Attachment-only turns persist an empty string, not SQL NULL.
+        sample.content = ""
+        db.commit()
+    response = client.get(f"/api/agents/{agent['id']}/preview-task", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["message"] == ""
+    assert response.json()["attachments"] == [
+        {"file_id": "sample-id", "name": "sample.csv", "size": 12}
+    ]
+
+
 def test_link_presave_preview_without_changing_runtime_identity():
     headers = _admin_headers()
     agent = create_agent(headers)
