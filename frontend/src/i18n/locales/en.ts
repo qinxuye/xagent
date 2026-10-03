@@ -2987,6 +2987,7 @@ Build when you need.`,
       errors: {
         noModel: "Please select a general model first",
         requestFailed: "Preview request failed, please check network connection",
+        notSent: "The preview message was not sent. Your input and attachments are still available to retry; the previous preview has not been replaced.",
         historyFailed: "Could not load your last preview.",
         filesUnavailable: "An original sample attachment is unavailable. Upload it again before rerunning; no new preview was started.",
         linkFailed: "Agent saved, but its preview could not be linked. Run a new preview to retain a result for this agent.",

@@ -739,6 +739,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   useEffect(() => { lastPreviewRef.current = lastPreview }, [lastPreview])
   const [previewHistoryLoading, setPreviewHistoryLoading] = useState(false)
   const [previewHistoryError, setPreviewHistoryError] = useState(false)
+  const [previewSendError, setPreviewSendError] = useState<string | null>(null)
   const [previewHistoryRetry, setPreviewHistoryRetry] = useState(0)
   const [previewSending, setPreviewSending] = useState(false)
   const previewSendingRef = useRef(false)
@@ -764,6 +765,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     previewGenerationRef.current += 1
     previewTaskIdRef.current = null
     setPreviewCompletionTaskId(null)
+    setPreviewSendError(null)
     closeFilePreview()
     dispatch({ type: "CLEAR_MESSAGES" })
     dispatch({ type: "SET_TRACE_EVENTS", payload: [] })
@@ -1284,24 +1286,19 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     previewSendingRef.current = true
     setPreviewSending(true)
     setPreviewHistoryError(false)
+    setPreviewSendError(null)
     const generationAtStart = ++previewGenerationRef.current
     const configGenerationAtStart = previewConfigGenerationRef.current
+    const previousTaskId = previewTaskIdRef.current
     setPreviewCompletionTaskId(null)
     let failureMessage = t("builds.preview.errors.requestFailed")
+    let createdTask = false
+    let sendStarted = false
     try {
       // Check if general model is selected
       if (!modelConfig.general) {
-        dispatch({
-          type: "ADD_MESSAGE",
-          payload: {
-            id: `preview-error-${Date.now()}`,
-            role: "assistant",
-            content: t("builds.preview.errors.noModel"),
-            timestamp: Date.now().toString(),
-            isResult: true,
-          }
-        })
-        return
+        failureMessage = t("builds.preview.errors.noModel")
+        throw new Error("Preview requires a general model")
       }
 
       let previewTaskId = !fresh && lastPreview?.configKey === previewConfigKey
@@ -1311,7 +1308,9 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       // the normal send path uploads each copy into the new task's scope.
       const sendFiles = files ? await Promise.all(files.map(async file => {
         if (file instanceof File) {
-          return fresh ? new File([file], file.name, { type: file.type }) : file
+          // A prior failed send may already have uploaded this File. Never
+          // carry its task-scoped file_id into a newly allocated task.
+          return !previewTaskId ? new File([file], file.name, { type: file.type }) : file
         }
         const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(file.file_id)}`)
         if (!response.ok) {
@@ -1374,6 +1373,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
         if (!Number.isFinite(previewTaskId)) {
           throw new Error("Preview task creation returned an invalid task id")
         }
+        createdTask = true
         // Config edited mid-create: this message still goes to the pre-edit task, the next send starts a fresh one.
         if (previewConfigGenerationRef.current === configGenerationAtStart) {
           previewTaskIdRef.current = previewTaskId
@@ -1410,6 +1410,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
         dispatch({ type: "TRIGGER_TASK_UPDATE" })
       }
 
+      sendStarted = true
       await sendMessage(backendMessage, { force: true, targetTaskId: previewTaskId }, sendFiles)
       if (
         previewGenerationRef.current === generationAtStart
@@ -1419,17 +1420,36 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       }
     } catch (error) {
       console.error("Preview failed:", error)
-      if (previewGenerationRef.current !== generationAtStart) return
-      dispatch({
-        type: "ADD_MESSAGE",
-        payload: {
-          id: `preview-error-${Date.now()}`,
-          role: "assistant",
-          content: failureMessage,
-          timestamp: Date.now().toString(),
-          isResult: true,
+      if (previewGenerationRef.current === generationAtStart) {
+        const notSent = !sendStarted || (
+          typeof error === "object" && error !== null
+          && "disposition" in error && error.disposition === "not_sent"
+        )
+        if (notSent) {
+          if (createdTask) {
+            // Restore via the normal history socket, without deleting a task
+            // or touching earlier uploads. Only a definite pre-send failure
+            // permits this rollback; unknown/rejected sends retain their task.
+            setLastPreview(lastPreview)
+            previewTaskIdRef.current = previewConfigGenerationRef.current === configGenerationAtStart
+              ? previousTaskId : null
+            setTaskId(state.taskId, { navigate: false })
+            dispatch({ type: "SET_CURRENT_TASK", payload: state.currentTask })
+            dispatch({ type: "SET_PROCESSING", payload: state.isProcessing })
+            if (!state.taskId) dispatch({ type: "SET_HISTORY_LOADING", payload: false })
+          }
+          if (previewConfigGenerationRef.current === configGenerationAtStart) {
+            setPreviewCompletionTaskId(previewCompletionTaskId)
+          }
+          if (failureMessage === t("builds.preview.errors.requestFailed")) {
+            failureMessage = t("builds.preview.errors.notSent")
+          }
         }
-      })
+        // A send error is UI state, not an assistant result in the old task.
+        setPreviewSendError(failureMessage)
+      }
+      // ChatInput and TaskConversationPanel clear text/files only on success.
+      throw error
     } finally {
       previewSendingRef.current = false
       setPreviewSending(false)
@@ -3119,6 +3139,9 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           <Button size="sm" variant="ghost" onClick={() => setPreviewHistoryRetry(value => value + 1)}>{t("common.retry")}</Button>
         </div>
       )}
+      {previewSendError && (
+        <div className="border-b px-4 py-2 text-xs text-destructive" role="alert">{previewSendError}</div>
+      )}
       {lastPreview && (
         <div className="space-y-2 border-b px-4 py-3 text-xs">
           <p role="status" className={lastPreview.configKey !== previewConfigKey ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}>
@@ -3131,7 +3154,9 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
             <Button size="sm" variant="outline"
               disabled={previewSending || state.isProcessing || state.isHistoryLoading || previewHistoryLoading || loadingAgent || !modelConfig.general || !lastPreview.message}
               onClick={() => void handlePreviewSendMessage(lastPreview.message, undefined, lastPreview.files, true)
-                .catch(() => toast.error(t("clientErrors.taskBusy")))}>
+                .catch(error => {
+                  if (error?.errorCode === "task_busy") toast.error(t("clientErrors.taskBusy"))
+                })}>
               {t("builds.preview.rerunSample")}
             </Button>
           </div>
@@ -3145,6 +3170,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           showDagPreview={false}
           showTaskFiles={true}
           autoFocusInput={false}
+          deferFileUpload={true}
           onSend={handlePreviewSendMessage}
         />
       </div>

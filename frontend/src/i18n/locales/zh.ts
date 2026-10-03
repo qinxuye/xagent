@@ -2982,6 +2982,7 @@ const zh = {
       errors: {
         noModel: "请先选择通用模型",
         requestFailed: "预览请求失败，请检查网络连接",
+        notSent: "试跑消息未发送。输入和附件已保留，可重试；上次的试跑结果未被替换。",
         historyFailed: "无法加载你上次的试跑。",
         filesUnavailable: "原样例附件已不可用，请重新上传后再试跑；此次未启动新任务。",
         linkFailed: "Agent 已保存，但未能关联试跑记录。请重新试跑以保留此 Agent 的结果。",
