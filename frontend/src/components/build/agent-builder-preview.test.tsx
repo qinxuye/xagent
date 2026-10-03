@@ -358,14 +358,25 @@ describe("AgentBuilder preview", () => {
     })
   })
 
-  it.each([null, 99])("defers uploads until the preview send even with task %s selected", async taskId => {
-    previewState.taskId = taskId
+  it("defers uploads until the preview send", async () => {
     render(<AgentBuilder agentId="42" />)
     await screen.findByDisplayValue("Existing SSH agent")
     expect(taskConversationPanelMock.mock.lastCall![0]).toMatchObject({
       deferFileUpload: true,
       onSend: expect.any(Function),
     })
+  })
+
+  it("rejects a preview without a model and shows the specific error", async () => {
+    const base = apiRequestMock.getMockImplementation()!
+    apiRequestMock.mockImplementation((url, init) => url.endsWith("/api/models/user-default") || url.endsWith("/api/models/?category=llm")
+      ? Promise.resolve(new Response(url.endsWith("user-default") ? "{}" : "[]")) : base(url, init))
+    render(<AgentBuilder />)
+    fireEvent.click(await screen.findByText("send-preview-message"))
+    await screen.findByText("builds.preview.errors.noModel")
+    expect(previewSendErrorMock).toHaveBeenCalledWith(expect.objectContaining({ notificationHandled: true }))
+    expect(sendMessageMock).not.toHaveBeenCalled()
+    expect(apiRequestMock.mock.calls.some(([url]) => url.endsWith("/api/chat/task/create"))).toBe(false)
   })
 
   it("returns to an empty preview when the first upload was not sent", async () => {
@@ -628,6 +639,51 @@ describe("AgentBuilder preview", () => {
       })
     })
 
+    it.each([
+      ["manual", "not_sent"], ["chat", "not_sent"],
+      ["manual", "accepted"], ["chat", "accepted"],
+    ])("binds the settled preview after %s creation during a %s send", async (mode, outcome) => {
+      render(<AgentBuilder />)
+      fireEvent.change(await screen.findByPlaceholderText("builds.configForm.name.placeholder"), { target: { value: "New agent" } })
+      const editor = document.querySelector("[contenteditable]") as HTMLElement
+      editor.textContent = "Saved instructions"
+      fireEvent.input(editor)
+      await waitFor(() => {
+        if (!sendMessageMock.mock.calls.length) fireEvent.click(screen.getByText("send-preview-message"))
+        expect(sendMessageMock).toHaveBeenCalledOnce()
+      })
+      if (mode === "chat") {
+        fireEvent.click(screen.getByText("send-chat-input"))
+        act(() => MockWebSocket.instances[0].open())
+        await waitFor(() => expect(MockWebSocket.instances[0].sentMessages).toHaveLength(1))
+      }
+      let resolveSend!: () => void
+      let rejectSend!: (error: Error) => void
+      sendMessageMock.mockReturnValueOnce(new Promise<void>((resolve, reject) => { resolveSend = resolve; rejectSend = reject }))
+      const base = apiRequestMock.getMockImplementation()!
+      apiRequestMock.mockImplementation((url, init) => url.endsWith("/api/chat/task/create")
+        ? Promise.resolve(new Response(JSON.stringify({ task_id: 456 }))) : base(url, init))
+      fireEvent.click(screen.getByText("builds.preview.rerunSample"))
+      await waitFor(() => expect(sendMessageMock).toHaveBeenCalledTimes(2))
+      if (mode === "manual") {
+        fireEvent.click(screen.getByText("builds.editor.header.create"))
+        await waitFor(() => expect(apiRequestMock.mock.calls.some(([url, init]) => url.endsWith("/api/agents") && init?.method === "POST")).toBe(true))
+      } else {
+        act(() => MockWebSocket.instances[0].onmessage?.({ data: JSON.stringify({
+          type: "trace_event", event_id: "created", event_type: "tool_execution_end",
+          data: { tool_name: "create_agent", tool_params: { name: "New agent" }, result: { status: "success", agent_id: 42 } },
+        }) }))
+      }
+      const bindings = () => apiRequestMock.mock.calls.filter(([url, init]) => url.endsWith("/preview-task") && init?.method === "PUT")
+      expect(bindings()).toHaveLength(0)
+      await act(async () => {
+        if (outcome === "accepted") resolveSend()
+        else rejectSend(Object.assign(new Error("Upload failed"), { disposition: "not_sent" }))
+      })
+      await waitFor(() => expect(bindings()).toHaveLength(1))
+      expect(JSON.parse(bindings()[0][1].body)).toEqual({ task_id: outcome === "accepted" ? 456 : 123 })
+    })
+
     it.each(["manual", "chat"])("keeps an edited preview visible after %s creation", async (mode) => {
       render(<AgentBuilder />)
       fireEvent.change(await screen.findByPlaceholderText("builds.configForm.name.placeholder"), { target: { value: "New agent" } })
@@ -756,10 +812,7 @@ describe("AgentBuilder preview", () => {
     it("rejects an unsent upload and restores the previous preview without consuming the draft", async () => {
       previewState = { taskId: 99, currentTask: { id: "99", status: "completed" }, messages: [{ role: "user" }], isProcessing: false }
       const uploadError = Object.assign(new Error("Upload failed"), { disposition: "not_sent", errorCode: "upload_failed" })
-      sendMessageMock.mockImplementationOnce(async (_message, _config, files) => {
-        files[0].file_id = "uploaded-to-abandoned-task"
-        throw uploadError
-      })
+      sendMessageMock.mockRejectedValueOnce(uploadError)
       render(<AgentBuilder agentId="42" />)
       await screen.findByText("builds.preview.currentConfig")
       fireEvent.click(screen.getByText("builds.configForm.executionMode.think.title"))
@@ -769,11 +822,10 @@ describe("AgentBuilder preview", () => {
           .rejects.toBe(uploadError)
       })
       expect(setTaskIdMock).toHaveBeenLastCalledWith(99, { navigate: false })
-      expect((file as File & { file_id?: string }).file_id).toBeUndefined()
       expect(screen.getByText("builds.preview.configChanged")).toBeInTheDocument()
-      expect(screen.getByText("builds.preview.errors.notSent")).toBeInTheDocument()
+      expect(screen.getByRole("alert")).toHaveTextContent("builds.preview.errors.notSent clientErrors.uploadFailed")
       expect(apiRequestMock.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false)
-      // A retry keeps the original input/file, but gets a fresh task-scoped copy.
+      // A retry keeps the original input/file and allocates a new task.
       await act(async () => {
         await taskConversationPanelMock.mock.lastCall![0].onSend("Keep this draft", undefined, [file])
       })
@@ -783,7 +835,11 @@ describe("AgentBuilder preview", () => {
       expect(screen.queryByText("builds.preview.errors.notSent")).not.toBeInTheDocument()
     })
 
-    it.each(["outcome_unknown", "rejected", undefined])("does not roll back a %s send as an upload failure", async disposition => {
+    it.each([
+      ["outcome_unknown", "clientErrors.messageOutcomeUnknown"],
+      ["rejected", "chatPage.clarification.sendNotSent"],
+      [undefined, "builds.preview.errors.requestFailed"],
+    ])("does not roll back a %s send as an upload failure", async (disposition, hint) => {
       previewState = { taskId: 99, currentTask: { id: "99", status: "completed" }, messages: [], isProcessing: false }
       const error = Object.assign(new Error("Delivery failed"), { disposition })
       sendMessageMock.mockRejectedValueOnce(error)
@@ -791,11 +847,21 @@ describe("AgentBuilder preview", () => {
       await screen.findByText("builds.preview.currentConfig")
       fireEvent.click(screen.getByText("builds.configForm.executionMode.think.title"))
       await act(async () => {
-        await expect(taskConversationPanelMock.mock.lastCall![0].onSend("New sample"))
+        await expect(taskConversationPanelMock.mock.lastCall![0].onSend("New sample", { clientMessageId: "stable-preview-turn" }))
           .rejects.toBe(error)
       })
       expect(setTaskIdMock).toHaveBeenLastCalledWith(123, { navigate: false })
       expect(apiRequestMock.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false)
+      expect(screen.getByText(hint!)).toBeInTheDocument()
+      expect(error).toMatchObject({ notificationHandled: true })
+      await act(async () => {
+        await taskConversationPanelMock.mock.lastCall![0].onSend("New sample", { clientMessageId: "stable-preview-turn" })
+      })
+      expect(apiRequestMock.mock.calls.filter(([url]) => url.endsWith("/api/chat/task/create"))).toHaveLength(1)
+      expect(sendMessageMock.mock.calls.map(([, config]) => config)).toEqual([
+        { force: true, targetTaskId: 123, clientMessageId: "stable-preview-turn" },
+        { force: true, targetTaskId: 123, clientMessageId: "stable-preview-turn" },
+      ])
     })
 
     it.each([false, true])("restores completion only if config did not change during upload (edited: %s)", async edited => {

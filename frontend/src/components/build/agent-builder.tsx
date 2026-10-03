@@ -23,6 +23,9 @@ import { useApp } from "@/contexts/app-context-chat"
 import { useAuth } from "@/contexts/auth-context"
 import { useMcpApps } from "@/contexts/mcp-apps-context"
 import { createFileChipHTML } from "@/components/chat/FileChip"
+import { readSendDisposition, readSendErrorCode, readSendReason } from "@/components/chat/clarification-delivery"
+import { clientErrorTranslationKey } from "@/lib/client-errors"
+import type { TranslationKey } from "@/i18n/translations"
 import { MultiSelect } from "@/components/ui/multi-select"
 import { useFileMention } from "@/hooks/use-file-mention"
 import { FileMentionDropdown } from "@/components/chat/FileMentionDropdown"
@@ -736,15 +739,18 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   const [previewCompletionTaskId, setPreviewCompletionTaskId] = useState<number | null>(null)
   const [lastPreview, setLastPreview] = useState<PreviewRecord | null>(null)
   const lastPreviewRef = useRef<PreviewRecord | null>(null)
-  useEffect(() => { lastPreviewRef.current = lastPreview }, [lastPreview])
   const [previewHistoryLoading, setPreviewHistoryLoading] = useState(false)
   const [previewHistoryError, setPreviewHistoryError] = useState(false)
   const [previewSendError, setPreviewSendError] = useState<string | null>(null)
   const [previewHistoryRetry, setPreviewHistoryRetry] = useState(0)
   const [previewSending, setPreviewSending] = useState(false)
   const previewSendingRef = useRef(false)
+  const previewSendSettledRef = useRef<Promise<void> | null>(null)
 
   const bindPreviewTask = async (agentId: string | number) => {
+    // Saving may finish while a new preview is still uploading. Associate
+    // the settled record, not a staging task that could be rolled back.
+    await previewSendSettledRef.current
     // Builder-chat callbacks can outlive the render that started the chat.
     const record = lastPreviewRef.current
     if (!record) return
@@ -837,6 +843,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           message: data.message,
           files: data.attachments,
         }
+        lastPreviewRef.current = record
         setLastPreview(record)
         openPreviewRecord(record)
       } catch (error) {
@@ -1278,12 +1285,14 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     return labels[category] || category
   }
 
-  const handlePreviewSendMessage = async (content: string, _config?: any, files?: Array<File | PreviewAttachment>, fresh = false) => {
+  const handlePreviewSendMessage = async (content: string, config?: any, files?: Array<File | PreviewAttachment>, fresh = false) => {
     if (previewSendingRef.current) {
       // Reject, rather than acknowledge, so ChatInput retains its draft/files.
       throw Object.assign(new Error("Preview send is already pending"), { errorCode: "task_busy" })
     }
     previewSendingRef.current = true
+    let settleSend!: () => void
+    previewSendSettledRef.current = new Promise<void>(resolve => { settleSend = resolve })
     setPreviewSending(true)
     setPreviewHistoryError(false)
     setPreviewSendError(null)
@@ -1291,13 +1300,13 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     const configGenerationAtStart = previewConfigGenerationRef.current
     const previousTaskId = previewTaskIdRef.current
     setPreviewCompletionTaskId(null)
-    let failureMessage = t("builds.preview.errors.requestFailed")
+    let failureKey: TranslationKey = "builds.preview.errors.requestFailed"
     let createdTask = false
     let sendStarted = false
     try {
       // Check if general model is selected
       if (!modelConfig.general) {
-        failureMessage = t("builds.preview.errors.noModel")
+        failureKey = "builds.preview.errors.noModel"
         throw new Error("Preview requires a general model")
       }
 
@@ -1308,13 +1317,11 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       // the normal send path uploads each copy into the new task's scope.
       const sendFiles = files ? await Promise.all(files.map(async file => {
         if (file instanceof File) {
-          // A prior failed send may already have uploaded this File. Never
-          // carry its task-scoped file_id into a newly allocated task.
-          return !previewTaskId ? new File([file], file.name, { type: file.type }) : file
+          return fresh ? new File([file], file.name, { type: file.type }) : file
         }
         const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(file.file_id)}`)
         if (!response.ok) {
-          failureMessage = t("builds.preview.errors.filesUnavailable")
+          failureKey = "builds.preview.errors.filesUnavailable"
           throw new Error("Original preview attachment is unavailable")
         }
         return new File([await response.arrayBuffer()], file.name, { type: file.type || "" })
@@ -1378,7 +1385,9 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
         if (previewConfigGenerationRef.current === configGenerationAtStart) {
           previewTaskIdRef.current = previewTaskId
         }
-        setLastPreview({ taskId: previewTaskId, configKey: previewConfigKey, message: backendMessage, files: sendFiles || [] })
+        const record = { taskId: previewTaskId, configKey: previewConfigKey, message: backendMessage, files: sendFiles || [] }
+        lastPreviewRef.current = record
+        setLastPreview(record)
 
         // Close any file preview opened from the previous preview task before switching context.
         closeFilePreview()
@@ -1411,7 +1420,11 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       }
 
       sendStarted = true
-      await sendMessage(backendMessage, { force: true, targetTaskId: previewTaskId }, sendFiles)
+      await sendMessage(backendMessage, {
+        force: true,
+        targetTaskId: previewTaskId,
+        ...(typeof config?.clientMessageId === "string" ? { clientMessageId: config.clientMessageId } : {}),
+      }, sendFiles)
       if (
         previewGenerationRef.current === generationAtStart
         && previewConfigGenerationRef.current === configGenerationAtStart
@@ -1421,15 +1434,14 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     } catch (error) {
       console.error("Preview failed:", error)
       if (previewGenerationRef.current === generationAtStart) {
-        const notSent = !sendStarted || (
-          typeof error === "object" && error !== null
-          && "disposition" in error && error.disposition === "not_sent"
-        )
+        const disposition = readSendDisposition(error)
+        const notSent = !sendStarted || disposition === "not_sent"
         if (notSent) {
           if (createdTask) {
             // Restore via the normal history socket, without deleting a task
             // or touching earlier uploads. Only a definite pre-send failure
             // permits this rollback; unknown/rejected sends retain their task.
+            lastPreviewRef.current = lastPreview
             setLastPreview(lastPreview)
             previewTaskIdRef.current = previewConfigGenerationRef.current === configGenerationAtStart
               ? previousTaskId : null
@@ -1441,17 +1453,28 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           if (previewConfigGenerationRef.current === configGenerationAtStart) {
             setPreviewCompletionTaskId(previewCompletionTaskId)
           }
-          if (failureMessage === t("builds.preview.errors.requestFailed")) {
-            failureMessage = t("builds.preview.errors.notSent")
+          if (failureKey === "builds.preview.errors.requestFailed") {
+            failureKey = "builds.preview.errors.notSent"
           }
+        } else if (disposition === "outcome_unknown") {
+          failureKey = "clientErrors.messageOutcomeUnknown"
+        } else if (disposition === "rejected") {
+          failureKey = "chatPage.clarification.sendNotSent"
         }
         // A send error is UI state, not an assistant result in the old task.
-        setPreviewSendError(failureMessage)
+        const code = readSendErrorCode(error)
+        const reason = disposition === "outcome_unknown" ? ""
+          : code ? t(clientErrorTranslationKey(code)) : readSendReason(error)
+        setPreviewSendError([t(failureKey), reason].filter(Boolean).join(" "))
+        // The composer must preserve its draft/attempt ID without a second toast.
+        throw Object.assign(typeof error === "object" && error !== null ? error : new Error(String(error)), { notificationHandled: true })
       }
       // ChatInput and TaskConversationPanel clear text/files only on success.
       throw error
     } finally {
       previewSendingRef.current = false
+      previewSendSettledRef.current = null
+      settleSend()
       setPreviewSending(false)
     }
   }
