@@ -176,6 +176,7 @@ let storedToolCategories: string[] = ["ssh"]
 let putBody: { tool_categories?: string[] } | undefined
 let availableTools: unknown[] = []
 let selectedTemplateId: string | null = null
+let savedPreview: Record<string, unknown> | null = null
 let previewState: {
   messages: Array<{ role: string }>
   currentTask: Pick<Task, "id" | "status" | "completionOutcome"> | null
@@ -191,6 +192,7 @@ describe("AgentBuilder preview", () => {
     putBody = undefined
     availableTools = []
     selectedTemplateId = null
+    savedPreview = null
     previewState = { messages: [], currentTask: null, taskId: null, isProcessing: false }
     apiRequestMock.mockReset()
     setTaskIdMock.mockReset()
@@ -225,6 +227,9 @@ describe("AgentBuilder preview", () => {
       }
       if (url.endsWith("/api/agents/42/triggers")) {
         return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
+      }
+      if (url.endsWith("/preview-task")) {
+        return Promise.resolve(new Response(JSON.stringify(savedPreview)))
       }
       if (url.endsWith("/api/agents/42") && init?.method === "PUT") {
         putBody = JSON.parse(init.body as string)
@@ -396,6 +401,9 @@ describe("AgentBuilder preview", () => {
       fireEvent.click(screen.getByText(`builds.editor.header.${mode === "edit" ? "update" : "create"}`))
       await waitFor(() => expect(screen.getByText("builds.editor.header.update")).toBeDisabled())
       if (mode === "create") {
+        expect(apiRequestMock).toHaveBeenCalledWith("http://api.local/api/agents/43/preview-task", expect.objectContaining({
+          method: "PUT", body: JSON.stringify({ task_id: 123 }),
+        }))
         await waitFor(() => expect(apiRequestMock).toHaveBeenCalledWith("http://api.local/api/agents/43"))
         expect(screen.getByText("builds.editor.success.createdDesc")).toBeInTheDocument()
         expect(screen.queryByText("builds.editor.header.startChat")).not.toBeInTheDocument()
@@ -573,6 +581,120 @@ describe("AgentBuilder preview", () => {
       expectSectionHighlighted("mcp", category === "mcp:missing-connector")
       expectSectionHighlighted("skills", false)
       expectSectionHighlighted("tools", false)
+    })
+  })
+
+  describe("persisted preview", () => {
+    const configKey = () => JSON.stringify({
+      instructions: "Saved instructions", executionMode: "balanced",
+      models: ["7", null, null, null], knowledgeBases: [], skills: [], toolCategories: ["ssh"],
+    })
+
+    beforeEach(() => {
+      savedPreview = { task_id: 99, config_key: configKey(), message: "Original sample", attachments: [] }
+    })
+
+    it("restores on remount via the normal task socket without sending or publishing", async () => {
+      const first = render(<AgentBuilder agentId="42" />)
+      await waitFor(() => expect(setTaskIdMock).toHaveBeenCalledWith(99, { navigate: false }))
+      first.unmount()
+      setTaskIdMock.mockClear()
+      const { rerender } = render(<AgentBuilder agentId="42" />)
+      await waitFor(() => expect(setTaskIdMock).toHaveBeenCalledWith(99, { navigate: false }))
+      previewState = { taskId: 99, currentTask: { id: "99", status: "completed" }, messages: [], isProcessing: false }
+      rerender(<AgentBuilder agentId="42" />)
+      expect(screen.getByRole("button", { name: /builds.editor.stepGuide.preview/ }).querySelector("svg")).not.toBeNull()
+      expect(screen.getByText("builds.preview.currentConfig")).toBeInTheDocument()
+      expect(sendMessageMock).not.toHaveBeenCalled()
+      expect(apiRequestMock.mock.calls.every(([, init]) => !init?.method)).toBe(true)
+    })
+
+    it.each(["old-config", null])("does not certify a restored result with snapshot %s", async (key) => {
+      savedPreview!.config_key = key
+      const { rerender } = render(<AgentBuilder agentId="42" />)
+      await waitFor(() => expect(setTaskIdMock).toHaveBeenCalledWith(99, { navigate: false }))
+      previewState = { taskId: 99, currentTask: { id: "99", status: "completed" }, messages: [], isProcessing: false }
+      rerender(<AgentBuilder agentId="42" />)
+      expect(screen.getByRole("button", { name: /builds.editor.stepGuide.preview/ }).querySelector("svg")).toBeNull()
+      expect(screen.getByText(key === null ? "builds.preview.configUnknown" : "builds.preview.configChanged")).toBeInTheDocument()
+    })
+
+    it("marks execution edits stale but ignores renaming, and reruns the original sample in a fresh task", async () => {
+      const attachment = { file_id: "file-99", name: "sample.csv", size: 12, type: "text/csv" }
+      savedPreview!.attachments = [attachment]
+      const base = apiRequestMock.getMockImplementation()!
+      apiRequestMock.mockImplementation((url, init) => url.endsWith("/api/files/download/file-99")
+        ? Promise.resolve(new Response("amount\n80\n")) : base(url, init))
+      render(<AgentBuilder agentId="42" />)
+      await screen.findByText("builds.preview.currentConfig")
+      fireEvent.change(screen.getByDisplayValue("Existing SSH agent"), { target: { value: "Renamed" } })
+      expect(screen.getByText("builds.preview.currentConfig")).toBeInTheDocument()
+      fireEvent.click(screen.getByText("builds.configForm.executionMode.think.title"))
+      expect(screen.getByText("builds.preview.configChanged")).toBeInTheDocument()
+      expect(sendMessageMock).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByText("builds.preview.rerunSample"))
+      await waitFor(() => expect(sendMessageMock).toHaveBeenCalledWith("Original sample", { force: true, targetTaskId: 123 }, [expect.any(File)]))
+      const copied = sendMessageMock.mock.calls[0][2][0]
+      expect(copied.name).toBe("sample.csv")
+      expect(copied.type).toBe("text/csv")
+      expect(copied.size).toBe(10)
+      expect(copied.file_id).toBeUndefined()
+      const body = JSON.parse(apiRequestMock.mock.calls.find(([url]) => url.endsWith("/api/chat/task/create"))![1].body)
+      expect(body.execution_mode).toBe("think")
+      expect(JSON.parse(body.agent_config.preview_config_key).executionMode).toBe("think")
+      expect(screen.getByText("builds.preview.currentConfig")).toBeInTheDocument()
+    })
+
+    it("reruns in a fresh task even when the configuration is unchanged", async () => {
+      render(<AgentBuilder agentId="42" />)
+      await screen.findByText("builds.preview.currentConfig")
+      fireEvent.click(screen.getByText("builds.preview.rerunSample"))
+      await waitFor(() => expect(sendMessageMock).toHaveBeenCalledWith("Original sample", { force: true, targetTaskId: 123 }, []))
+    })
+
+    it("does not start a task if an original attachment is deleted or inaccessible", async () => {
+      savedPreview!.attachments = [{ file_id: "gone", name: "sample.csv", size: 12 }]
+      const base = apiRequestMock.getMockImplementation()!
+      apiRequestMock.mockImplementation((url, init) => url.endsWith("/api/files/download/gone")
+        ? Promise.resolve(new Response("not found", { status: 404 })) : base(url, init))
+      render(<AgentBuilder agentId="42" />)
+      await screen.findByText("builds.preview.currentConfig")
+      fireEvent.click(screen.getByText("builds.preview.rerunSample"))
+      await waitFor(() => expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({
+        type: "ADD_MESSAGE", payload: expect.objectContaining({ content: "builds.preview.errors.filesUnavailable" }),
+      })))
+      expect(sendMessageMock).not.toHaveBeenCalled()
+      expect(apiRequestMock.mock.calls.some(([url]) => url.endsWith("/api/chat/task/create"))).toBe(false)
+    })
+
+    it.each(["clear", "send", "unmount"])("ignores late history after %s", async (action) => {
+      let finish!: (response: Response) => void
+      const base = apiRequestMock.getMockImplementation()!
+      apiRequestMock.mockImplementation((url, init) => url.endsWith("/preview-task")
+        ? new Promise<Response>(resolve => { finish = resolve }) : base(url, init))
+      const view = render(<AgentBuilder agentId="42" />)
+      await waitFor(() => expect(finish).toBeDefined())
+      if (action === "clear") fireEvent.click(screen.getByTitle("common.clear"))
+      if (action === "send") {
+        fireEvent.click(screen.getByText("send-preview-message"))
+        await waitFor(() => expect(sendMessageMock).toHaveBeenCalled())
+      }
+      if (action === "unmount") view.unmount()
+      await act(async () => { finish(new Response(JSON.stringify(savedPreview))) })
+      expect(setTaskIdMock).not.toHaveBeenCalledWith(99, { navigate: false })
+    })
+
+    it("reports history fetch failure and permits retry without starting a task", async () => {
+      const base = apiRequestMock.getMockImplementation()!
+      let fail = true
+      apiRequestMock.mockImplementation((url, init) => url.endsWith("/preview-task") && fail
+        ? Promise.resolve(new Response("unavailable", { status: 503 })) : base(url, init))
+      render(<AgentBuilder agentId="42" />)
+      await screen.findByText("builds.preview.errors.historyFailed")
+      fail = false
+      fireEvent.click(screen.getByText("common.retry"))
+      await waitFor(() => expect(setTaskIdMock).toHaveBeenCalledWith(99, { navigate: false }))
+      expect(sendMessageMock).not.toHaveBeenCalled()
     })
   })
 
