@@ -2187,6 +2187,31 @@ describe("AppProvider websocket message routing", () => {
     expect(sendChatMessageMock).not.toHaveBeenCalled()
   })
 
+  it("rejects a queued send if the task changes while the old socket is still connected", async () => {
+    let selectTask!: (taskId: number) => void
+    let queue!: () => Promise<void>
+    function ConnectedSwitchProbe() {
+      const { setTaskId, setPendingMessage } = useApp()
+      selectTask = taskId => setTaskId(taskId, { navigate: false })
+      queue = () => new Promise<void>((resolve, reject) => setPendingMessage({
+        message: "old task message", targetTaskId: 9, resolve, reject,
+      }))
+      return null
+    }
+    render(<AppProvider token="token"><ConnectedSwitchProbe /></AppProvider>)
+    act(() => selectTask(9))
+    act(() => webSocketOptions.current?.onConnect?.())
+    let deliveryError: unknown
+    await act(async () => {
+      // Queue and switch in the same tick: socket 9 is still connected when
+      // effects run, but the current conversation already belongs to task 10.
+      void queue().catch(error => { deliveryError = error })
+      selectTask(10)
+    })
+    expect(deliveryError).toMatchObject({ disposition: "not_sent" })
+    expect(sendChatMessageMock).not.toHaveBeenCalled()
+  })
+
   it.each(["waiting", "slow-upload", "legacy-caller"])("limits only the connection wait, not the active send (%s)", async scenario => {
     const connected = scenario !== "waiting"
     vi.useFakeTimers()

@@ -786,6 +786,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     previewConfigGenerationRef.current += 1
     previewTaskIdRef.current = null
     setPreviewCompletionTaskId(null)
+    setPreviewSendError(null)
   }, [])
 
   useEffect(() => {
@@ -813,6 +814,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
   const openPreviewRecord = useCallback((record: PreviewRecord) => {
     closeFilePreview()
+    setPreviewSendError(null)
     previewTaskIdRef.current = record.taskId
     setPreviewCompletionTaskId(record.taskId)
     // The normal task socket restores messages, execution status and files.
@@ -1301,7 +1303,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     const previousTaskId = previewTaskIdRef.current
     setPreviewCompletionTaskId(null)
     let failureKey: TranslationKey = "builds.preview.errors.requestFailed"
-    let createdTask = false
+    let createdRecord: PreviewRecord | null = null
     let sendStarted = false
     try {
       // Check if general model is selected
@@ -1380,12 +1382,12 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
         if (!Number.isFinite(previewTaskId)) {
           throw new Error("Preview task creation returned an invalid task id")
         }
-        createdTask = true
         // Config edited mid-create: this message still goes to the pre-edit task, the next send starts a fresh one.
         if (previewConfigGenerationRef.current === configGenerationAtStart) {
           previewTaskIdRef.current = previewTaskId
         }
         const record = { taskId: previewTaskId, configKey: previewConfigKey, message: backendMessage, files: sendFiles || [] }
+        createdRecord = record
         lastPreviewRef.current = record
         setLastPreview(record)
 
@@ -1433,16 +1435,23 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       }
     } catch (error) {
       console.error("Preview failed:", error)
+      const disposition = readSendDisposition(error)
+      const notSent = !sendStarted || disposition === "not_sent"
+      const rollbackCreatedTask = createdRecord !== null
+        && lastPreviewRef.current === createdRecord
+        && (notSent || disposition === "rejected")
+      if (rollbackCreatedTask) {
+        // Only discard this send's new staging record. A rejection on an
+        // existing task can follow an accepted/unknown turn and must keep it.
+        // Clear invalidates the visible session, not this history rollback.
+        lastPreviewRef.current = lastPreview
+        setLastPreview(lastPreview)
+      }
       if (previewGenerationRef.current === generationAtStart) {
-        const disposition = readSendDisposition(error)
-        const notSent = !sendStarted || disposition === "not_sent"
-        if (notSent) {
-          if (createdTask) {
-            // Restore via the normal history socket, without deleting a task
-            // or touching earlier uploads. Only a definite pre-send failure
-            // permits this rollback; unknown/rejected sends retain their task.
-            lastPreviewRef.current = lastPreview
-            setLastPreview(lastPreview)
+        if (notSent || rollbackCreatedTask) {
+          if (rollbackCreatedTask) {
+            // Restore via the normal history socket, without deleting tasks
+            // or touching earlier uploads. Never reopen a cleared session.
             previewTaskIdRef.current = previewConfigGenerationRef.current === configGenerationAtStart
               ? previousTaskId : null
             setTaskId(state.taskId, { navigate: false })
@@ -1453,13 +1462,14 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           if (previewConfigGenerationRef.current === configGenerationAtStart) {
             setPreviewCompletionTaskId(previewCompletionTaskId)
           }
-          if (failureKey === "builds.preview.errors.requestFailed") {
+          if (notSent && failureKey === "builds.preview.errors.requestFailed") {
             failureKey = "builds.preview.errors.notSent"
           }
-        } else if (disposition === "outcome_unknown") {
+        }
+        if (disposition === "outcome_unknown") {
           failureKey = "clientErrors.messageOutcomeUnknown"
         } else if (disposition === "rejected") {
-          failureKey = "chatPage.clarification.sendNotSent"
+          failureKey = "builds.preview.errors.rejected"
         }
         // A send error is UI state, not an assistant result in the old task.
         const code = readSendErrorCode(error)
@@ -1809,7 +1819,8 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
         } else {
           const newAgent = await response.json()
           setCreatedAgent(newAgent)
-          await bindPreviewTask(newAgent.id)
+          // Preview uploads must not block saving triggers or ownership.
+          void bindPreviewTask(newAgent.id)
 
           // Staged triggers (configured before the agent existed, #928) go
           // through the regular trigger API now that a real agent id exists.
