@@ -74,7 +74,11 @@ from ..services.assistant_history_safety import (
     assistant_history_has_safe_ancillary_payload,
     client_safe_assistant_history_content,
 )
-from ..services.assistant_question_replay import load_transcript_replay
+from ..services.assistant_question_display import question_content_for_display
+from ..services.assistant_question_replay import (
+    QUESTION_MESSAGE_TYPES,
+    load_transcript_replay,
+)
 from ..services.chat_history_service import (
     DELIVERY_COMPLETED,
     DELIVERY_DISPATCHED,
@@ -2292,6 +2296,7 @@ def _load_historical_stream_snapshot_sync(
             if (
                 isinstance(cached, dict)
                 and cached.get("trace_scope") == trace_scope
+                and cached.get("question_display_version") == 1
                 and cached.get("updated_at") == task_updated_at
                 and cached.get("max_trace_event_id") == int(max_trace_event_id)
                 and cached.get("max_chat_message_id") == int(max_chat_message_id)
@@ -2538,6 +2543,8 @@ def _load_historical_stream_snapshot_sync(
                         if assistant_ancillary_is_safe
                         else None
                     )
+                    if chat_message.message_type in QUESTION_MESSAGE_TYPES:
+                        content = question_content_for_display(content, interactions)
                     data = {
                         "message": content,
                         "content": content,
@@ -2709,6 +2716,7 @@ def _load_historical_stream_snapshot_sync(
                     cache_key,
                     {
                         "trace_scope": trace_scope,
+                        "question_display_version": 1,
                         "updated_at": task_updated_at,
                         "max_trace_event_id": int(max_trace_event_id),
                         "max_chat_message_id": int(max_chat_message_id),
