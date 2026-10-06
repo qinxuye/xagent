@@ -38,11 +38,14 @@ def question_content_for_display(content: str, interactions: Any) -> str:
             ):
                 return content
     try:
-        appendix = build_assistant_transcript_content("", interactions)
+        appendix = build_assistant_transcript_content("", interactions).rstrip()
     except (TypeError, ValueError, AttributeError):
         return content
-    if appendix and content.endswith(appendix):
-        introduction = content[: -len(appendix)]
+    # Persistence strips the complete transcript, including whitespace on the
+    # last control line. Match that normalization without changing fallbacks.
+    matching_content = content.rstrip()
+    if appendix and matching_content.endswith(appendix):
+        introduction = matching_content[: -len(appendix)]
         # Empty introductions still need text on clients that use non-empty
         # content to admit a historical message. Preserve that fallback too.
         if introduction.strip():

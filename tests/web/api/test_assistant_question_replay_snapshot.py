@@ -29,6 +29,10 @@ from xagent.web.models.user import User
 from xagent.web.services.chat_history_service import (
     get_latest_waiting_question,
     load_task_transcript,
+    persist_assistant_message,
+)
+from xagent.web.services.file_reference_output_service import (
+    reconcile_assistant_file_references,
 )
 from xagent.web.services.task_execution import _persist_agent_outbound_event
 from xagent.web.services.task_interaction_read import get_pending_interaction_question
@@ -145,8 +149,10 @@ def _question_events(sent: list[dict]) -> list[dict]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("message_type", ["question", "question_superseded"])
 async def test_one_question_replays_once_and_keeps_the_trace_event_identity(
     monkeypatch,
+    message_type,
 ) -> None:
     SessionLocal, db, task = _make_task("replay-one")
     task_id, user_id = int(task.id), int(task.user_id)
@@ -185,6 +191,8 @@ async def test_one_question_replays_once_and_keeps_the_trace_event_identity(
         # content comparison could ever have paired them.
         assert row.content != QUESTION
         assert row.source_event_id == "ea62bd91"
+        row.message_type = message_type
+        probe.commit()
     finally:
         probe.close()
 
@@ -206,7 +214,10 @@ async def test_one_question_replays_once_and_keeps_the_trace_event_identity(
     # waiting-question reader keep the complete canonical transcript.
     with SessionLocal() as probe:
         full_text = build_assistant_transcript_content(QUESTION, INTERACTIONS)
-        assert get_latest_waiting_question(probe, task_id) == (full_text, INTERACTIONS)
+        assert get_latest_waiting_question(probe, task_id, allow_superseded=True) == (
+            full_text,
+            INTERACTIONS,
+        )
         assert load_task_transcript(probe, task_id) == [
             {"role": "assistant", "content": full_text}
         ]
@@ -224,6 +235,97 @@ async def test_one_question_replays_once_and_keeps_the_trace_event_identity(
     assert len(reconnected) == 1
     assert reconnected[0]["event_id"] == event["event_id"]
     assert reconnected[0]["data"]["message"] == QUESTION
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message_type", ["question", "question_superseded"])
+@pytest.mark.parametrize(
+    "interaction",
+    [
+        {"type": "confirm", "label": "Review [sample](file:missing)"},
+        {
+            "type": "text_input",
+            "label": "Owner",
+            "placeholder": "Review [sample](file:missing)",
+        },
+        {
+            "type": "select_one",
+            "label": "Sample",
+            "options": [{"value": "sample", "label": "[sample](file:missing)"}],
+        },
+    ],
+)
+async def test_question_appendix_is_projected_before_file_link_reconciliation(
+    monkeypatch, message_type, interaction
+) -> None:
+    SessionLocal, db, task = _make_task("replay-question-link")
+    task_id, user_id = int(task.id), int(task.user_id)
+    interactions = [interaction]
+    task.status = TaskStatus.WAITING_FOR_USER
+    row = persist_assistant_message(
+        db,
+        task_id,
+        user_id,
+        QUESTION,
+        message_type=message_type,
+        interactions=interactions,
+    )
+    canonical_content = row.content
+    assert "file:missing" in canonical_content
+    assert (
+        reconcile_assistant_file_references(
+            db, task_id=task_id, user_id=user_id, content=canonical_content, records=[]
+        )
+        != canonical_content
+    )
+    db.close()
+
+    sent = await _replay(monkeypatch, SessionLocal, task_id, user_id)
+    questions = _question_events(sent)
+    assert len(questions) == 1
+    assert questions[0]["data"]["message"] == QUESTION
+    assert questions[0]["data"]["metadata"]["interactions"] == interactions
+    waiting = [event for event in sent if event["type"] == "task_waiting_for_user"]
+    assert len(waiting) == 1
+    assert waiting[0]["question"] == QUESTION
+    assert waiting[0]["interactions"] == interactions
+    with SessionLocal() as probe:
+        task = probe.get(Task, task_id)
+        rows = probe.query(TaskChatMessage).filter_by(task_id=task_id).all()
+        messages = _serialize_transcript_with_events(probe, task, rows, [])
+        assert messages[0]["content"] == QUESTION
+        assert messages[0]["interactions"] == interactions
+        assert rows[0].content == canonical_content
+
+
+@pytest.mark.asyncio
+async def test_non_question_appendix_like_text_is_not_projected(monkeypatch) -> None:
+    SessionLocal, db, task = _make_task("replay-answer-appendix")
+    task_id, user_id = int(task.id), int(task.user_id)
+    row = persist_assistant_message(
+        db,
+        task_id,
+        user_id,
+        QUESTION,
+        message_type="assistant",
+        interactions=INTERACTIONS,
+    )
+    canonical_content = row.content
+    assert canonical_content != QUESTION
+    db.close()
+
+    sent = await _replay(monkeypatch, SessionLocal, task_id, user_id)
+    answers = _question_events(sent)
+    assert len(answers) == 1
+    assert answers[0]["data"]["message"] == canonical_content
+    assert answers[0]["data"]["metadata"]["interactions"] == INTERACTIONS
+    with SessionLocal() as probe:
+        task = probe.get(Task, task_id)
+        rows = probe.query(TaskChatMessage).filter_by(task_id=task_id).all()
+        messages = _serialize_transcript_with_events(probe, task, rows, [])
+        assert messages[0]["content"] == canonical_content
+        assert messages[0]["interactions"] == INTERACTIONS
+        assert rows[0].content == canonical_content
 
 
 @pytest.mark.asyncio

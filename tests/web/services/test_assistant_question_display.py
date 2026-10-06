@@ -36,6 +36,37 @@ def test_only_generated_appendix_is_removed(interaction):
     assert "Please answer the following questions:" in transcript
 
 
+@pytest.mark.parametrize(
+    "interaction",
+    [
+        {"type": "text_input", "label": "Owner", "placeholder": "Team name \t"},
+        {"type": "number_input", "label": "Threshold \t"},
+        {
+            "type": "select_one",
+            "label": "Frequency",
+            "options": [{"value": "weekly", "label": "Every week \t"}],
+        },
+        {
+            "type": "select_multiple",
+            "label": "Frequency",
+            "options": [{"value": "weekly", "label": "Every week \t"}],
+        },
+    ],
+)
+@pytest.mark.parametrize("strip_persisted_content", [False, True])
+def test_generated_appendix_matches_persistence_whitespace_normalization(
+    interaction, strip_persisted_content
+):
+    interactions = [interaction]
+    introduction = "Please configure the report."
+    content = build_assistant_transcript_content(introduction, interactions)
+    assert content != content.rstrip()
+    if strip_persisted_content:
+        content = content.strip()
+
+    assert question_content_for_display(content, interactions) == introduction
+
+
 def test_keeps_authored_text_even_when_it_contains_the_same_question_list():
     interactions = [{"type": "text_input", "label": "Owner"}]
     authored = build_assistant_transcript_content(
@@ -70,9 +101,12 @@ def test_keeps_authored_text_even_when_it_contains_the_same_question_list():
     ],
 )
 def test_preserves_fallback_for_absent_unknown_or_malformed_controls(interactions):
-    content = (
-        "Question\n\n\nPlease answer the following questions:\n- Owner: text input"
-    )
+    try:
+        content = build_assistant_transcript_content("Question", interactions)
+    except (TypeError, ValueError, AttributeError):
+        content = (
+            "Question\n\n\nPlease answer the following questions:\n- Owner: text input"
+        )
     assert question_content_for_display(content, interactions) == content
 
 
