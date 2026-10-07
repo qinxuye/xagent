@@ -45,6 +45,7 @@ from ..tools.user_interaction import (
     WAITING_FOR_USER_STATUS,
     tool_result_waits_for_user,
 )
+from .budget import active_execution_budget, budget_llm_kwargs
 from .checkpoint import (
     CheckpointPersistenceError,
     ExecutionEventPersistenceError,
@@ -338,6 +339,8 @@ class PatternRuntime:
     context_ref_resolver: ContextReferenceResolver | None = None
     _interrupt_requested: bool = False
     interrupt_reason: str | None = None
+    budget_stopped: bool = False
+    budget_owner: bool = False
     last_checkpoint: dict[str, Any] | None = None
     checkpoints: list[dict[str, Any]] = field(default_factory=list)
     outbound_messages: list[dict[str, Any]] = field(default_factory=list)
@@ -391,10 +394,7 @@ class PatternRuntime:
     async def should_interrupt(self) -> bool:
         if self._interrupt_requested:
             return True
-        if self.interrupt_checker is None:
-            return False
-
-        result = self.interrupt_checker()
+        result = self.interrupt_checker() if self.interrupt_checker else False
         if inspect.isawaitable(result):
             result = await result
         if result:
@@ -407,18 +407,41 @@ class PatternRuntime:
                 self.interrupt_reason = result
             self._interrupt_requested = True
             self.request_interrupt(self.interrupt_reason)
-        return bool(result)
+            return True
+        return False
+
+    async def _before_work_call(self) -> bool:
+        # Budget admission is separate from interruption polling: a response
+        # already paid for may still be delivered, including a final answer
+        # that crosses the limit. Only additional work is refused.
+        if await self.should_interrupt():
+            return True
+        budget = active_execution_budget.get()
+        if budget is not None and budget.exhausted:
+            self.budget_stopped = True
+            self.request_interrupt("Execution stopped at the token budget limit.")
+            return True
+        if budget is not None and budget.soft_reached and not budget.soft_notified:
+            budget.soft_notified = True
+            await self.send_message(
+                message=budget.notice(),
+                metadata={
+                    "execution_budget": budget.model_dump(),
+                    "kind": "budget_warning",
+                },
+            )
+        return False
 
     async def run_llm_call(self, llm: Any, **kwargs: Any) -> Any:
         """Run an LLM call as a cancellable subtask owned by this runtime."""
 
         kwargs = await materialize_llm_kwargs(
             llm=llm,
-            kwargs=kwargs,
+            kwargs=budget_llm_kwargs(kwargs),
             resolver=self.context_ref_resolver,
         )
         # Setup may yield before a provider task exists for cancellation.
-        await self.should_interrupt()
+        await self._before_work_call()
         if self._interrupt_requested:
             raise LLMCallInterrupted(
                 self.interrupt_reason or "interrupted before LLM call"
@@ -449,7 +472,7 @@ class PatternRuntime:
     async def run_tool_call(self, invoke: Callable[[], Any]) -> Any:
         """Run a tool call as a cancellable subtask owned by this runtime."""
 
-        if self._interrupt_requested:
+        if await self._before_work_call():
             raise ToolCallInterrupted(
                 self.interrupt_reason or "interrupted before tool call"
             )
@@ -524,9 +547,13 @@ class PatternRuntime:
             return await self.run_llm_call(llm, **kwargs)
         kwargs = await materialize_llm_kwargs(
             llm=llm,
-            kwargs=kwargs,
+            kwargs=budget_llm_kwargs(kwargs),
             resolver=self.context_ref_resolver,
         )
+        if await self._before_work_call():
+            raise LLMCallInterrupted(
+                self.interrupt_reason or "interrupted before LLM stream"
+            )
 
         async def consume_stream() -> Any:
             content_parts: list[str] = []
@@ -2058,6 +2085,9 @@ class PatternRuntime:
         if callable(get_state):
             pattern_state = get_state()
 
+        budget = active_execution_budget.get()
+        if budget is not None and isinstance(context, ExecutionContext):
+            context.execution_budget = budget.checkpoint_state()
         context_payload = (
             context.to_dict() if callable(getattr(context, "to_dict", None)) else None
         )
