@@ -2,9 +2,10 @@
 
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
+from time import time
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from ...config import get_execution_budget_defaults
 
@@ -38,6 +39,8 @@ class ExecutionBudget(BaseModel):
     used_tokens: int = Field(default=0, ge=0)
     soft_notified: bool = False
     closed: bool = False
+    started_at: float = Field(default_factory=time)
+    _warning_in_flight: bool = PrivateAttr(default=False)
 
     def record_usage(self, input_tokens: int, output_tokens: int) -> None:
         self.used_tokens += max(0, input_tokens) + max(0, output_tokens)
@@ -72,16 +75,30 @@ class ExecutionBudget(BaseModel):
 
     def notice(self) -> str:
         return (
-            f"Execution token budget: {self.used_tokens} of "
-            f"{self.policy.max_tokens} tokens used. "
+            "Execution token budget: the soft threshold has been reached. "
             "Prioritize handing over supported results and existing file links. "
             "Avoid starting optional work. State remaining gaps honestly."
         )
+
+    async def notify(
+        self, handler: Callable[["ExecutionBudget"], Awaitable[bool]]
+    ) -> None:
+        """Only consume the shared warning after delivery; serialize siblings."""
+        if self.soft_notified or self._warning_in_flight:
+            return
+        self._warning_in_flight = True
+        try:
+            self.soft_notified = await handler(self)
+        finally:
+            self._warning_in_flight = False
 
 
 active_execution_budget: ContextVar[ExecutionBudget | None] = ContextVar(
     "active_execution_budget", default=None
 )
+budget_warning_handler: ContextVar[
+    Callable[[ExecutionBudget], Awaitable[bool]] | None
+] = ContextVar("budget_warning_handler", default=None)
 
 
 def default_execution_budget_policy() -> ExecutionBudgetPolicy:

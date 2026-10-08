@@ -176,3 +176,29 @@ async def test_provider_cannot_relax_system_maximum(budget_db, monkeypatch):
     )
     result = await resolve_execution_budget_policy(BudgetPolicyRequest(user_id=1))
     assert result.max_tokens == 80
+
+
+def test_admin_default_cannot_exceed_maximum(budget_client):
+    client, user = budget_client
+    user.is_admin = True
+    result = client.put(
+        "/api/execution-budget/defaults",
+        json={"default_tokens": 200, "max_tokens": 100, "soft_limit_percent": 80},
+    )
+    assert result.status_code == 422
+    assert "default_tokens must not exceed max_tokens" in result.text
+
+
+def test_saved_admin_settings_replace_all_environment_defaults(
+    budget_client, monkeypatch
+):
+    client, user = budget_client
+    user.is_admin = True
+    saved = {"default_tokens": 120, "max_tokens": None, "soft_limit_percent": 70}
+    assert client.put("/api/execution-budget/defaults", json=saved).status_code == 200
+    monkeypatch.setenv("XAGENT_EXECUTION_BUDGET_DEFAULT_TOKENS", "50")
+    monkeypatch.setenv("XAGENT_EXECUTION_BUDGET_MAX_TOKENS", "80")
+    monkeypatch.setenv("XAGENT_EXECUTION_BUDGET_SOFT_PERCENT", "40")
+    assert client.get("/api/execution-budget/defaults").json() == saved
+    effective = client.get("/api/execution-budget/me").json()["effective"]
+    assert effective["max_tokens"] == 200

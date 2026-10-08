@@ -3769,3 +3769,12 @@ def test_execution_budget_env_defaults(monkeypatch):
     monkeypatch.setenv("XAGENT_EXECUTION_BUDGET_SOFT_PERCENT", "65")
     assert get_execution_budget_defaults()["default_tokens"] == 12345
     assert get_execution_budget_defaults()["soft_limit_percent"] == 65
+
+
+def test_execution_budget_env_default_cannot_exceed_maximum(monkeypatch):
+    from xagent.config import get_execution_budget_defaults
+
+    monkeypatch.setenv("XAGENT_EXECUTION_BUDGET_DEFAULT_TOKENS", "200")
+    monkeypatch.setenv("XAGENT_EXECUTION_BUDGET_MAX_TOKENS", "100")
+    with pytest.raises(ValueError, match="must not exceed"):
+        get_execution_budget_defaults()

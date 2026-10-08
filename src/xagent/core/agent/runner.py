@@ -34,6 +34,7 @@ from .budget import (
     ExecutionBudget,
     ExecutionBudgetPolicy,
     active_execution_budget,
+    budget_warning_handler,
     default_execution_budget_policy,
 )
 from .checkpoint import (
@@ -507,6 +508,7 @@ class AgentRunner:
         runtime.budget_owner = inherited_budget is None
         budget_token = None
         usage_token = None
+        warning_token = None
 
         try:
             if inherited_budget is None:
@@ -545,6 +547,10 @@ class AgentRunner:
                 context.execution_budget = budget.checkpoint_state()
                 budget_token = active_execution_budget.set(budget)
                 usage_token = token_usage_observer.set(budget.record_usage)
+                from .language import effective_output_language
+
+                runtime.budget_warning_language = effective_output_language(context)
+                warning_token = budget_warning_handler.set(runtime._send_budget_warning)
             await self._dispatch_callback(
                 "on_run_start",
                 runner=self,
@@ -768,6 +774,8 @@ class AgentRunner:
                 token_usage_observer.reset(usage_token)
             if budget_token is not None:
                 active_execution_budget.reset(budget_token)
+            if warning_token is not None:
+                budget_warning_handler.reset(warning_token)
 
     async def _finish_budget_stop(
         self,
@@ -807,6 +815,7 @@ class AgentRunner:
             f"- [{str(item.get('filename') or 'File').replace('[', '').replace(']', '')}]({build_file_id_ref(item['file_id'])})"
             for item in files
             if item.get("file_id")
+            and (budget is None or item.get("modified_time", 0) >= budget.started_at)
         ]
         if links:
             answer += (

@@ -45,7 +45,12 @@ from ..tools.user_interaction import (
     WAITING_FOR_USER_STATUS,
     tool_result_waits_for_user,
 )
-from .budget import active_execution_budget, budget_llm_kwargs
+from .budget import (
+    ExecutionBudget,
+    active_execution_budget,
+    budget_llm_kwargs,
+    budget_warning_handler,
+)
 from .checkpoint import (
     CheckpointPersistenceError,
     ExecutionEventPersistenceError,
@@ -341,6 +346,7 @@ class PatternRuntime:
     interrupt_reason: str | None = None
     budget_stopped: bool = False
     budget_owner: bool = False
+    budget_warning_language: str = ""
     last_checkpoint: dict[str, Any] | None = None
     checkpoints: list[dict[str, Any]] = field(default_factory=list)
     outbound_messages: list[dict[str, Any]] = field(default_factory=list)
@@ -414,23 +420,60 @@ class PatternRuntime:
         # Budget admission is separate from interruption polling: a response
         # already paid for may still be delivered, including a final answer
         # that crosses the limit. Only additional work is refused.
-        if await self.should_interrupt():
+        if await self.should_interrupt() or self._interrupt_requested:
             return True
         budget = active_execution_budget.get()
+        if (
+            budget is not None
+            and not budget.exhausted
+            and budget.soft_reached
+            and not budget.soft_notified
+        ):
+            await budget.notify(
+                budget_warning_handler.get() or self._send_budget_warning
+            )
+        # Notification delivery can yield while an explicit stop arrives or an
+        # admitted sibling reports usage. Recheck admission before starting work.
+        if self._interrupt_requested:
+            return True
         if budget is not None and budget.exhausted:
             self.budget_stopped = True
-            self.request_interrupt("Execution stopped at the token budget limit.")
+            self.interrupt_reason = "Execution stopped at the token budget limit."
             return True
-        if budget is not None and budget.soft_reached and not budget.soft_notified:
-            budget.soft_notified = True
+        return False
+
+    async def _send_budget_warning(self, budget: ExecutionBudget) -> bool:
+        """Best-effort user notification, separate from the model instruction."""
+        if self.outbound_message_handler is None:
+            return False
+        if "Traditional Chinese" in self.budget_warning_language:
+            message = (
+                f"本次執行已使用 {budget.used_tokens} / {budget.policy.max_tokens} tokens，"
+                "接近設定上限。達到上限後將停止新增呼叫，並保留已有結果。"
+            )
+        elif "Chinese" in self.budget_warning_language:
+            message = (
+                f"本次执行已使用 {budget.used_tokens} / {budget.policy.max_tokens} tokens，"
+                "接近设置上限。达到上限后将停止新增调用，并保留已有结果。"
+            )
+        else:
+            message = (
+                f"This execution has used {budget.used_tokens} of "
+                f"{budget.policy.max_tokens} tokens and is approaching its limit. "
+                "At the limit, new calls will stop and existing results will be retained."
+            )
+        try:
             await self.send_message(
-                message=budget.notice(),
+                message=message,
                 metadata={
                     "execution_budget": budget.model_dump(),
                     "kind": "budget_warning",
                 },
             )
-        return False
+        except Exception:
+            logger.warning("Could not deliver execution budget warning", exc_info=True)
+            return False
+        return True
 
     async def run_llm_call(self, llm: Any, **kwargs: Any) -> Any:
         """Run an LLM call as a cancellable subtask owned by this runtime."""
@@ -441,8 +484,7 @@ class PatternRuntime:
             resolver=self.context_ref_resolver,
         )
         # Setup may yield before a provider task exists for cancellation.
-        await self._before_work_call()
-        if self._interrupt_requested:
+        if await self._before_work_call():
             raise LLMCallInterrupted(
                 self.interrupt_reason or "interrupted before LLM call"
             )

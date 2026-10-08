@@ -969,6 +969,16 @@ def get_execution_budget_defaults() -> dict[str, int | None]:
         ):
             raise ValueError(f"Invalid {env_name}")
         values[key] = value
+    default_tokens, max_tokens = values["default_tokens"], values["max_tokens"]
+    if (
+        default_tokens is not None
+        and max_tokens is not None
+        and default_tokens > max_tokens
+    ):
+        raise ValueError(
+            f"{EXECUTION_BUDGET_DEFAULT_TOKENS} must not exceed "
+            f"{EXECUTION_BUDGET_MAX_TOKENS}"
+        )
     return values
 
 

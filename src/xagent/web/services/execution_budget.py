@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ...config import get_execution_budget_defaults
 from ...core.agent.budget import ExecutionBudgetPolicy
@@ -26,6 +26,16 @@ class ExecutionBudgetDefaults(BaseModel):
     default_tokens: int | None = Field(default=None, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
     soft_limit_percent: int = Field(default=80, ge=1, le=99)
+
+    @model_validator(mode="after")
+    def validate_default_within_maximum(self) -> ExecutionBudgetDefaults:
+        if (
+            self.default_tokens is not None
+            and self.max_tokens is not None
+            and self.default_tokens > self.max_tokens
+        ):
+            raise ValueError("default_tokens must not exceed max_tokens")
+        return self
 
 
 @dataclass(frozen=True)
@@ -56,6 +66,7 @@ def set_execution_budget_policy_resolver(resolver: BudgetPolicyResolver | None) 
 
 
 def load_budget_defaults(db: Any) -> ExecutionBudgetDefaults:
+    """Saved administrator settings replace environment defaults as a whole."""
     row = (
         db.query(SystemSetting).filter(SystemSetting.key == BUDGET_SETTINGS_KEY).first()
     )

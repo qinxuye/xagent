@@ -642,6 +642,12 @@ async def build_workforce_prompt_plan(
         raise WorkforcePromptBuilderUnavailableError(
             "The ReAct Workforce builder runtime is unavailable."
         ) from exc
+    if result.get("termination_reason") == "token_budget":
+        raise WorkforcePromptBuilderError(
+            "The Workforce builder reached its execution token budget. "
+            "Review Settings > Execution budget (including the administrator "
+            "maximum) before retrying, or reduce the requested work."
+        )
     if not result.get("success"):
         status = str(result.get("status") or "failed")
         error = str(result.get("error") or result.get("output") or "").strip()
