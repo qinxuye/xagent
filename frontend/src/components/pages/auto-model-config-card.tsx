@@ -34,7 +34,7 @@ import { Switch } from "@/components/ui/switch";
 import { toast } from "@/components/ui/sonner";
 import { useI18n } from "@/contexts/i18n-context";
 import { apiRequest } from "@/lib/api-wrapper";
-import { hostnameFromUrl } from "@/lib/models";
+import { getModelSourceLabel } from "@/lib/models";
 import { cn, getApiUrl } from "@/lib/utils";
 
 import type { Model } from "./models";
@@ -67,13 +67,8 @@ interface Props {
   onSuccess: () => Promise<void>;
 }
 
-function modelSource(model: Model): string {
-  const host = hostnameFromUrl(model.base_url);
-  return host ? `${host} (${model.model_provider})` : model.model_provider;
-}
-
 function modelLabel(model: Model): string {
-  return `${model.model_name} · ${modelSource(model)}`;
+  return `${model.model_name} · ${getModelSourceLabel(model)}`;
 }
 
 function normalizedValues(model: Model): string[] {
@@ -451,7 +446,7 @@ export function AutoModelConfigCard({
                   value: String(model.id),
                   label: model.model_name,
                   selectedLabel: modelLabel(model),
-                  description: modelSource(model),
+                  description: getModelSourceLabel(model),
                 }))}
                 searchable
                 placeholder={t("models.auto.selectModels")}
@@ -506,7 +501,7 @@ export function AutoModelConfigCard({
                             {model.model_name}
                           </div>
                           <div className="break-all text-xs text-muted-foreground">
-                            {modelSource(model)}
+                            {getModelSourceLabel(model)}
                           </div>
                         </div>
                       </div>
